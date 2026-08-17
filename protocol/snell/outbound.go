@@ -3,16 +3,19 @@ package snell
 import (
 	"context"
 	"net"
+	"net/netip"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/udpflow"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	snellprotocol "github.com/sagernet/sing-snell"
 	"github.com/sagernet/sing-snell/snellv4"
 	"github.com/sagernet/sing-snell/snellv6"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -30,9 +33,13 @@ type Outbound struct {
 	dialer     N.Dialer
 	client     snellClient
 	serverAddr M.Socksaddr
+	flowPort   *udpflow.Port
 }
 
-var _ adapter.InterfaceUpdateListener = (*Outbound)(nil)
+var (
+	_ adapter.FlowOutbound            = (*Outbound)(nil)
+	_ adapter.InterfaceUpdateListener = (*Outbound)(nil)
+)
 
 type snellClient interface {
 	snellprotocol.Method
@@ -93,6 +100,28 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		client:     client,
 		serverAddr: serverAddr,
 	}
+	if options.UDPFlow {
+		outbound.flowPort, err = udpflow.New(udpflow.Options{
+			Context: ctx,
+			Logger:  logger,
+			Name:    "Snell",
+			DialPacketConn: func(ctx context.Context, _ M.Socksaddr) (N.NetPacketConn, error) {
+				conn, dialErr := outboundDialer.DialContext(ctx, N.NetworkTCP, serverAddr)
+				if dialErr != nil {
+					return nil, dialErr
+				}
+				packetConn, dialErr := client.DialPacketConn(conn)
+				if dialErr != nil {
+					conn.Close()
+					return nil, dialErr
+				}
+				return packetConn, nil
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 	return outbound, nil
 }
 
@@ -139,10 +168,66 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	return packetConn, nil
 }
 
+func (h *Outbound) PreMatchFlow(network string, destination netip.Addr) adapter.PreMatchAction {
+	if h.flowPort != nil && N.NetworkName(network) == N.NetworkUDP {
+		return adapter.PreMatchFlow
+	}
+	return adapter.PreMatchContinue
+}
+
+func (h *Outbound) PortAddresses() (netip.Addr, netip.Addr) {
+	if h.flowPort == nil {
+		return netip.Addr{}, netip.Addr{}
+	}
+	return h.flowPort.PortAddresses()
+}
+
+func (h *Outbound) PortMTU() uint32 {
+	if h.flowPort == nil {
+		return 0
+	}
+	return h.flowPort.PortMTU()
+}
+
+func (h *Outbound) PortSelectorRange() (uint16, uint16) {
+	if h.flowPort == nil {
+		return 0, 0
+	}
+	return h.flowPort.PortSelectorRange()
+}
+
+func (h *Outbound) AttachReturn(returnPath tun.Return) error {
+	if h.flowPort == nil {
+		return E.New("snell: UDP flow port is disabled")
+	}
+	return h.flowPort.AttachReturn(returnPath)
+}
+
+func (h *Outbound) DetachReturn(returnPath tun.Return) error {
+	if h.flowPort == nil {
+		return nil
+	}
+	return h.flowPort.DetachReturn(returnPath)
+}
+
+func (h *Outbound) WritePackets(packets [][]byte) error {
+	if h.flowPort == nil {
+		return E.New("snell: UDP flow port is disabled")
+	}
+	return h.flowPort.WritePackets(packets)
+}
+
 func (h *Outbound) InterfaceUpdated(ctx context.Context) {
+	if h.flowPort != nil {
+		h.flowPort.Reset()
+	}
 	h.client.Reset()
 }
 
 func (h *Outbound) Close() error {
-	return h.client.Close()
+	var flowErr error
+	if h.flowPort != nil {
+		flowErr = h.flowPort.Close()
+	}
+	return E.Errors(flowErr, h.client.Close())
 }

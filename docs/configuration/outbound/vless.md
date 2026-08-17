@@ -12,6 +12,7 @@
   "network": "tcp",
   "tls": {},
   "packet_encoding": "",
+  "udp_flow": false,
   "multiplex": {},
   "transport": {},
 
@@ -68,6 +69,12 @@ UDP packet encoding, xudp is used by default.
 | (none)     | Disabled              |
 | packetaddr | Supported by v2ray 5+ |
 | xudp       | Supported by xray     |
+
+#### udp_flow
+
+Enable the experimental sing-tun UDP flow adapter. This makes each UDP five-tuple run through PreMatch/resolve/DNAT independently while reusing one XUDP connection per selector when possible.
+
+Requires `packet_encoding` to be `xudp` (the default) and cannot currently be combined with outbound `multiplex`. A `resolve` route action must run before routing Fake-IP UDP traffic to this outbound.
 
 #### multiplex
 

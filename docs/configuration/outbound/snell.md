@@ -17,6 +17,7 @@ icon: material/new-box
   "psk": "password",
   "userkey": "",
   "reuse": false,
+  "udp_flow": false,
   "network": "tcp",
   "obfs_mode": "",
   "obfs_host": "",
@@ -38,6 +39,7 @@ icon: material/new-box
   "psk": "password",
   "userkey": "",
   "reuse": false,
+  "udp_flow": false,
   "network": "tcp",
   "mode": "",
 
@@ -87,6 +89,10 @@ The user key, used to authenticate against a multi-user server.
 #### reuse
 
 Enable connection reuse (the Snell v2 `CONNECT` command).
+
+#### udp_flow
+
+Enable the experimental sing-tun UDP flow adapter. Each UDP five-tuple is independently resolved and DNATed, while selectors reuse one Snell UDP packet connection whenever possible. A `resolve` route action must run before routing Fake-IP UDP traffic to this outbound.
 
 #### network
 

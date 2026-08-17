@@ -12,6 +12,7 @@
   "network": "tcp",
   "tls": {},
   "packet_encoding": "",
+  "udp_flow": false,
   "multiplex": {},
   "transport": {},
   
@@ -68,6 +69,12 @@ UDP 包编码，默认使用 xudp。
 | (空)        | 禁用            |
 | packetaddr | 由 v2ray 5+ 支持 |
 | xudp       | 由 xray 支持     |
+
+#### udp_flow
+
+启用实验性的 sing-tun UDP Flow 适配器。它会让每个 UDP 五元组分别执行 PreMatch、解析与 DNAT，并在条件允许时让同一 selector 复用一条 XUDP 连接。
+
+要求 `packet_encoding` 为 `xudp`（默认值），且目前不能与出站 `multiplex` 同时启用。Fake-IP UDP 流量在路由到该出站前必须先经过 `resolve` 路由动作。
 
 #### multiplex
 

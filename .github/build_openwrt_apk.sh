@@ -27,10 +27,16 @@ fi
 PROJECT=$(cd "$(dirname "$0")/.."; pwd)
 
 # Convert version to APK format:
-#   1.13.0-beta.8  -> 1.13.0_beta8-r0
-#   1.13.0-rc.3    -> 1.13.0_rc3-r0
-#   1.13.0         -> 1.13.0-r0
-APK_VERSION=$(echo "$VERSION" | sed -E 's/-([a-z]+)\.([0-9]+)/_\1\2/')
+#   1.13.0-beta.8              -> 1.13.0_beta8-r0
+#   1.13.0-rc.3                -> 1.13.0_rc3-r0
+#   1.14.0-alpha.50-snellflow.2 -> 1.14.0_alpha50_p2-r0
+#   1.13.0                     -> 1.13.0-r0
+#
+# apk versions reserve a hyphen for the package revision (-rN).  Convert
+# the local Snell flow build suffix to Alpine's patch suffix (_pN).
+APK_VERSION=$(echo "$VERSION" | sed -E \
+  -e 's/-(alpha|beta|pre|rc)\.([0-9]+)/_\1\2/' \
+  -e 's/-snellflow\.([0-9]+)/_p\1/')
 APK_VERSION="${APK_VERSION}-r0"
 
 ROOT_DIR=$(mktemp -d)

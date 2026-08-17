@@ -24,4 +24,5 @@ type VLESSOutboundOptions struct {
 	Multiplex      *OutboundMultiplexOptions `json:"multiplex,omitempty"`
 	Transport      *V2RayTransportOptions    `json:"transport,omitempty"`
 	PacketEncoding *string                   `json:"packet_encoding,omitempty"`
+	UDPFlow        bool                      `json:"udp_flow,omitempty"`
 }

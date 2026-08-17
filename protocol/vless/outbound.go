@@ -3,16 +3,19 @@ package vless
 import (
 	"context"
 	"net"
+	"net/netip"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/common/udpflow"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/v2ray"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing-vmess/packetaddr"
 	"github.com/sagernet/sing-vmess/vless"
 	"github.com/sagernet/sing/common"
@@ -27,7 +30,11 @@ func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.VLESSOutboundOptions](registry, C.TypeVLESS, NewOutbound)
 }
 
-var _ adapter.OutboundWithMultiplex = (*Outbound)(nil)
+var (
+	_ adapter.FlowOutbound            = (*Outbound)(nil)
+	_ adapter.InterfaceUpdateListener = (*Outbound)(nil)
+	_ adapter.OutboundWithMultiplex   = (*Outbound)(nil)
+)
 
 type Outbound struct {
 	outbound.Adapter
@@ -41,6 +48,7 @@ type Outbound struct {
 	transport       adapter.V2RayClientTransport
 	packetAddr      bool
 	xudp            bool
+	flowPort        *udpflow.Port
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSOutboundOptions) (adapter.Outbound, error) {
@@ -88,6 +96,14 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			return nil, E.New("unknown packet encoding: ", *options.PacketEncoding)
 		}
 	}
+	if options.UDPFlow {
+		if !outbound.xudp {
+			return nil, E.New("vless: udp_flow requires packet_encoding xudp")
+		}
+		if common.PtrValueOrDefault(options.Multiplex).Enabled {
+			return nil, E.New("vless: udp_flow is incompatible with multiplex")
+		}
+	}
 	outbound.client, err = vless.NewClient(options.UUID, options.Flow, logger)
 	if err != nil {
 		return nil, err
@@ -95,6 +111,17 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	outbound.multiplexDialer, err = mux.NewClientWithOptions((*vlessDialer)(outbound), logger, common.PtrValueOrDefault(options.Multiplex))
 	if err != nil {
 		return nil, err
+	}
+	if options.UDPFlow {
+		outbound.flowPort, err = udpflow.New(udpflow.Options{
+			Context:        ctx,
+			Logger:         logger,
+			Name:           "VLESS XUDP",
+			DialPacketConn: outbound.dialXUDPFlowPacketConn,
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	return outbound, nil
 }
@@ -129,11 +156,63 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	}
 }
 
+func (h *Outbound) PreMatchFlow(network string, destination netip.Addr) adapter.PreMatchAction {
+	if h.flowPort != nil && N.NetworkName(network) == N.NetworkUDP {
+		return adapter.PreMatchFlow
+	}
+	return adapter.PreMatchContinue
+}
+
+func (h *Outbound) PortAddresses() (netip.Addr, netip.Addr) {
+	if h.flowPort == nil {
+		return netip.Addr{}, netip.Addr{}
+	}
+	return h.flowPort.PortAddresses()
+}
+
+func (h *Outbound) PortMTU() uint32 {
+	if h.flowPort == nil {
+		return 0
+	}
+	return h.flowPort.PortMTU()
+}
+
+func (h *Outbound) PortSelectorRange() (uint16, uint16) {
+	if h.flowPort == nil {
+		return 0, 0
+	}
+	return h.flowPort.PortSelectorRange()
+}
+
+func (h *Outbound) AttachReturn(returnPath tun.Return) error {
+	if h.flowPort == nil {
+		return E.New("vless: UDP flow port is disabled")
+	}
+	return h.flowPort.AttachReturn(returnPath)
+}
+
+func (h *Outbound) DetachReturn(returnPath tun.Return) error {
+	if h.flowPort == nil {
+		return nil
+	}
+	return h.flowPort.DetachReturn(returnPath)
+}
+
+func (h *Outbound) WritePackets(packets [][]byte) error {
+	if h.flowPort == nil {
+		return E.New("vless: UDP flow port is disabled")
+	}
+	return h.flowPort.WritePackets(packets)
+}
+
 func (h *Outbound) MultiplexEnabled() bool {
 	return h.multiplexDialer != nil
 }
 
 func (h *Outbound) InterfaceUpdated(ctx context.Context) {
+	if h.flowPort != nil {
+		h.flowPort.Reset()
+	}
 	if h.transport != nil {
 		h.transport.Close()
 	}
@@ -143,7 +222,38 @@ func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 }
 
 func (h *Outbound) Close() error {
-	return common.Close(common.PtrOrNil(h.multiplexDialer), h.transport)
+	var flowErr error
+	if h.flowPort != nil {
+		flowErr = h.flowPort.Close()
+	}
+	return E.Errors(flowErr, common.Close(common.PtrOrNil(h.multiplexDialer), h.transport))
+}
+
+func (h *Outbound) dialServerConnection(ctx context.Context) (net.Conn, error) {
+	if h.transport != nil {
+		return h.transport.DialContext(ctx)
+	}
+	if h.tlsDialer != nil {
+		return h.tlsDialer.DialTLSContext(ctx, h.serverAddr)
+	}
+	return h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
+}
+
+func (h *Outbound) dialXUDPFlowPacketConn(ctx context.Context, firstDestination M.Socksaddr) (N.NetPacketConn, error) {
+	ctx, metadata := adapter.ExtendContext(ctx)
+	metadata.Outbound = h.Tag()
+	metadata.Destination = firstDestination
+	h.logger.InfoContext(ctx, "outbound XUDP flow connection to ", firstDestination)
+	conn, err := h.dialServerConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	packetConn, err := h.client.DialEarlyXUDPPacketConn(conn, firstDestination)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return packetConn, nil
 }
 
 type vlessDialer Outbound
@@ -152,15 +262,7 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	ctx, metadata := adapter.ExtendContext(ctx)
 	metadata.Outbound = h.Tag()
 	metadata.Destination = destination
-	var conn net.Conn
-	var err error
-	if h.transport != nil {
-		conn, err = h.transport.DialContext(ctx)
-	} else if h.tlsDialer != nil {
-		conn, err = h.tlsDialer.DialTLSContext(ctx, h.serverAddr)
-	} else {
-		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
-	}
+	conn, err := (*Outbound)(h).dialServerConnection(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -194,15 +296,7 @@ func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	ctx, metadata := adapter.ExtendContext(ctx)
 	metadata.Outbound = h.Tag()
 	metadata.Destination = destination
-	var conn net.Conn
-	var err error
-	if h.transport != nil {
-		conn, err = h.transport.DialContext(ctx)
-	} else if h.tlsDialer != nil {
-		conn, err = h.tlsDialer.DialTLSContext(ctx, h.serverAddr)
-	} else {
-		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
-	}
+	conn, err := (*Outbound)(h).dialServerConnection(ctx)
 	if err != nil {
 		common.Close(conn)
 		return nil, err

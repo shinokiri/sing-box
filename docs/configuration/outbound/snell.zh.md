@@ -17,6 +17,7 @@ icon: material/new-box
   "psk": "password",
   "userkey": "",
   "reuse": false,
+  "udp_flow": false,
   "network": "tcp",
   "obfs_mode": "",
   "obfs_host": "",
@@ -38,6 +39,7 @@ icon: material/new-box
   "psk": "password",
   "userkey": "",
   "reuse": false,
+  "udp_flow": false,
   "network": "tcp",
   "mode": "",
 
@@ -86,6 +88,10 @@ Snell 协议版本，`4` `6` 之一。
 #### reuse
 
 启用连接复用（Snell v2 `CONNECT` 命令）。
+
+#### udp_flow
+
+启用实验性的 sing-tun UDP Flow 适配器。它会让每个 UDP 五元组分别解析并执行 DNAT，并在条件允许时让同一 selector 复用一条 Snell UDP packet connection。Fake-IP UDP 流量在路由到该出站前必须先经过 `resolve` 路由动作。
 
 #### network
 

@@ -80,6 +80,7 @@ type AbstractSnellOutboundOptions struct {
 	PSK     string      `json:"psk"`
 	UserKey string      `json:"userkey,omitempty"`
 	Reuse   bool        `json:"reuse,omitempty"`
+	UDPFlow bool        `json:"udp_flow,omitempty"`
 	Network NetworkList `json:"network,omitempty"`
 }
 

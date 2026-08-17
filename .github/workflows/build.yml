@@ -358,18 +358,13 @@ jobs:
         run: |
           set -xeuo pipefail
           sudo gem install fpm
-          sudo apt-get install -y debsigs
           cp .fpm_systemd .fpm
           fpm -t deb \
             -v "$PKG_VERSION" \
             -p "dist/sing-box_${{ needs.calculate_version.outputs.version }}_${{ matrix.os }}_${{ matrix.debian }}.deb" \
             --architecture ${{ matrix.debian }} \
             dist/sing-box=/usr/bin/sing-box
-          rm -rf $HOME/.gnupg
-          gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import <<EOF
-          ${{ secrets.GPG_KEY }}
-          EOF
-          debsigs --sign=origin -k ${{ secrets.GPG_KEY_ID }} --gpgopts '--pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}"' dist/*.deb
+          echo "::notice::Skipping DEB signing in fork build"
       - name: Package RPM
         if: matrix.rpm != ''
         run: |-
@@ -382,14 +377,7 @@ jobs:
             -p "dist/sing-box_${{ needs.calculate_version.outputs.version }}_${{ matrix.os }}_${{ matrix.rpm }}.rpm" \
             --architecture ${{ matrix.rpm }} \
             dist/sing-box=/usr/bin/sing-box
-          cat > $HOME/.rpmmacros <<EOF
-          %_gpg_name ${{ secrets.GPG_KEY_ID }}
-          %_gpg_sign_cmd_extra_args --pinentry-mode loopback --passphrase ${{ secrets.GPG_PASSPHRASE }}
-          EOF
-          gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import <<EOF
-          ${{ secrets.GPG_KEY }}
-          EOF
-          rpmsign --addsign dist/*.rpm
+          echo "::notice::Skipping RPM signing in fork build"
       - name: Package Pacman
         if: matrix.pacman != ''
         run: |-
@@ -798,7 +786,7 @@ jobs:
           cd clients/android
           git checkout main
       - name: Checkout dev branch
-        if: github.ref == 'refs/heads/testing'
+        if: github.ref == 'refs/heads/testing' || startsWith(github.ref, 'refs/heads/udpflow')
         run: |-
           cd clients/android
           git checkout dev
@@ -813,11 +801,24 @@ jobs:
       - name: Update version
         if: github.event_name == 'workflow_dispatch'
         run: |-
-          go run -v ./cmd/internal/update_android_version --ci
+          # Fork builds use an uncommitted custom version and may update the
+          # Android client's recorded Go version. Allow the helper to write
+          # version.properties instead of aborting with "commit changes first".
+          go run -v ./cmd/internal/update_android_version --ci --nightly
       - name: Update nightly version
         if: github.event_name != 'workflow_dispatch'
         run: |-
           go run -v ./cmd/internal/update_android_version --ci --nightly
+      - name: Install fork Android signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |-
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64"
+          printf '%s' "$KEYSTORE_BASE64" |
+            base64 --decode \
+              > clients/android/app/release.keystore
+          chmod 600 clients/android/app/release.keystore
       - name: Build
         run: |-
           mkdir -p clients/android/app/libs
@@ -847,7 +848,7 @@ jobs:
           path: 'dist'
   publish_android:
     name: Publish Android
-    if: github.event_name == 'workflow_dispatch' && inputs.build == 'publish-android' && (github.ref == 'refs/heads/stable' || github.ref == 'refs/heads/testing')
+    if: github.event_name == 'workflow_dispatch' && inputs.build == 'publish-android' && github.ref == 'refs/heads/stable'
     runs-on: ubuntu-latest
     needs:
       - calculate_version
@@ -906,7 +907,7 @@ jobs:
           cd clients/android
           git checkout main
       - name: Checkout dev branch
-        if: github.ref == 'refs/heads/testing'
+        if: github.ref == 'refs/heads/testing' || startsWith(github.ref, 'refs/heads/udpflow')
         run: |-
           cd clients/android
           git checkout dev
@@ -968,7 +969,7 @@ jobs:
         if: github.ref == 'refs/heads/stable' && github.event_name != 'workflow_dispatch'
         run: git -C clients/desktop checkout main
       - name: Checkout dev branch
-        if: github.ref == 'refs/heads/testing'
+        if: github.ref == 'refs/heads/testing' || startsWith(github.ref, 'refs/heads/udpflow')
         run: git -C clients/desktop checkout dev
       - name: Checkout desktop submodules
         run: git -C clients/desktop submodule update --init --recursive
@@ -1080,7 +1081,7 @@ jobs:
         if: github.ref == 'refs/heads/stable' && github.event_name != 'workflow_dispatch'
         run: git -C clients/desktop checkout main
       - name: Checkout dev branch
-        if: github.ref == 'refs/heads/testing'
+        if: github.ref == 'refs/heads/testing' || startsWith(github.ref, 'refs/heads/udpflow')
         run: git -C clients/desktop checkout dev
       - name: Checkout desktop submodules
         run: git -C clients/desktop submodule update --init --recursive
@@ -1354,7 +1355,7 @@ jobs:
           cd clients/apple
           git checkout main
       - name: Checkout dev branch
-        if: matrix.if && github.ref == 'refs/heads/testing'
+        if: matrix.if && (github.ref == 'refs/heads/testing' || startsWith(github.ref, 'refs/heads/udpflow'))
         run: |-
           cd clients/apple
           git checkout dev
