@@ -166,6 +166,13 @@ artifacts. These push builds do not run release publishing, other platforms, or
 repository-wide cache cleanup. Manual Build selections retain their existing
 behavior.
 
+Android builds on `udpflow` use the recorded `clients/android` submodule commit
+(`b7bf31b6e553b30ab69a90a1769f9273cb25f089`, the 1.14.0 client with its default
+interface notification fix). Do not replace it with a moving `dev` checkout:
+the 1.15 development client requires libbox APIs absent from this branch.
+APK metadata records both the core and Android client commits so each artifact
+can be traced to its sources.
+
 ## Target base
 
 Prepared from the uploaded `sing-box-snell-udp-flow` snapshot whose archive

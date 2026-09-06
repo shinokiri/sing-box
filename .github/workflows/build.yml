@@ -790,7 +790,8 @@ jobs:
           cd clients/android
           git checkout main
       - name: Checkout dev branch
-        if: github.ref == 'refs/heads/testing' || startsWith(github.ref, 'refs/heads/udpflow')
+        # udpflow uses the recorded client commit, paired with its libbox API.
+        if: github.ref == 'refs/heads/testing'
         run: |-
           cd clients/android
           git checkout dev
@@ -841,7 +842,9 @@ jobs:
           cat > dist/SFA-version-metadata.json << EOF
           {
             "version_code": ${VERSION_CODE},
-            "version_name": "${VERSION_NAME}"
+            "version_name": "${VERSION_NAME}",
+            "core_commit": "${{ github.sha }}",
+            "android_client_commit": "$(git -C clients/android rev-parse HEAD)"
           }
           EOF
           cat dist/SFA-version-metadata.json
