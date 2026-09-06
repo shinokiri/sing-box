@@ -127,13 +127,55 @@ func TestPortDialTimeout(t *testing.T) {
 	canceled := make(chan error, 1)
 	port, err := New(Options{DialTimeout: 20 * time.Millisecond, DialPacketConn: func(ctx context.Context, _ M.Socksaddr) (N.NetPacketConn, error) {
 		<-ctx.Done()
-		canceled <- ctx.Err()
+		canceled <- context.Cause(ctx)
 		return nil, ctx.Err()
 	}})
 	require.NoError(t, err)
 	defer port.Close()
 	require.NoError(t, port.WritePackets([][]byte{testPortPacket(t, 50000, "query")}))
 	require.ErrorIs(t, receiveTestValue(t, canceled), context.DeadlineExceeded)
+}
+
+// HTTP/2 and gRPC transports retain the factory context for the lifetime of
+// their streams. A completed dial must outlive its setup timeout, while flow
+// shutdown must still cancel the context and release the stream.
+func TestPortKeepsDialContextUntilFlowCloses(t *testing.T) {
+	for _, action := range []string{"close", "reset", "parent"} {
+		t.Run(action, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			contexts := make(chan context.Context, 1)
+			conn := newChannelPacketConn()
+			const dialTimeout = 100 * time.Millisecond
+			port, err := New(Options{Context: ctx, DialTimeout: dialTimeout, DialPacketConn: func(ctx context.Context, _ M.Socksaddr) (N.NetPacketConn, error) {
+				contexts <- ctx
+				return conn, nil
+			}})
+			require.NoError(t, err)
+			defer port.Close()
+			packet := testPortPacket(t, 50000, "query")
+			require.NoError(t, port.WritePackets([][]byte{packet}))
+			dialCtx := receiveTestValue(t, contexts)
+			receiveTestValue(t, conn.sent)
+			select {
+			case <-dialCtx.Done():
+				t.Fatalf("successful dial canceled a live stream: %v", dialCtx.Err())
+			case <-time.After(2 * dialTimeout):
+			}
+			require.NoError(t, port.WritePackets([][]byte{packet}))
+			receiveTestValue(t, conn.sent)
+			switch action {
+			case "close":
+				require.NoError(t, port.Close())
+			case "reset":
+				port.Reset()
+			case "parent":
+				cancel()
+			}
+			receiveTestValue(t, dialCtx.Done())
+			receiveTestValue(t, conn.closed)
+		})
+	}
 }
 
 type blockedWritePacketConn struct {

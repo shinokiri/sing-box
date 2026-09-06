@@ -9,6 +9,12 @@ on:
       - "option/vless.go"
       - "protocol/snell/**"
       - "protocol/vless/**"
+      - "transport/v2ray/**"
+      - "transport/v2raygrpc/**"
+      - "transport/v2raygrpclite/**"
+      - "transport/v2rayhttp/**"
+      - "release/DEFAULT_BUILD_TAGS_OTHERS"
+      - "release/LDFLAGS"
       - ".github/workflows/verify-snell-udp-flow.yml"
       - "go.mod"
       - "go.sum"
@@ -19,6 +25,12 @@ on:
       - "option/vless.go"
       - "protocol/snell/**"
       - "protocol/vless/**"
+      - "transport/v2ray/**"
+      - "transport/v2raygrpc/**"
+      - "transport/v2raygrpclite/**"
+      - "transport/v2rayhttp/**"
+      - "release/DEFAULT_BUILD_TAGS_OTHERS"
+      - "release/LDFLAGS"
       - ".github/workflows/verify-snell-udp-flow.yml"
       - "go.mod"
       - "go.sum"
@@ -49,19 +61,21 @@ jobs:
           cache: true
 
       - name: Test UDP flow adapters with race detection
-        run: go test -race -count=1 ./common/udpflow ./protocol/snell ./protocol/vless
+        run: go test -race -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2raygrpclite ./transport/v2rayhttp
 
-      - name: Test with gVisor enabled
-        run: go test -tags with_gvisor -count=1 ./common/udpflow ./protocol/snell ./protocol/vless
+      - name: Test with gVisor and full gRPC enabled
+        run: go test -race -tags with_gvisor,with_grpc -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2raygrpclite ./transport/v2rayhttp
 
-      - name: Build Linux amd64
+      - name: Build Linux amd64 with release features (without Naive)
         env:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: amd64
         run: |
           mkdir -p dist
-          go build -trimpath -o dist/sing-box-linux-amd64 ./cmd/sing-box
+          go build -trimpath -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=udpflow-${GITHUB_SHA::7} $(cat release/LDFLAGS) -s -w -buildid=" \
+            -o dist/sing-box-linux-amd64 ./cmd/sing-box
           ./dist/sing-box-linux-amd64 version
 
       - name: Upload binary

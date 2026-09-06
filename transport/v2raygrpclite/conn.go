@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing/common"
@@ -28,6 +29,8 @@ type GunConn struct {
 	create        chan struct{}
 	err           error
 	readRemaining int
+	setupAccess   sync.Mutex
+	closed        bool
 }
 
 func newGunConn(reader io.Reader, writer io.Writer, flusher http.Flusher) *GunConn {
@@ -47,12 +50,19 @@ func newLateGunConn(writer io.Writer) *GunConn {
 }
 
 func (c *GunConn) setup(reader io.Reader, err error) {
+	c.setupAccess.Lock()
+	if c.closed {
+		c.setupAccess.Unlock()
+		common.Close(reader)
+		return
+	}
 	if reader != nil {
 		c.rawReader = reader
 		c.reader = std_bufio.NewReader(reader)
 	}
 	c.err = err
 	close(c.create)
+	c.setupAccess.Unlock()
 }
 
 func (c *GunConn) Read(b []byte) (n int, err error) {
@@ -61,7 +71,7 @@ func (c *GunConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *GunConn) read(b []byte) (n int, err error) {
-	if c.reader == nil {
+	if c.create != nil {
 		<-c.create
 		if c.err != nil {
 			return 0, c.err
@@ -141,7 +151,23 @@ func (c *GunConn) FrontHeadroom() int {
 }
 
 func (c *GunConn) Close() error {
-	return common.Close(c.rawReader, c.writer)
+	c.setupAccess.Lock()
+	if c.closed {
+		c.setupAccess.Unlock()
+		return nil
+	}
+	c.closed = true
+	if c.create != nil {
+		select {
+		case <-c.create:
+		default:
+			c.err = net.ErrClosed
+			close(c.create)
+		}
+	}
+	reader := c.rawReader
+	c.setupAccess.Unlock()
+	return common.Close(reader, c.writer)
 }
 
 func (c *GunConn) LocalAddr() net.Addr {

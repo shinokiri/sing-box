@@ -31,7 +31,9 @@ var nextPortID atomic.Uint64
 // PacketConnFactory creates one multi-destination packet connection for a
 // selector. firstDestination can be used by protocols whose initial request
 // frame requires a destination, such as VLESS XUDP. The factory must honor ctx
-// cancellation, including while writing any initial handshake.
+// cancellation, including while writing any initial handshake. After a
+// successful dial, ctx remains valid until the flow closes so transports may
+// use it for the lifetime of their streams.
 type PacketConnFactory func(ctx context.Context, firstDestination M.Socksaddr) (N.NetPacketConn, error)
 
 type Options struct {
@@ -286,13 +288,20 @@ func (f *flow) run() {
 		}
 	}()
 
-	dialCtx, cancel := context.WithTimeout(f.ctx, f.port.dialTimeout)
+	// HTTP/2 and gRPC keep the dial context on their established streams.
+	// Stop only the setup timer on success; cancel the context on flow exit.
+	dialCtx, cancel := context.WithCancelCause(f.ctx)
+	defer cancel(nil)
+	dialTimer := time.AfterFunc(f.port.dialTimeout, func() { cancel(context.DeadlineExceeded) })
 	packetConn, err := f.port.dialPacketConn(dialCtx, f.firstDestination)
+	if !dialTimer.Stop() {
+		// The callback may have started without canceling the context yet.
+		cancel(context.DeadlineExceeded)
+	}
 	if err == nil && dialCtx.Err() != nil {
 		packetConn.Close()
-		err = dialCtx.Err()
+		err = context.Cause(dialCtx)
 	}
-	cancel()
 	if err != nil {
 		f.logError("dial", err)
 		return

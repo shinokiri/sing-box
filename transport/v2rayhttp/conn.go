@@ -130,10 +130,12 @@ func (c *HTTPConn) Upstream() any {
 }
 
 type HTTP2Conn struct {
-	reader io.Reader
-	writer io.Writer
-	create chan struct{}
-	err    error
+	reader      io.Reader
+	writer      io.Writer
+	create      chan struct{}
+	err         error
+	setupAccess sync.Mutex
+	closed      bool
 }
 
 func NewHTTPConn(reader io.Reader, writer io.Writer) HTTP2Conn {
@@ -151,13 +153,20 @@ func NewLateHTTPConn(writer io.Writer) *HTTP2Conn {
 }
 
 func (c *HTTP2Conn) Setup(reader io.Reader, err error) {
+	c.setupAccess.Lock()
+	if c.closed {
+		c.setupAccess.Unlock()
+		common.Close(reader)
+		return
+	}
 	c.reader = reader
 	c.err = err
 	close(c.create)
+	c.setupAccess.Unlock()
 }
 
 func (c *HTTP2Conn) Read(b []byte) (n int, err error) {
-	if c.reader == nil {
+	if c.create != nil {
 		<-c.create
 		if c.err != nil {
 			return 0, c.err
@@ -173,7 +182,23 @@ func (c *HTTP2Conn) Write(b []byte) (n int, err error) {
 }
 
 func (c *HTTP2Conn) Close() error {
-	return common.Close(c.reader, c.writer)
+	c.setupAccess.Lock()
+	if c.closed {
+		c.setupAccess.Unlock()
+		return nil
+	}
+	c.closed = true
+	if c.create != nil {
+		select {
+		case <-c.create:
+		default:
+			c.err = net.ErrClosed
+			close(c.create)
+		}
+	}
+	reader := c.reader
+	c.setupAccess.Unlock()
+	return common.Close(reader, c.writer)
 }
 
 func (c *HTTP2Conn) LocalAddr() net.Addr {

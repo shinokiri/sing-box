@@ -116,6 +116,8 @@ flow rather than leaking the Fake-IP.
   closes the association, including when the protocol is awaiting a handshake
   reply inside its write method. Later packets can create a fresh association;
   failed or queued packets on the old association are not replayed.
+  Successful setup stops the dial timer without canceling the stream context,
+  so HTTP/2 and gRPC associations remain usable until flow shutdown.
 - UDP packet connections are kept per selector and swept after five minutes of
   inactivity. Network reset, inbound detach, parent context cancellation, and
   outbound close cancel pending dials and close active connections. Detach also
@@ -132,11 +134,14 @@ unshaped, and unsafe-raw), and VLESS/XUDP servers exercise multi-destination
 IPv4/IPv6 exchanges over one association. Other tests cover buffer ownership,
 queue limits, cancel/timeout cleanup, failed-association replacement, late
 replies after detach, and cancellation of the VLESS initial request.
+VLESS/gRPC is also tested through the real outbound factory and transport.
+Transport regressions cover concurrent response initialization and reads, and
+closing before a response arrives without leaking its late response body.
 
 ```sh
-go test -race -count=1 ./common/udpflow ./protocol/snell ./protocol/vless
-go test -tags with_gvisor -count=1 ./common/udpflow ./protocol/snell ./protocol/vless
-go build -trimpath ./cmd/sing-box
+go test -race -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2raygrpclite ./transport/v2rayhttp
+go test -race -tags with_gvisor,with_grpc -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2raygrpclite ./transport/v2rayhttp
+CGO_ENABLED=0 go build -trimpath -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS) -s -w -buildid=" ./cmd/sing-box
 ```
 
 These checks do not replace tests using a real TUN device and the deployed
@@ -146,7 +151,9 @@ proxy server, particularly when assessing public UDP mapping/filtering.
 
 The included `.github/workflows/verify-snell-udp-flow.yml` runs on relevant
 pushes and pull requests with Go 1.25 and 1.26. It runs the race and gVisor checks
-above, then creates a Linux amd64 artifact for each Go version. Run the
+above, then creates a Linux amd64 artifact with the repository's non-Naive
+release feature tags for each Go version. This does not build the Android
+libbox libraries or APKs. Run the
 repository's normal multi-platform build workflow after this focused workflow
 succeeds.
 
