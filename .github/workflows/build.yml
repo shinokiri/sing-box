@@ -669,11 +669,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go_arch:
-          - "386"
-          - amd64
-          - arm
-          - arm64
+        go_arch: ${{ fromJSON(github.ref == 'refs/heads/udpflow' && '["arm64"]' || '["386","amd64","arm","arm64"]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
@@ -708,11 +704,15 @@ jobs:
         run: |-
           make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
-          go run ./cmd/internal/build_libbox -target android -platform android/${{ matrix.go_arch }}
+          go run ./cmd/internal/build_libbox -target android -platform android/${{ matrix.go_arch }} -android-legacy="$ANDROID_LEGACY"
           mkdir -p dist/${{ matrix.go_arch }}
-          mv libbox.aar libbox-legacy.aar dist/${{ matrix.go_arch }}
+          mv libbox.aar dist/${{ matrix.go_arch }}
+          if [[ "$ANDROID_LEGACY" == true ]]; then
+            mv libbox-legacy.aar dist/${{ matrix.go_arch }}
+          fi
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_LEGACY: ${{ github.ref != 'refs/heads/udpflow' }}
       - name: Upload library
         uses: actions/upload-artifact@v4
         with:
@@ -726,16 +726,13 @@ jobs:
     needs:
       - calculate_version
       - build_android_library
+    env:
+      ANDROID_GRADLE_TASK: ${{ matrix.variant == 'other' && ':app:assembleOtherRelease' || ':app:assembleOtherLegacyRelease' }}
+      ANDROID_APK_DIR: ${{ matrix.variant == 'other' && 'clients/android/app/build/outputs/apk/other/release' || 'clients/android/app/build/outputs/apk/otherLegacy/release' }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - variant: other
-            task: :app:assembleOtherRelease
-            output: app/build/outputs/apk/other/release/*.apk
-          - variant: other-legacy
-            task: :app:assembleOtherLegacyRelease
-            output: app/build/outputs/apk/otherLegacy/release/*.apk
+        variant: ${{ fromJSON(github.ref == 'refs/heads/udpflow' && '["other"]' || '["other","other-legacy"]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
@@ -780,7 +777,11 @@ jobs:
           pattern: libbox-android-*
           path: libbox-inputs
           merge-multiple: true
+      - name: Select ARM64 library
+        if: github.ref == 'refs/heads/udpflow'
+        run: cp libbox-inputs/arm64/libbox.aar libbox.aar
       - name: Merge libraries
+        if: github.ref != 'refs/heads/udpflow'
         run: |-
           go run ./cmd/internal/merge_aar -output libbox.aar libbox-inputs/*/libbox.aar
           go run ./cmd/internal/merge_aar -output libbox-legacy.aar libbox-inputs/*/libbox-legacy.aar
@@ -829,14 +830,41 @@ jobs:
           mkdir -p clients/android/app/libs
           cp *.aar clients/android/app/libs
           cd clients/android
-          ./gradlew --build-cache --parallel ${{ matrix.task }}
+          gradle_args=(--build-cache --parallel)
+          if [[ -n "$GRADLE_INIT_SCRIPT" ]]; then
+            gradle_args+=(--init-script "$GRADLE_INIT_SCRIPT")
+          fi
+          ./gradlew "${gradle_args[@]}" "$ANDROID_GRADLE_TASK"
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+          GRADLE_INIT_SCRIPT: ${{ github.ref == 'refs/heads/udpflow' && '../../.github/android-arm64.init.gradle' || '' }}
+      - name: Verify ARM64 APK
+        if: github.ref == 'refs/heads/udpflow'
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          apks = list(Path(os.environ["ANDROID_APK_DIR"]).glob("*.apk"))
+          if len(apks) != 1:
+              raise SystemExit(f"Expected one ARM64 APK, found {apks}")
+          with ZipFile(apks[0]) as apk:
+              entries = apk.namelist()
+              abis = {name.split("/")[1] for name in entries if name.startswith("lib/") and name.endswith(".so")}
+              if abis != {"arm64-v8a"} or "lib/arm64-v8a/libbox.so" not in entries:
+                  raise SystemExit(f"Unexpected APK native libraries: {sorted(abis)}")
+          sdk = Path(os.environ.get("ANDROID_HOME") or os.environ["ANDROID_SDK_ROOT"])
+          signer = max(sdk.glob("build-tools/*/apksigner"), key=lambda path: path.parent.name)
+          subprocess.run([str(signer), "verify", "--verbose", str(apks[0])], check=True)
+          print(f"Verified {apks[0].name}: one APK, ARM64 only, libbox present")
+          PY
       - name: Prepare upload
         run: |-
           mkdir -p dist
-          cp clients/android/${{ matrix.output }} dist
+          cp "$ANDROID_APK_DIR"/*.apk dist
           VERSION_CODE=$(grep VERSION_CODE clients/android/version.properties | cut -d= -f2)
           VERSION_NAME=$(grep VERSION_NAME clients/android/version.properties | cut -d= -f2)
           cat > dist/SFA-version-metadata.json << EOF
@@ -851,7 +879,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: binary-android-apks-${{ matrix.variant }}
+          name: ${{ github.ref == 'refs/heads/udpflow' && 'binary-android-arm64' || format('binary-android-apks-{0}', matrix.variant) }}
           path: 'dist'
   publish_android:
     name: Publish Android

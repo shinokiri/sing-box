@@ -1,0 +1,10 @@
+// Limit this invocation to one ARM64 APK, including native dependencies.
+gradle.beforeProject { project ->
+    project.pluginManager.withPlugin("com.android.application") {
+        project.extensions.getByName("androidComponents").finalizeDsl { android ->
+            android.splits.abi.setEnable(false)
+            android.defaultConfig.ndk.abiFilters.clear()
+            android.defaultConfig.ndk.abiFilters.add("arm64-v8a")
+        }
+    }
+}

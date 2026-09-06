@@ -160,12 +160,19 @@ above, then creates a Linux amd64 artifact with the repository's non-Naive
 release feature tags for each Go version.
 
 Pushes to `udpflow` also run the existing `Build` workflow's Android jobs with
-Go 1.26.7, NDK r28, and JDK 17. They build all four libbox architectures and the
-`other` / `other-legacy` APK variants with the fork's existing signing settings.
-The version is `1.14.0-udpflow.g<commit>`, and APKs are uploaded as Actions
-artifacts. These push builds do not run release publishing, other platforms, or
-repository-wide cache cleanup. Manual Build selections retain their existing
-behavior.
+Go 1.26.7, NDK r28, and JDK 17. Android builds on this branch, including manual
+Build selections, compile only ARM64 and the modern API 24 library with Naive.
+They use `build_libbox -target android -platform android/arm64
+-android-legacy=false` and package one signed `other` APK. The Gradle init script
+disables ABI splits and filters all native dependencies to `arm64-v8a`; CI
+checks that exactly one APK contains only that ABI and includes libbox.
+It also verifies the built APK's signature with `apksigner` before uploading.
+
+The push-build version is `1.14.0-udpflow.g<commit>`, and the APK is uploaded as
+the `binary-android-arm64` Actions artifact. No legacy API 21 library, legacy
+APK, other Android architecture, or universal APK is built for `udpflow`.
+These push builds do not run release publishing, other platforms, or
+repository-wide cache cleanup.
 
 Android builds on `udpflow` use the recorded `clients/android` submodule commit
 (`b7bf31b6e553b30ab69a90a1769f9273cb25f089`, the 1.14.0 client with its default
