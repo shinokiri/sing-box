@@ -152,10 +152,15 @@ proxy server, particularly when assessing public UDP mapping/filtering.
 The included `.github/workflows/verify-snell-udp-flow.yml` runs on relevant
 pushes and pull requests with Go 1.25 and 1.26. It runs the race and gVisor checks
 above, then creates a Linux amd64 artifact with the repository's non-Naive
-release feature tags for each Go version. This does not build the Android
-libbox libraries or APKs. Run the
-repository's normal multi-platform build workflow after this focused workflow
-succeeds.
+release feature tags for each Go version.
+
+Pushes to `udpflow` also run the existing `Build` workflow's Android jobs with
+Go 1.26.7, NDK r28, and JDK 17. They build all four libbox architectures and the
+`other` / `other-legacy` APK variants with the fork's existing signing settings.
+The version is `1.14.0-udpflow.g<commit>`, and APKs are uploaded as Actions
+artifacts. These push builds do not run release publishing, other platforms, or
+repository-wide cache cleanup. Manual Build selections retain their existing
+behavior.
 
 ## Target base
 
