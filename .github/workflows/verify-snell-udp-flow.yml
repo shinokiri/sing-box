@@ -13,6 +13,9 @@ on:
       - "transport/v2raygrpc/**"
       - "transport/v2raygrpclite/**"
       - "transport/v2rayhttp/**"
+      - "transport/v2rayhttpupgrade/**"
+      - "transport/v2rayquic/**"
+      - "transport/v2raywebsocket/**"
       - "release/DEFAULT_BUILD_TAGS_OTHERS"
       - "release/LDFLAGS"
       - ".github/workflows/verify-snell-udp-flow.yml"
@@ -29,6 +32,9 @@ on:
       - "transport/v2raygrpc/**"
       - "transport/v2raygrpclite/**"
       - "transport/v2rayhttp/**"
+      - "transport/v2rayhttpupgrade/**"
+      - "transport/v2rayquic/**"
+      - "transport/v2raywebsocket/**"
       - "release/DEFAULT_BUILD_TAGS_OTHERS"
       - "release/LDFLAGS"
       - ".github/workflows/verify-snell-udp-flow.yml"
@@ -61,10 +67,10 @@ jobs:
           cache: true
 
       - name: Test UDP flow adapters with race detection
-        run: go test -race -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2raygrpclite ./transport/v2rayhttp
+        run: go test -race -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raygrpclite ./transport/v2rayhttp
 
-      - name: Test with gVisor and full gRPC enabled
-        run: go test -race -tags with_gvisor,with_grpc -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2raygrpclite ./transport/v2rayhttp
+      - name: Test with gVisor, full gRPC, and QUIC enabled
+        run: go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic
 
       - name: Build Linux amd64 with release features (without Naive)
         env:

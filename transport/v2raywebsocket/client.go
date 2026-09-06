@@ -81,6 +81,8 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	if c.maxEarlyData > 0 {
 		return &EarlyWebsocketConn{Client: c, rawConn: conn, create: make(chan struct{})}, nil
 	}
+	stopCancel := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopCancel()
 	websocketConn, err := c.upgrade(conn, &c.requestURL, c.headers)
 	if err != nil {
 		return nil, err
@@ -99,6 +101,7 @@ func (c *Client) upgrade(conn net.Conn, requestURL *url.URL, headers http.Header
 	var protocols []string
 	if protocolHeader := headers.Get("Sec-WebSocket-Protocol"); protocolHeader != "" {
 		protocols = []string{protocolHeader}
+		headers = headers.Clone()
 		headers.Del("Sec-WebSocket-Protocol")
 	}
 	reader, _, err := ws.Dialer{Header: ws.HandshakeHeaderHTTP(headers), Protocols: protocols}.Upgrade(deadlineConn, requestURL)

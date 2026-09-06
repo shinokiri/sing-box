@@ -5,7 +5,6 @@ package v2rayquic
 import (
 	"context"
 	"net"
-	"sync"
 
 	"github.com/sagernet/quic-go"
 	"github.com/sagernet/quic-go/http3"
@@ -17,6 +16,8 @@ import (
 	"github.com/sagernet/sing/common"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+
+	"golang.org/x/sync/semaphore"
 )
 
 var _ adapter.V2RayClientTransport = (*Client)(nil)
@@ -27,7 +28,7 @@ type Client struct {
 	serverAddr M.Socksaddr
 	tlsConfig  tls.Config
 	quicConfig *quic.Config
-	connAccess sync.Mutex
+	connAccess *semaphore.Weighted
 	conn       common.TypedValue[*quic.Conn]
 	rawConn    net.Conn
 }
@@ -45,33 +46,41 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		serverAddr: serverAddr,
 		tlsConfig:  tlsConfig,
 		quicConfig: quicConfig,
+		connAccess: semaphore.NewWeighted(1),
 	}, nil
 }
 
-func (c *Client) offer() (*quic.Conn, error) {
+func (c *Client) offer(ctx context.Context) (*quic.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	conn := c.conn.Load()
 	if conn != nil && !common.Done(conn.Context()) {
 		return conn, nil
 	}
-	c.connAccess.Lock()
-	defer c.connAccess.Unlock()
+	// Waiting for another selector's handshake must honor this caller's
+	// cancellation just as dialing a new connection does.
+	if err := c.connAccess.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	defer c.connAccess.Release(1)
 	conn = c.conn.Load()
 	if conn != nil && !common.Done(conn.Context()) {
 		return conn, nil
 	}
-	conn, err := c.offerNew()
+	conn, err := c.offerNew(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return conn, nil
 }
 
-func (c *Client) offerNew() (*quic.Conn, error) {
-	udpConn, err := c.dialer.DialContext(c.ctx, "udp", c.serverAddr)
+func (c *Client) offerNew(ctx context.Context) (*quic.Conn, error) {
+	udpConn, err := c.dialer.DialContext(ctx, "udp", c.serverAddr)
 	if err != nil {
 		return nil, err
 	}
-	quicConn, err := qtls.Dial(c.ctx, udpConn, c.tlsConfig, c.quicConfig)
+	quicConn, err := qtls.Dial(ctx, udpConn, c.tlsConfig, c.quicConfig)
 	if err != nil {
 		udpConn.Close()
 		return nil, err
@@ -88,7 +97,13 @@ func (c *Client) offerNew() (*quic.Conn, error) {
 }
 
 func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
-	conn, err := c.offer()
+	ctx, cancel := context.WithCancel(ctx)
+	stopCancel := context.AfterFunc(c.ctx, cancel)
+	defer stopCancel()
+	defer cancel()
+	// QUIC detaches its established connection from the handshake context;
+	// canceling this call must not terminate other streams using it.
+	conn, err := c.offer(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -100,8 +115,10 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 }
 
 func (c *Client) Close() error {
-	c.connAccess.Lock()
-	defer c.connAccess.Unlock()
+	if err := c.connAccess.Acquire(context.Background(), 1); err != nil {
+		return err
+	}
+	defer c.connAccess.Release(1)
 	conn := c.conn.Swap(nil)
 	if conn != nil {
 		conn.CloseWithError(0, "")

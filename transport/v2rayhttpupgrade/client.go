@@ -77,6 +77,9 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	rawConn := conn
+	stopCancel := context.AfterFunc(ctx, func() { rawConn.Close() })
+	defer stopCancel()
 	request := &http.Request{
 		Method: http.MethodGet,
 		URL:    &c.requestURL,
