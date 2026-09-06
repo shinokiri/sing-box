@@ -74,11 +74,15 @@ func skipUDPIPv6ExtensionHeaders(protocol uint8, payload []byte) (uint8, []byte,
 	}
 }
 
-func buildUDPResponse(headroom int, source M.Socksaddr, selector uint16, payload []byte) ([]byte, error) {
+func buildUDPResponse(headroom int, source M.Socksaddr, destination netip.AddrPort, payload []byte) ([]byte, error) {
 	source = source.Unwrap()
 	sourceAddr := source.Addr.Unmap()
 	if !sourceAddr.IsValid() || source.Port == 0 {
 		return nil, E.New("invalid UDP response source: ", source)
+	}
+	destinationAddr := destination.Addr().Unmap()
+	if !destinationAddr.IsValid() || destinationAddr.Is4() != sourceAddr.Is4() || destination.Port() == 0 {
+		return nil, E.New("invalid UDP response destination: ", destination)
 	}
 	udpLength := header.UDPMinimumSize + len(payload)
 	if udpLength > math.MaxUint16 {
@@ -101,7 +105,7 @@ func buildUDPResponse(headroom int, source M.Socksaddr, selector uint16, payload
 			TTL:         udpFlowHopLimit,
 			Protocol:    uint8(header.UDPProtocolNumber),
 			SrcAddr:     sourceAddr,
-			DstAddr:     netip.IPv4Unspecified(),
+			DstAddr:     destinationAddr,
 		})
 		udpHdr = header.UDP(inet4Hdr.Payload())
 		ipHdr = inet4Hdr
@@ -113,14 +117,14 @@ func buildUDPResponse(headroom int, source M.Socksaddr, selector uint16, payload
 			TransportProtocol: header.UDPProtocolNumber,
 			HopLimit:          udpFlowHopLimit,
 			SrcAddr:           sourceAddr,
-			DstAddr:           netip.IPv6Unspecified(),
+			DstAddr:           destinationAddr,
 		})
 		udpHdr = header.UDP(inet6Hdr.Payload())
 		ipHdr = inet6Hdr
 	}
 	udpHdr.Encode(&header.UDPFields{
 		SrcPort: source.Port,
-		DstPort: selector,
+		DstPort: destination.Port(),
 		Length:  uint16(udpLength),
 	})
 	copy(udpHdr.Payload(), payload)

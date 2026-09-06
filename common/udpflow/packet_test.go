@@ -22,23 +22,23 @@ func TestParseUDPPacketIPv4(t *testing.T) {
 
 func TestBuildUDPResponseIPv4(t *testing.T) {
 	payload := []byte("reply")
-	packet, err := buildUDPResponse(8, M.SocksaddrFromNetIP(netip.MustParseAddrPort("1.1.1.1:3478")), 50000, payload)
+	packet, err := buildUDPResponse(8, M.SocksaddrFromNetIP(netip.MustParseAddrPort("1.1.1.1:3478")), netip.MustParseAddrPort("127.0.0.1:50000"), payload)
 	require.NoError(t, err)
 	source, destination, parsedPayload, ok := parseUDPPacket(packet[8:])
 	require.True(t, ok)
 	require.Equal(t, netip.MustParseAddrPort("1.1.1.1:3478"), source)
-	require.Equal(t, netip.MustParseAddrPort("0.0.0.0:50000"), destination)
+	require.Equal(t, netip.MustParseAddrPort("127.0.0.1:50000"), destination)
 	require.Equal(t, payload, parsedPayload)
 }
 
 func TestBuildUDPResponseIPv6(t *testing.T) {
 	payload := []byte("reply6")
-	packet, err := buildUDPResponse(0, M.SocksaddrFromNetIP(netip.MustParseAddrPort("[2001:db8::1]:3478")), 50001, payload)
+	packet, err := buildUDPResponse(0, M.SocksaddrFromNetIP(netip.MustParseAddrPort("[2001:db8::1]:3478")), netip.MustParseAddrPort("[fd00::1]:50001"), payload)
 	require.NoError(t, err)
 	source, destination, parsedPayload, ok := parseUDPPacket(packet)
 	require.True(t, ok)
 	require.Equal(t, netip.MustParseAddrPort("[2001:db8::1]:3478"), source)
-	require.Equal(t, netip.MustParseAddrPort("[::]:50001"), destination)
+	require.Equal(t, netip.MustParseAddrPort("[fd00::1]:50001"), destination)
 	require.Equal(t, payload, parsedPayload)
 }
 

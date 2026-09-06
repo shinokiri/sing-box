@@ -248,6 +248,10 @@ func (h *Outbound) dialXUDPFlowPacketConn(ctx context.Context, firstDestination 
 	if err != nil {
 		return nil, err
 	}
+	// DialEarlyXUDPPacketConn writes the initial request synchronously. Keep
+	// cancellation effective after the underlying TCP/transport dial returns.
+	stopCancel := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopCancel()
 	packetConn, err := h.client.DialEarlyXUDPPacketConn(conn, firstDestination)
 	if err != nil {
 		conn.Close()

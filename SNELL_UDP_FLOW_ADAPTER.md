@@ -19,7 +19,14 @@ a genuine reverse-tuple collision gets another selector and packet connection.
 
 The common flow-port implementation now lives in `common/udpflow` and is shared
 by Snell and VLESS/XUDP. It preserves protocol front/rear headroom and
-serializes writes per selector.
+serializes writes per selector on asynchronous workers. Packet data is copied
+before the TUN reader reuses its buffers. Dialing, handshake reads, and writes
+therefore do not hold up the TUN reader or other selectors.
+
+Each adapter has distinct internal IPv4/IPv6 addresses so that two outbounds
+using the same selector and real server cannot match each other's replies.
+These addresses only identify dispatcher mappings; they are not sent to the
+proxy server or returned to applications.
 
 ## Snell configuration
 
@@ -97,20 +104,51 @@ flow rather than leaking the Fake-IP.
 
 ## Known limits
 
-- The current preparation environment cannot download Go 1.25.5 or modules, so
-  the included GitHub Actions workflow must provide the real compile/test
-  result.
+- A flow-enabled outbound can attach to one TUN dispatcher at a time. Additional
+  inbounds use the existing packet path. Use a separate outbound instance per
+  TUN inbound when each needs flow-based Fake-IP translation. This prevents
+  independent inbound selector allocators from sharing the wrong association.
+- Each selector has a queue of up to 64 pending packets. Each adapter allows up
+  to 1,024 associations and 4 MiB of queued/in-flight payload data, excluding
+  protocol framing and read buffers. Packets exceeding these limits are
+  dropped with a trace-level forwarding error rather than blocking the TUN.
+- Dialing and each protocol write have a 15-second timeout. A stalled write
+  closes the association, including when the protocol is awaiting a handshake
+  reply inside its write method. Later packets can create a fresh association;
+  failed or queued packets on the old association are not replayed.
 - UDP packet connections are kept per selector and swept after five minutes of
-  inactivity.
+  inactivity. Network reset, inbound detach, parent context cancellation, and
+  outbound close cancel pending dials and close active connections. Detach also
+  discards queued packets and prevents late replies reaching a new inbound.
 - The external server implementation and its host/cloud firewall still decide
   the final observable UDP mapping/filtering behavior.
 
+## Validation
+
+The regression suite uses the real sing-tun dispatcher to cover IPv4/IPv6
+outbound isolation, colliding inbound selectors, and a silent Snell v6 server.
+In-process Snell v6 (default and unshaped modes) and VLESS/XUDP servers exercise
+multi-destination IPv4/IPv6 exchanges over one association. Other tests cover
+buffer ownership, queue limits, cancel/timeout cleanup, failed-association
+replacement, late replies after detach, and cancellation of the VLESS initial
+request.
+
+```sh
+go test -race -count=1 ./common/udpflow ./protocol/snell ./protocol/vless
+go test -tags with_gvisor -count=1 ./common/udpflow ./protocol/snell ./protocol/vless
+go build -trimpath ./cmd/sing-box
+```
+
+These checks do not replace tests using a real TUN device and the deployed
+proxy server, particularly when assessing public UDP mapping/filtering.
+
 ## GitHub Actions
 
-The included `.github/workflows/verify-snell-udp-flow.yml` now tests the shared
-UDP flow package plus Snell and VLESS, then creates a Linux amd64 artifact. Run
-the repository's normal multi-platform build workflow after this focused
-workflow succeeds.
+The included `.github/workflows/verify-snell-udp-flow.yml` runs on relevant
+pushes and pull requests with Go 1.25 and 1.26. It runs the race and gVisor checks
+above, then creates a Linux amd64 artifact for each Go version. Run the
+repository's normal multi-platform build workflow after this focused workflow
+succeeds.
 
 ## Target base
 

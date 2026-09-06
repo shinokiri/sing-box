@@ -12,13 +12,32 @@ on:
       - ".github/workflows/verify-snell-udp-flow.yml"
       - "go.mod"
       - "go.sum"
+  pull_request:
+    paths:
+      - "common/udpflow/**"
+      - "option/snell.go"
+      - "option/vless.go"
+      - "protocol/snell/**"
+      - "protocol/vless/**"
+      - ".github/workflows/verify-snell-udp-flow.yml"
+      - "go.mod"
+      - "go.sum"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   test-and-build:
+    name: Go ${{ matrix.go }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25.x", "1.26.x"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,11 +45,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go }}
           cache: true
 
-      - name: Test UDP flow adapters
-        run: go test ./common/udpflow ./protocol/snell ./protocol/vless
+      - name: Test UDP flow adapters with race detection
+        run: go test -race -count=1 ./common/udpflow ./protocol/snell ./protocol/vless
+
+      - name: Test with gVisor enabled
+        run: go test -tags with_gvisor -count=1 ./common/udpflow ./protocol/snell ./protocol/vless
 
       - name: Build Linux amd64
         env:
@@ -45,6 +67,6 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: sing-box-linux-amd64-proxy-udp-flow
+          name: sing-box-linux-amd64-proxy-udp-flow-go-${{ matrix.go }}
           path: dist/sing-box-linux-amd64
           if-no-files-found: error

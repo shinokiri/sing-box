@@ -34,6 +34,7 @@ func TestPortReusesSelectorAcrossDestinations(t *testing.T) {
 	packetA := buildTestUDPPacket(t, netip.MustParseAddr("0.0.0.0"), 50000, netip.MustParseAddr("1.1.1.1"), 3478, []byte("a"))
 	packetB := buildTestUDPPacket(t, netip.MustParseAddr("0.0.0.0"), 50000, netip.MustParseAddr("8.8.8.8"), 53, []byte("b"))
 	require.NoError(t, port.WritePackets([][]byte{packetA, packetB}))
+	require.Eventually(t, func() bool { return len(packetConn.destinations()) == 2 }, time.Second, time.Millisecond)
 	require.Equal(t, int32(1), factoryCalls.Load())
 	require.Equal(t, M.SocksaddrFromNetIP(netip.MustParseAddrPort("1.1.1.1:3478")), packetConn.firstDestination)
 	require.Equal(t, []M.Socksaddr{
@@ -58,7 +59,7 @@ func TestPortCreatesSeparateSelectors(t *testing.T) {
 	packetA := buildTestUDPPacket(t, netip.MustParseAddr("0.0.0.0"), 50000, netip.MustParseAddr("1.1.1.1"), 3478, []byte("a"))
 	packetB := buildTestUDPPacket(t, netip.MustParseAddr("0.0.0.0"), 50001, netip.MustParseAddr("8.8.8.8"), 53, []byte("b"))
 	require.NoError(t, port.WritePackets([][]byte{packetA, packetB}))
-	require.Equal(t, int32(2), factoryCalls.Load())
+	require.Eventually(t, func() bool { return factoryCalls.Load() == 2 }, time.Second, time.Millisecond)
 }
 
 // TestPortPreservesRearHeadroom covers the regression that previously caused
@@ -77,6 +78,7 @@ func TestPortPreservesRearHeadroom(t *testing.T) {
 
 	packet := buildTestUDPPacket(t, netip.MustParseAddr("0.0.0.0"), 50000, netip.MustParseAddr("1.1.1.1"), 3478, []byte("payload"))
 	require.NoError(t, port.WritePackets([][]byte{packet}))
+	require.Eventually(t, func() bool { return len(packetConn.destinations()) == 1 }, time.Second, time.Millisecond)
 	require.False(t, packetConn.headroomViolation.Load())
 }
 

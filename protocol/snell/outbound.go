@@ -110,6 +110,8 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 				if dialErr != nil {
 					return nil, dialErr
 				}
+				stopCancel := context.AfterFunc(ctx, func() { conn.Close() })
+				defer stopCancel()
 				packetConn, dialErr := client.DialPacketConn(conn)
 				if dialErr != nil {
 					conn.Close()
