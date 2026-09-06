@@ -127,11 +127,11 @@ flow rather than leaking the Fake-IP.
 
 The regression suite uses the real sing-tun dispatcher to cover IPv4/IPv6
 outbound isolation, colliding inbound selectors, and a silent Snell v6 server.
-In-process Snell v6 (default and unshaped modes) and VLESS/XUDP servers exercise
-multi-destination IPv4/IPv6 exchanges over one association. Other tests cover
-buffer ownership, queue limits, cancel/timeout cleanup, failed-association
-replacement, late replies after detach, and cancellation of the VLESS initial
-request.
+In-process Snell v4/v5 (plain and HTTP-obfuscated), Snell v6 (default,
+unshaped, and unsafe-raw), and VLESS/XUDP servers exercise multi-destination
+IPv4/IPv6 exchanges over one association. Other tests cover buffer ownership,
+queue limits, cancel/timeout cleanup, failed-association replacement, late
+replies after detach, and cancellation of the VLESS initial request.
 
 ```sh
 go test -race -count=1 ./common/udpflow ./protocol/snell ./protocol/vless
