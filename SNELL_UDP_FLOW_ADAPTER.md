@@ -138,7 +138,8 @@ VLESS/gRPC is also tested through the real outbound factory and transport.
 Transport regressions cover concurrent response initialization and reads, and
 closing before a response arrives without leaking its late response body.
 QUIC dial and handshake cancellation, waiting for a shared connection, and
-reuse after canceling a completed dial are covered. WebSocket and HTTP Upgrade
+reuse after canceling a completed dial (including a context-bound streaming
+UDP detour) are covered. WebSocket and HTTP Upgrade
 handshakes are tested against a silent peer, including preservation of the
 configured WebSocket subprotocol across attempts.
 

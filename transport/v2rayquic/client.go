@@ -76,19 +76,41 @@ func (c *Client) offer(ctx context.Context) (*quic.Conn, error) {
 }
 
 func (c *Client) offerNew(ctx context.Context) (*quic.Conn, error) {
-	udpConn, err := c.dialer.DialContext(ctx, "udp", c.serverAddr)
+	// A streaming UDP detour may retain its dial context. Give it the shared
+	// connection's lifetime, forwarding caller cancellation only during setup.
+	connectionCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopParentCancel := context.AfterFunc(c.ctx, cancel)
+	stopSetupCancel := context.AfterFunc(ctx, cancel)
+	cleanup := func() {
+		stopSetupCancel()
+		stopParentCancel()
+		cancel()
+	}
+	udpConn, err := c.dialer.DialContext(connectionCtx, "udp", c.serverAddr)
 	if err != nil {
+		cleanup()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
 	quicConn, err := qtls.Dial(ctx, udpConn, c.tlsConfig, c.quicConfig)
 	if err != nil {
+		cleanup()
 		udpConn.Close()
 		return nil, err
+	}
+	if !stopSetupCancel() {
+		quicConn.CloseWithError(0, "")
+		cleanup()
+		udpConn.Close()
+		return nil, ctx.Err()
 	}
 	// quic-go does not take ownership of the conn passed to Dial:
 	// when the connection ends it only stops reading.
 	go func() {
 		<-quicConn.Context().Done()
+		cleanup()
 		udpConn.Close()
 	}()
 	c.conn.Store(quicConn)

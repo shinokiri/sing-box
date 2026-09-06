@@ -163,8 +163,17 @@ func TestQUICEstablishedConnectionSurvivesDialCancellation(t *testing.T) {
 		serverResult <- nil
 		<-ctx.Done()
 	}()
+	var detourContext context.Context
 	client := newTestClient(t, ctx, &testDialer{dial: func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, destination.String())
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, destination.String())
+		if err != nil {
+			return nil, err
+		}
+		// Streaming detours such as gRPC keep using the context passed to
+		// the UDP dialer after DialContext returns.
+		detourContext = ctx
+		context.AfterFunc(ctx, func() { conn.Close() })
+		return conn, nil
 	}}, listener.Addr().String(), option.OutboundTLSOptions{
 		ALPN:        []string{"udpflow-test"},
 		Certificate: []string{string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Certificate[0]}))},
@@ -186,4 +195,10 @@ func TestQUICEstablishedConnectionSurvivesDialCancellation(t *testing.T) {
 		require.NoError(t, conn.Close())
 	}
 	require.NoError(t, testResult(t, serverResult))
+	require.NoError(t, client.Close())
+	select {
+	case <-detourContext.Done():
+	case <-time.After(time.Second):
+		t.Fatal("closing the QUIC client did not release its detour context")
+	}
 }
