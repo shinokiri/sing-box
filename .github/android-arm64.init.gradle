@@ -2,6 +2,8 @@
 gradle.beforeProject { project ->
     project.pluginManager.withPlugin("com.android.application") {
         project.extensions.getByName("androidComponents").finalizeDsl { android ->
+            // AGP 9 creates unit tests only for the selected test build type.
+            android.testBuildType = "release"
             android.splits.abi.setEnable(false)
             android.defaultConfig.ndk.abiFilters.clear()
             android.defaultConfig.ndk.abiFilters.add("arm64-v8a")

@@ -1,3 +1,39 @@
+diff --git a/app/src/github/java/io/nekohasekai/sfa/vendor/ApkDownloader.kt b/app/src/github/java/io/nekohasekai/sfa/vendor/ApkDownloader.kt
+index d90e2c7..53f3226 100644
+--- a/app/src/github/java/io/nekohasekai/sfa/vendor/ApkDownloader.kt
++++ b/app/src/github/java/io/nekohasekai/sfa/vendor/ApkDownloader.kt
+@@ -3,6 +3,7 @@ package io.nekohasekai.sfa.vendor
+ import io.nekohasekai.libbox.HTTPResponseWriteToProgressHandler
+ import io.nekohasekai.libbox.Libbox
+ import io.nekohasekai.sfa.Application
++import io.nekohasekai.sfa.database.Settings
+ import io.nekohasekai.sfa.update.UpdateState
+ import io.nekohasekai.sfa.utils.HTTPClient
+ import kotlinx.coroutines.Dispatchers
+@@ -21,6 +22,7 @@ class ApkDownloader : Closeable {
+         cacheDir.mkdirs()
+         val apkFile = File(cacheDir, "update.apk")
+ 
++        Settings.cachedApkUrl = ""
+         if (apkFile.exists()) apkFile.delete()
+ 
+         val request = client.newRequest()
+@@ -42,7 +44,7 @@ class ApkDownloader : Closeable {
+             throw Exception("Download failed: empty file")
+         }
+ 
+-        UpdateState.saveApkPath(apkFile)
++        UpdateState.saveApkPath(apkFile, url)
+         apkFile
+     }
+ 
+@@ -50,3 +52,6 @@ class ApkDownloader : Closeable {
+         client.close()
+     }
+ }
++
++internal fun cachedApkForUrl(file: File?, cachedUrl: String, requestedUrl: String): File? =
++    file?.takeIf { cachedUrl == requestedUrl && it.isFile && it.length() > 0 }
 diff --git a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
 index ab0c1c2..e2fd99b 100644
 --- a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
@@ -177,8 +213,19 @@ index a5424ab..a60d57d 100644
                  val updateItemCount =
                      run {
                          var count = 0
+diff --git a/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt b/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt
+index 836d0e5..1b9abae 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt
+@@ -64,5 +64,6 @@ object SettingsKey {
+     const val STARTED_BY_USER = "started_by_user"
+     const val CACHED_UPDATE_INFO = "cached_update_info"
+     const val CACHED_APK_PATH = "cached_apk_path"
++    const val CACHED_APK_URL = "cached_apk_url"
+     const val LAST_SHOWN_UPDATE_VERSION = "last_shown_update_version"
+ }
 diff --git a/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
-index 20c0e7b..0c652c1 100644
+index 20c0e7b..a91173d 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
 @@ -43,8 +43,8 @@ object Settings {
@@ -192,8 +239,38 @@ index 20c0e7b..0c652c1 100644
      var updateTrack by dataStore.string(SettingsKey.UPDATE_TRACK) {
          val versionName = BuildConfig.VERSION_NAME.lowercase()
          if (versionName.contains("-alpha") ||
+@@ -134,6 +134,7 @@ object Settings {
+ 
+     var cachedUpdateInfo by dataStore.string(SettingsKey.CACHED_UPDATE_INFO) { "" }
+     var cachedApkPath by dataStore.string(SettingsKey.CACHED_APK_PATH) { "" }
++    var cachedApkUrl by dataStore.string(SettingsKey.CACHED_APK_URL) { "" }
+     var lastShownUpdateVersion by dataStore.int(SettingsKey.LAST_SHOWN_UPDATE_VERSION) { 0 }
+ 
+     fun serviceClass(): Class<*> = when (serviceMode) {
+diff --git a/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt b/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt
+index 19ba94e..907f41d 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt
+@@ -80,14 +80,16 @@ object UpdateState {
+         Settings.cachedUpdateInfo = info?.toJson() ?: ""
+     }
+ 
+-    fun saveApkPath(file: File) {
++    fun saveApkPath(file: File, url: String) {
+         Settings.cachedApkPath = file.absolutePath
++        Settings.cachedApkUrl = url
+         cachedApkFile.value = file
+     }
+ 
+     private fun clearCache() {
+         Settings.cachedUpdateInfo = ""
+         Settings.cachedApkPath = ""
++        Settings.cachedApkUrl = ""
+         Settings.lastShownUpdateVersion = 0
+     }
+ }
 diff --git a/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt b/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
-index fa39ea9..ee81244 100644
+index fa39ea9..886b17c 100644
 --- a/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
 +++ b/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
 @@ -6,7 +6,6 @@ import android.net.Uri
@@ -233,3 +310,18 @@ index fa39ea9..ee81244 100644
          }
      }
  
+@@ -134,12 +129,8 @@ object Vendor : VendorInterface {
+     }
+ 
+     override suspend fun downloadAndInstall(context: android.content.Context, downloadUrl: String) {
+-        val cachedApk = UpdateState.cachedApkFile.value
+-        val apkFile = if (cachedApk != null && cachedApk.exists() && cachedApk.length() > 0) {
+-            cachedApk
+-        } else {
+-            ApkDownloader().use { it.download(downloadUrl) }
+-        }
++        val cachedApk = cachedApkForUrl(UpdateState.cachedApkFile.value, Settings.cachedApkUrl, downloadUrl)
++        val apkFile = cachedApk ?: ApkDownloader().use { it.download(downloadUrl) }
+         ApkInstaller.install(context, apkFile)
+     }
+ }

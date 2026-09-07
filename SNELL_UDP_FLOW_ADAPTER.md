@@ -226,6 +226,8 @@ The patched `other` client checks this fork's GitHub releases, selects its ARM64
 APK and compares monotonic `versionCode` values. Drafts, excluded prereleases,
 missing metadata/APKs, wrong architectures and mismatched release metadata are
 ignored. F-Droid is not an update source for this fork's signing key.
+An already downloaded APK is reused only when its recorded URL matches the
+requested release, so a cached older APK cannot stand in for a newer update.
 Launch-time update checks default to enabled; an explicitly disabled setting
 is preserved. The app shows its existing update prompt when a newer build is
 available. The existing optional background/silent-install settings remain
