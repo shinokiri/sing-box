@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/debug"
@@ -46,16 +45,9 @@ func NewConn(conn net.Conn, remoteAddr net.Addr, state ws.State) *WebsocketConn 
 }
 
 func (c *WebsocketConn) Close() error {
-	c.Conn.SetWriteDeadline(time.Now().Add(C.TCPTimeout))
-	frame := ws.NewCloseFrame(ws.NewCloseFrameBody(
-		ws.StatusNormalClosure, "",
-	))
-	if c.state == ws.StateClientSide {
-		frame = ws.MaskFrameInPlace(frame)
-	}
-	ws.WriteFrame(c.Conn, frame)
-	c.Conn.Close()
-	return nil
+	// net.Conn.Close must interrupt pending I/O. Writing a close frame here
+	// waits for an unresponsive peer and races with the active frame writer.
+	return c.Conn.Close()
 }
 
 func (c *WebsocketConn) Read(b []byte) (n int, err error) {

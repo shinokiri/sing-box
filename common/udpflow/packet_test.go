@@ -42,7 +42,7 @@ func TestBuildUDPResponseIPv6(t *testing.T) {
 	require.Equal(t, payload, parsedPayload)
 }
 
-func buildTestUDPPacket(t *testing.T, source netip.Addr, sourcePort uint16, destination netip.Addr, destinationPort uint16, payload []byte) []byte {
+func buildTestUDPPacket(t testing.TB, source netip.Addr, sourcePort uint16, destination netip.Addr, destinationPort uint16, payload []byte) []byte {
 	t.Helper()
 	udpLength := header.UDPMinimumSize + len(payload)
 	if source.Is4() {

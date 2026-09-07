@@ -2,6 +2,9 @@ module github.com/sagernet/sing-box
 
 go 1.25.5
 
+// Keep the h2mux response/close race fix local until it is released upstream.
+replace github.com/sagernet/sing-mux => ./third_party/sing-mux
+
 require (
 	filippo.io/age v1.3.1
 	github.com/anthropics/anthropic-sdk-go v1.26.0

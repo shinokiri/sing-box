@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sagernet/sing/common/buf"
@@ -134,6 +135,46 @@ func TestPortDialTimeout(t *testing.T) {
 	defer port.Close()
 	require.NoError(t, port.WritePackets([][]byte{testPortPacket(t, 50000, "query")}))
 	require.ErrorIs(t, receiveTestValue(t, canceled), context.DeadlineExceeded)
+}
+
+func TestPortSweepsIdleAssociations(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		idle, active, replacement := newChannelPacketConn(), newChannelPacketConn(), newChannelPacketConn()
+		var calls atomic.Int32
+		port, err := New(Options{
+			IdleTimeout: 10 * time.Second,
+			SweepPeriod: time.Second,
+			DialPacketConn: func(context.Context, M.Socksaddr) (N.NetPacketConn, error) {
+				return []*channelPacketConn{idle, active, replacement}[calls.Add(1)-1], nil
+			},
+		})
+		require.NoError(t, err)
+		defer port.Close()
+		returnPath := newTestReturn()
+		require.NoError(t, port.AttachReturn(returnPath))
+		require.NoError(t, port.WritePackets([][]byte{testPortPacket(t, 50000, "idle")}))
+		receiveTestValue(t, idle.sent)
+		require.NoError(t, port.WritePackets([][]byte{testPortPacket(t, 50001, "active")}))
+		receiveTestValue(t, active.sent)
+		time.Sleep(6 * time.Second)
+		// Receiving traffic must refresh the idle timer even without new writes.
+		active.received <- testDatagram{payload: []byte("reply"), address: M.ParseSocksaddr("203.0.113.1:443")}
+		receiveTestValue(t, returnPath.packets)
+		time.Sleep(5 * time.Second)
+		synctest.Wait()
+		receiveTestValue(t, idle.closed)
+		select {
+		case <-active.closed:
+			t.Fatal("idle sweep closed a receiving association")
+		default:
+		}
+		require.NoError(t, port.WritePackets([][]byte{testPortPacket(t, 50000, "recreated")}))
+		require.Equal(t, []byte("recreated"), receiveTestValue(t, replacement.sent).payload)
+		require.Equal(t, int32(3), calls.Load())
+		require.NoError(t, port.Close())
+		require.Zero(t, port.queuedBytes)
+		require.Empty(t, port.flows)
+	})
 }
 
 // HTTP/2 and gRPC transports retain the factory context for the lifetime of

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -100,9 +101,6 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		if !outbound.xudp {
 			return nil, E.New("vless: udp_flow requires packet_encoding xudp")
 		}
-		if common.PtrValueOrDefault(options.Multiplex).Enabled {
-			return nil, E.New("vless: udp_flow is incompatible with multiplex")
-		}
 	}
 	outbound.client, err = vless.NewClient(options.UUID, options.Flow, logger)
 	if err != nil {
@@ -117,6 +115,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			Context:        ctx,
 			Logger:         logger,
 			Name:           "VLESS XUDP",
+			DialTimeout:    time.Duration(options.ConnectTimeout),
 			DialPacketConn: outbound.dialXUDPFlowPacketConn,
 		})
 		if err != nil {

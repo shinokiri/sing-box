@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -102,9 +103,10 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 	if options.UDPFlow {
 		outbound.flowPort, err = udpflow.New(udpflow.Options{
-			Context: ctx,
-			Logger:  logger,
-			Name:    "Snell",
+			Context:     ctx,
+			Logger:      logger,
+			Name:        "Snell",
+			DialTimeout: time.Duration(options.ConnectTimeout),
 			DialPacketConn: func(ctx context.Context, _ M.Socksaddr) (N.NetPacketConn, error) {
 				conn, dialErr := outboundDialer.DialContext(ctx, N.NetworkTCP, serverAddr)
 				if dialErr != nil {
