@@ -5,6 +5,8 @@ gradle.beforeProject { project ->
             android.splits.abi.setEnable(false)
             android.defaultConfig.ndk.abiFilters.clear()
             android.defaultConfig.ndk.abiFilters.add("arm64-v8a")
+            android.sourceSets.getByName("test").java.srcDir(new File(project.rootDir, "../../.github/android-tests"))
         }
+        project.dependencies.add("testImplementation", "junit:junit:4.13.2")
     }
 }

@@ -172,7 +172,8 @@ proxy server, particularly when assessing public UDP mapping/filtering.
 ## GitHub Actions
 
 The dedicated `.github/workflows/build.yml` runs on `udpflow` pushes, pull
-requests, and manual dispatch. Its first job runs all core-module tests and
+requests, and manual dispatch. Its planning job tests the release scripts,
+including actual Git merges in temporary repositories. The build job runs all core-module tests and
 `go vet` with release feature tags (excluding the unsafe-pointer diagnostic for
 the upstream daemon/libbox deliberate crash hooks), then targeted race tests with both grpclite
 (the Android implementation) and full gRPC. Forwarding benchmarks record
@@ -182,7 +183,8 @@ network latency. The separate `test/` module's external-server/Docker suite is
 not part of this core-module gate.
 
 After the checks pass, branch push/manual builds compile a signed ARM64 APK
-with Go 1.26.7, NDK r28, and JDK 17. Pull requests run checks only. The native
+with the pinned client's Go version (currently 1.26.7), NDK r28, and JDK 17.
+Pull requests run core checks only. The native
 library and APK are built on one runner, with one toolchain setup and cached
 Go native compilation. They use `build_libbox -target android -platform android/arm64
 -android-legacy=false` and package one signed `other` APK. The Gradle init script
@@ -190,21 +192,64 @@ disables ABI splits and filters all native dependencies to `arm64-v8a`; CI
 checks that exactly one APK contains only that ABI and includes libbox.
 It also verifies the built APK's signature with `apksigner` before uploading.
 
-The snapshot version is `<client version>-udpflow.g<commit>`, and the APK is
-uploaded as the `binary-android-arm64` Actions artifact. `versionCode` is
+Formal releases use exactly `<official version>-udpflow`, with one leading `v`
+in the Git tag. `release/udpflow.json` records the upstream stable tag and commit;
+CI verifies that this commit is an ancestor of the built core and that the
+pinned Android client's version matches. Release APKs are named
+`SFA-<official version>-udpflow-arm64-v8a.apk`. Once that release is public,
+subsequent branch builds use `<official version>-udpflow.g<commit>` and remain
+Actions artifacts; published releases and tags are never overwritten.
+Both types upload the `binary-android-arm64` Actions artifact. `versionCode` is
 `1000000 + GITHUB_RUN_NUMBER`: later runs increase it even though the client
 commit is pinned; rerunning a job preserves it. CI reads the actual APK manifest
 to check the version and API 24 minimum against the recorded metadata.
 No legacy API 21 library, legacy APK, other Android architecture, or universal
-APK is built. The workflow contains no release publishing or repository-wide
-cache cleanup, including when dispatched manually.
+APK is built. The same tested artifact is published with `SFA-version-metadata.json`
+and `SHA256SUMS`. Assets are uploaded to a draft before publication; the final
+release is explicitly stable and Latest, despite the `-udpflow` suffix.
+CI checks the branch again before publishing and uses an atomic, non-forced
+push for the tested commit and release tag. There is no repository-wide cache cleanup.
 
 Android builds on `udpflow` use the recorded `clients/android` submodule commit
 (`b7bf31b6e553b30ab69a90a1769f9273cb25f089`, the 1.14.0 client with its default
 interface notification fix). Do not replace it with a moving `dev` checkout:
 the 1.15 development client requires libbox APIs absent from this branch.
 APK metadata records both the core and Android client commits so each artifact
-can be traced to its sources.
+can be traced to its sources. The upstream Android repository is not modified:
+`.github/android-udpflow.patch` is applied to the recorded gitlink at build time,
+and metadata also records its SHA-256. Client unit tests in `.github/android-tests`
+exercise update selection without loading the native library or making network requests.
+
+### Client updates
+
+The patched `other` client checks this fork's GitHub releases, selects its ARM64
+APK and compares monotonic `versionCode` values. Drafts, excluded prereleases,
+missing metadata/APKs, wrong architectures and mismatched release metadata are
+ignored. F-Droid is not an update source for this fork's signing key.
+Launch-time update checks default to enabled; an explicitly disabled setting
+is preserved. The app shows its existing update prompt when a newer build is
+available. The existing optional background/silent-install settings remain
+under user control. An old APK whose updater still points to SagerNet requires
+one manual installation of the new fork client before this update path works.
+
+### Following official stable releases
+
+The workflow can check upstream every six hours, or immediately through
+`workflow_dispatch` with `sync_upstream=true`. It uses official published stable
+tags, not the upstream development branch. A new stable commit is merged locally,
+the Android `main` commit is pinned only if its version matches, and the Go
+version is read from that client. This fork's workflows are retained during
+the merge. Other conflicts stop the run for review. The client patch must apply
+cleanly and the resulting source must pass all checks, client tests and the
+signed ARM64 build before it is pushed and released. Unchanged scheduled runs
+skip the build. No external access token is required; the same workflow publishes
+with `GITHUB_TOKEN` rather than relying on another workflow being triggered by its push.
+
+**Scheduling requires `udpflow` to be the repository's default branch.** GitHub
+loads scheduled workflows only from the default branch; while the default is
+`testing`, the six-hour schedule in this branch is inactive. Manual dispatch
+with `--ref udpflow` and ordinary `udpflow` pushes still work. Changing the default
+branch is a repository setting, not part of these branch commits.
 
 ## Target base
 

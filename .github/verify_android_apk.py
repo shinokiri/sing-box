@@ -1,5 +1,6 @@
 """Check the signed APK, then collect it with matching source metadata."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -45,8 +46,15 @@ metadata = {
     "core_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
     "android_client_commit": subprocess.check_output(["git", "-C", str(client), "rev-parse", "HEAD"], text=True).strip(),
 }
+metadata.update(json.loads(Path("release/udpflow.json").read_text()))
+metadata["android_patch_sha256"] = hashlib.sha256(Path(".github/android-udpflow.patch").read_bytes()).hexdigest()
 destination = Path("dist/android")
 destination.mkdir(parents=True, exist_ok=True)
-shutil.copy2(apk, destination / apk.name)
+apk_name = f"SFA-{props['VERSION_NAME']}-arm64-v8a.apk"
+shutil.copy2(apk, destination / apk_name)
 (destination / "SFA-version-metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+(destination / "SHA256SUMS").write_text("".join(
+    f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+    for path in sorted(destination.iterdir()) if path.name != "SHA256SUMS"
+))
 print(f"Verified {apk.name}: API 24, arm64-v8a, versionCode {metadata['version_code']}")

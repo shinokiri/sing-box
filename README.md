@@ -2,6 +2,14 @@
 
 The universal proxy platform.
 
+This is the **udpflow fork**. Download its signed **Android 7.0+ ARM64** APK
+from [Releases](https://github.com/shinokiri/sing-box/releases/latest).
+Stable versions follow the official version with an `-udpflow` suffix.
+Install the first udpflow release manually; subsequent releases are checked
+from this repository when the app starts. Previously disabled update checks
+remain disabled and can be enabled in app settings.
+See [UDP flow and build notes](SNELL_UDP_FLOW_ADAPTER.md) for changes and validation limits.
+
 [![Packaging status](https://repology.org/badge/vertical-allrepos/sing-box.svg)](https://repology.org/project/sing-box/versions)
 
 ## Documentation

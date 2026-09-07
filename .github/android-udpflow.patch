@@ -1,0 +1,235 @@
+diff --git a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
+index ab0c1c2..e2fd99b 100644
+--- a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
++++ b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
+@@ -1,6 +1,5 @@
+ package io.nekohasekai.sfa.vendor
+ 
+-import android.os.Build
+ import io.nekohasekai.libbox.Libbox
+ import io.nekohasekai.sfa.BuildConfig
+ import io.nekohasekai.sfa.ktx.unwrap
+@@ -14,7 +13,7 @@ import java.io.Closeable
+ 
+ class GitHubUpdateChecker : Closeable {
+     companion object {
+-        private const val RELEASES_URL = "https://api.github.com/repos/SagerNet/sing-box/releases"
++        internal const val RELEASES_URL = "https://api.github.com/repos/shinokiri/sing-box/releases?per_page=100"
+         private const val METADATA_FILENAME = "SFA-version-metadata.json"
+     }
+ 
+@@ -25,45 +24,11 @@ class GitHubUpdateChecker : Closeable {
+ 
+     private val json = Json { ignoreUnknownKeys = true }
+ 
+-    fun checkUpdate(track: UpdateTrack, githubToken: String): UpdateInfo? {
+-        val releases = getReleases(githubToken)
+-        var selected: ReleaseCandidate? = null
+-
+-        for (release in releases) {
+-            if (!isReleaseInTrack(release, track)) {
+-                continue
+-            }
+-            val metadata = runCatching { downloadMetadata(release) }.getOrNull() ?: continue
+-            if (!isNewerThanCurrent(metadata.versionName)) {
+-                continue
+-            }
+-            val currentBest = selected
+-            if (currentBest == null || isBetterVersion(metadata, currentBest.metadata)) {
+-                selected = ReleaseCandidate(release, metadata)
+-            }
++    fun checkUpdate(track: UpdateTrack, githubToken: String): UpdateInfo? =
++        selectUdpflowUpdate(getReleases(githubToken), track, BuildConfig.VERSION_CODE) { release ->
++            runCatching { downloadMetadata(release) }.getOrNull()
+         }
+ 
+-        val release = selected?.release ?: return null
+-        val metadata = selected.metadata
+-
+-        val isLegacy = Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+-        val apkAsset = release.assets.find { asset ->
+-            asset.name.endsWith(".apk") &&
+-                !asset.name.contains("play") &&
+-                asset.name.contains("legacy-android-5") == isLegacy
+-        }
+-
+-        return UpdateInfo(
+-            versionCode = metadata.versionCode,
+-            versionName = metadata.versionName,
+-            downloadUrl = apkAsset?.browserDownloadUrl ?: release.htmlUrl,
+-            releaseUrl = release.htmlUrl,
+-            releaseNotes = release.body,
+-            isPrerelease = release.prerelease,
+-            fileSize = apkAsset?.size ?: 0,
+-        )
+-    }
+-
+     private fun getReleases(githubToken: String): List<GitHubRelease> {
+         val request = client.newRequest()
+         request.setURL(RELEASES_URL)
+@@ -80,28 +45,6 @@ class GitHubUpdateChecker : Closeable {
+         return json.decodeFromString(content)
+     }
+ 
+-    private fun isReleaseInTrack(release: GitHubRelease, track: UpdateTrack): Boolean {
+-        if (release.draft) {
+-            return false
+-        }
+-        return when (track) {
+-            UpdateTrack.STABLE -> !release.prerelease
+-            UpdateTrack.BETA -> true
+-        }
+-    }
+-
+-    private fun isNewerThanCurrent(versionName: String): Boolean = Libbox.compareSemver(versionName, BuildConfig.VERSION_NAME)
+-
+-    private fun isBetterVersion(version: VersionMetadata, other: VersionMetadata): Boolean {
+-        if (Libbox.compareSemver(version.versionName, other.versionName)) {
+-            return true
+-        }
+-        if (Libbox.compareSemver(other.versionName, version.versionName)) {
+-            return false
+-        }
+-        return version.versionCode > other.versionCode
+-    }
+-
+     private fun downloadMetadata(release: GitHubRelease): VersionMetadata? {
+         val metadataAsset = release.assets.find { it.name == METADATA_FILENAME }
+             ?: return null
+@@ -144,8 +87,32 @@ class GitHubUpdateChecker : Closeable {
+         @SerialName("version_name") val versionName: String = "",
+     )
+ 
+-    private data class ReleaseCandidate(
+-        val release: GitHubRelease,
+-        val metadata: VersionMetadata,
+-    )
++}
++
++// Android installs updates by versionCode. Release names deliberately keep the
++// official version plus -udpflow, so comparing only names can miss an update.
++internal fun selectUdpflowUpdate(
++    releases: List<GitHubUpdateChecker.GitHubRelease>,
++    track: UpdateTrack,
++    currentVersionCode: Int,
++    metadataFor: (GitHubUpdateChecker.GitHubRelease) -> GitHubUpdateChecker.VersionMetadata?,
++): UpdateInfo? {
++    var selected: UpdateInfo? = null
++    for (release in releases) {
++        if (release.draft || (track == UpdateTrack.STABLE && release.prerelease)) continue
++        val metadata = metadataFor(release) ?: continue
++        if (metadata.versionCode <= currentVersionCode || metadata.versionCode <= (selected?.versionCode ?: 0)) continue
++        if (release.tagName != "v${metadata.versionName}") continue
++        val apk = release.assets.singleOrNull { it.name == "SFA-${metadata.versionName}-arm64-v8a.apk" } ?: continue
++        selected = UpdateInfo(
++            versionCode = metadata.versionCode,
++            versionName = metadata.versionName,
++            downloadUrl = apk.browserDownloadUrl,
++            releaseUrl = release.htmlUrl,
++            releaseNotes = release.body,
++            isPrerelease = release.prerelease,
++            fileSize = apk.size,
++        )
++    }
++    return selected
+ }
+diff --git a/app/src/github/java/io/nekohasekai/sfa/vendor/UpdateWorker.kt b/app/src/github/java/io/nekohasekai/sfa/vendor/UpdateWorker.kt
+index 059458d..0b2ea8f 100644
+--- a/app/src/github/java/io/nekohasekai/sfa/vendor/UpdateWorker.kt
++++ b/app/src/github/java/io/nekohasekai/sfa/vendor/UpdateWorker.kt
+@@ -11,10 +11,8 @@ import androidx.work.PeriodicWorkRequestBuilder
+ import androidx.work.WorkManager
+ import androidx.work.WorkerParameters
+ import io.nekohasekai.sfa.database.Settings
+-import io.nekohasekai.sfa.update.UpdateSource
+ import io.nekohasekai.sfa.update.UpdateState
+ import io.nekohasekai.sfa.update.UpdateTrack
+-import io.nekohasekai.sfa.update.checkFDroidUpdate
+ import java.util.concurrent.TimeUnit
+ 
+ class UpdateWorker(private val appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
+@@ -61,13 +59,8 @@ class UpdateWorker(private val appContext: Context, params: WorkerParameters) :
+         Log.d(TAG, "Checking for updates...")
+ 
+         return try {
+-            val updateInfo = when (UpdateSource.fromString(Settings.updateSource)) {
+-                UpdateSource.FDROID -> checkFDroidUpdate(appContext)
+-                UpdateSource.GITHUB -> {
+-                    val track = UpdateTrack.fromString(Settings.updateTrack)
+-                    GitHubUpdateChecker().use { it.checkUpdate(track, Settings.githubToken) }
+-                }
+-            }
++            val track = UpdateTrack.fromString(Settings.updateTrack)
++            val updateInfo = GitHubUpdateChecker().use { it.checkUpdate(track, Settings.githubToken) }
+ 
+             if (updateInfo == null) {
+                 Log.d(TAG, "No update available")
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
+index a5424ab..a60d57d 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
+@@ -801,7 +801,7 @@ fun AppSettingsScreen(
+             ),
+         ) {
+             Column {
+-                val isFDroid = UpdateSource.fromString(currentSource) == UpdateSource.FDROID
++                val isFDroid = UpdateSource.FDROID in Vendor.updateSources && UpdateSource.fromString(currentSource) == UpdateSource.FDROID
+                 val updateItemCount =
+                     run {
+                         var count = 0
+diff --git a/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
+index 20c0e7b..0c652c1 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
+@@ -43,8 +43,8 @@ object Settings {
+     var startedByUser by dataStore.boolean(SettingsKey.STARTED_BY_USER)
+ 
+     var updateSource by dataStore.string(SettingsKey.UPDATE_SOURCE) { "github" }
+-    var checkUpdateEnabled by dataStore.boolean(SettingsKey.CHECK_UPDATE_ENABLED) { false }
+-    var updateCheckPrompted by dataStore.boolean(SettingsKey.UPDATE_CHECK_PROMPTED) { false }
++    var checkUpdateEnabled by dataStore.boolean(SettingsKey.CHECK_UPDATE_ENABLED) { true }
++    var updateCheckPrompted by dataStore.boolean(SettingsKey.UPDATE_CHECK_PROMPTED) { true }
+     var updateTrack by dataStore.string(SettingsKey.UPDATE_TRACK) {
+         val versionName = BuildConfig.VERSION_NAME.lowercase()
+         if (versionName.contains("-alpha") ||
+diff --git a/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt b/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
+index fa39ea9..ee81244 100644
+--- a/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
++++ b/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
+@@ -6,7 +6,6 @@ import android.net.Uri
+ import android.util.Log
+ import androidx.camera.core.ImageAnalysis
+ import com.google.android.material.dialog.MaterialAlertDialogBuilder
+-import io.nekohasekai.sfa.Application
+ import io.nekohasekai.sfa.R
+ import io.nekohasekai.sfa.bg.RootClient
+ import io.nekohasekai.sfa.compose.screen.qrscan.QRCodeCropArea
+@@ -16,7 +15,6 @@ import io.nekohasekai.sfa.update.UpdateInfo
+ import io.nekohasekai.sfa.update.UpdateSource
+ import io.nekohasekai.sfa.update.UpdateState
+ import io.nekohasekai.sfa.update.UpdateTrack
+-import io.nekohasekai.sfa.update.checkFDroidUpdate
+ 
+ object Vendor : VendorInterface {
+     private const val TAG = "Vendor"
+@@ -97,15 +95,12 @@ object Vendor : VendorInterface {
+ 
+     override val hasCustomUpdate = true
+ 
+-    override val updateSources = listOf(UpdateSource.GITHUB, UpdateSource.FDROID)
++    override val updateSources = listOf(UpdateSource.GITHUB)
+ 
+-    override fun checkUpdateAsync(): UpdateInfo? = when (UpdateSource.fromString(Settings.updateSource)) {
+-        UpdateSource.FDROID -> checkFDroidUpdate(Application.application)
+-        UpdateSource.GITHUB -> {
+-            val track = UpdateTrack.fromString(Settings.updateTrack)
+-            GitHubUpdateChecker().use { checker ->
+-                checker.checkUpdate(track, Settings.githubToken)
+-            }
++    override fun checkUpdateAsync(): UpdateInfo? {
++        val track = UpdateTrack.fromString(Settings.updateTrack)
++        return GitHubUpdateChecker().use { checker ->
++            checker.checkUpdate(track, Settings.githubToken)
+         }
+     }
+ 
