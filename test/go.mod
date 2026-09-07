@@ -6,6 +6,8 @@ require github.com/sagernet/sing-box v0.0.0
 
 replace github.com/sagernet/sing-box => ../
 
+replace github.com/sagernet/sing-mux => ../third_party/sing-mux
+
 require (
 	github.com/docker/docker v27.3.1+incompatible
 	github.com/docker/go-connections v0.5.0

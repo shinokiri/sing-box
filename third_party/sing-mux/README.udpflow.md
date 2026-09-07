@@ -12,5 +12,7 @@ disposes of a response body that arrives after closure. No protocol changes.
 The upstream v0.3.6 source still contains this race as of 2026-09-07. The local
 module replacement lets regular Go, gomobile, and CI builds use the same fix
 without modifying the module cache or adding build-time patch commands.
+The separate `test/` module repeats the replacement because Go does not inherit
+replacement directives from dependencies.
 Remove the replacement and this directory when an upstream release includes
 the fix, keeping the regressions in `protocol/vless`.
