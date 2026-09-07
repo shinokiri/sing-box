@@ -237,11 +237,19 @@ one manual installation of the new fork client before this update path works.
 ### Following official stable releases
 
 The workflow can check upstream every six hours, or immediately through
-`workflow_dispatch` with `sync_upstream=true`. It uses official published stable
-tags, not the upstream development branch. A new stable commit is merged locally,
-the Android `main` commit is pinned only if its version matches, and the Go
+`workflow_dispatch` with `sync_upstream=true`. It fetches official published stable
+tags directly; it does not sync or depend on the fork's `testing` branch.
+The recorded upstream commit, current `udpflow` tree and new stable tree form
+an explicit three-way merge, including rename detection and upstream deletions.
+The new release need not descend from the previous release: resetting or rebasing
+upstream development history does not require rewriting this fork's history.
+The resulting commit retains both the previous `udpflow` head and the new official
+commit as parents. An existing recorded tag changing its target stops the run
+for review, rather than replacing an already published version.
+The Android `main` commit is pinned only if its version matches, and the Go
 version is read from that client. This fork's workflows are retained during
-the merge. Other conflicts stop the run for review. The client patch must apply
+the merge. Other conflicts stop the run before changing the core working tree.
+The client patch must apply
 cleanly and the resulting source must pass all checks, client tests and the
 signed ARM64 build before it is pushed and released. Unchanged scheduled runs
 skip the build. No external access token is required; the same workflow publishes

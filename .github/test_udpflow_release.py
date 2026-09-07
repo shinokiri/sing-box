@@ -36,6 +36,18 @@ class ReleaseTest(unittest.TestCase):
                 self.assertEqual(values["build"], build)
                 self.assertEqual(values["publish"], "false")
 
+    def test_moved_current_tag_is_detected_before_skipping_published_release(self):
+        current = {"upstream_tag": "v1.14.0", "upstream_commit": "a" * 40}
+        responses = [
+            {"tag_name": "v1.14.0", "draft": False, "prerelease": False},
+            {"object": {"type": "commit", "sha": "b" * 40}},
+            {"draft": False, "prerelease": False},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(release.MANIFEST.__class__, "read_text", return_value=json.dumps(current)), patch.object(release, "api", side_effect=responses), patch.dict(os.environ, GITHUB_EVENT_NAME="schedule", GITHUB_REPOSITORY="example/fork", GITHUB_OUTPUT=str(Path(directory) / "output")):
+                with self.assertRaisesRegex(ValueError, "Recorded upstream tag was moved"):
+                    release.plan()
+
 
 class FollowUpstreamTest(unittest.TestCase):
     """Exercise actual Git merges, client pins and tags without network/pushes."""
@@ -65,6 +77,8 @@ class FollowUpstreamTest(unittest.TestCase):
         (self.upstream / ".github/workflows").mkdir(parents=True)
         (self.upstream / ".github/workflows/build.yml").write_text("official workflow\n")
         (self.upstream / "core.go").write_text("original core\n")
+        (self.upstream / "obsolete.txt").write_text("removed in the next upstream version\n")
+        (self.upstream / "rename.txt").write_text("".join(f"line {i}\n" for i in range(20)))
         self.git(self.upstream, "submodule", "add", str(self.client), "clients/android")
         base = self.commit(self.upstream, "core 1.14.0")
         self.git(self.upstream, "tag", "v1.14.0")
@@ -78,6 +92,7 @@ class FollowUpstreamTest(unittest.TestCase):
         (self.client / "version.properties").write_text("VERSION_NAME=1.14.1\nVERSION_CODE=731\nGO_VERSION=go1.26.7\n")
         self.client_commit = self.commit(self.client, "client 1.14.1")
         (self.upstream / "core.go").write_text("new upstream core\n")
+        (self.upstream / "obsolete.txt").unlink()
         (self.upstream / ".github/workflows/build.yml").write_text("new official workflow\n")
         self.target = self.commit(self.upstream, "core 1.14.1")
         self.git(self.upstream, "tag", "v1.14.1")
@@ -132,6 +147,94 @@ class FollowUpstreamTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Android main has not reached"):
             self.prepare()
         self.assertEqual(self.git(self.fork, "rev-parse", "HEAD"), before)
+
+    def rewrite_upstream_history(self):
+        # Rebuild the old release with the same files but different history,
+        # then publish the next release on that rewritten line of development.
+        old = self.git(self.upstream, "rev-parse", "v1.14.0")
+        rewritten_base = self.git(self.upstream, "commit-tree", f"{old}^{{tree}}", "-m", "rewritten old base")
+        self.target = self.git(self.upstream, "commit-tree", f"{self.target}^{{tree}}", "-p", rewritten_base, "-m", "release on rewritten history")
+        self.git(self.upstream, "reset", "--hard", self.target)
+        self.git(self.upstream, "tag", "-f", "v1.14.1", self.target)
+        os.environ["UPSTREAM_COMMIT"] = self.target
+        result = subprocess.run(["git", "merge-base", "--is-ancestor", old, self.target], cwd=self.upstream)
+        self.assertEqual(result.returncode, 1)
+
+    def test_reset_testing_does_not_change_the_release_we_fetch(self):
+        self.git(self.upstream, "switch", "-c", "testing")
+        self.git(self.upstream, "reset", "--hard", "v1.14.0")
+        self.prepare()
+        self.git(self.fork, "merge-base", "--is-ancestor", self.target, "HEAD")
+        self.assertEqual((self.fork / "core.go").read_text(), "new upstream core\n")
+
+    def test_rewritten_history_keeps_fork_changes_and_upstream_deletions(self):
+        self.rewrite_upstream_history()
+        before = self.git(self.fork, "rev-parse", "HEAD")
+        self.prepare()
+        self.git(self.fork, "merge-base", "--is-ancestor", before, "HEAD")
+        self.git(self.fork, "merge-base", "--is-ancestor", self.target, "HEAD")
+        self.assertEqual((self.fork / "udpflow.go").read_text(), "fork feature\n")
+        self.assertEqual((self.fork / "core.go").read_text(), "new upstream core\n")
+        self.assertFalse((self.fork / "obsolete.txt").exists())
+        self.assertEqual((self.fork / ".github/workflows/build.yml").read_text(), "udpflow workflow\n")
+        self.assertEqual(json.loads((self.fork / "release/udpflow.json").read_text())["upstream_commit"], self.target)
+
+    def test_rewritten_history_keeps_local_edits_across_an_upstream_rename(self):
+        self.git(self.upstream, "mv", "rename.txt", "renamed.txt")
+        self.target = self.commit(self.upstream, "upstream rename")
+        local_content = (self.fork / "rename.txt").read_text().replace("line 7\n", "udpflow edit\n")
+        (self.fork / "rename.txt").write_text(local_content)
+        self.commit(self.fork, "local edit")
+        self.rewrite_upstream_history()
+        self.prepare()
+        self.assertFalse((self.fork / "rename.txt").exists())
+        self.assertEqual((self.fork / "renamed.txt").read_text(), local_content)
+
+    def test_rewritten_history_conflict_leaves_head_and_files_unchanged(self):
+        self.rewrite_upstream_history()
+        (self.fork / "core.go").write_text("fork changed the same line\n")
+        before = self.commit(self.fork, "fork core change")
+        with self.assertRaisesRegex(ValueError, "merge needs review"):
+            self.prepare()
+        self.assertEqual(self.git(self.fork, "rev-parse", "HEAD"), before)
+        self.assertEqual((self.fork / "core.go").read_text(), "fork changed the same line\n")
+        self.assertEqual(self.git(self.fork, "diff", "--name-only", "--diff-filter=U"), "")
+
+    def test_next_release_can_follow_a_previously_rewritten_release(self):
+        self.rewrite_upstream_history()
+        self.prepare()
+        previous = self.git(self.fork, "rev-parse", "HEAD")
+        # A new runner starts with the committed tree, without the build-only
+        # Android patch/version edits left by the previous preparation.
+        next_fork = Path(self.temp.name) / "next-fork"
+        self.git(self.fork, "clone", str(self.fork), str(next_fork))
+        self.fork = next_fork
+        (self.client / "version.properties").write_text("VERSION_NAME=1.14.2\nVERSION_CODE=732\nGO_VERSION=go1.26.7\n")
+        self.client_commit = self.commit(self.client, "client 1.14.2")
+        (self.upstream / "core.go").write_text("second upstream update\n")
+        self.target = self.commit(self.upstream, "core 1.14.2")
+        self.git(self.upstream, "tag", "v1.14.2")
+        os.environ.update(UPSTREAM_TAG="v1.14.2", UPSTREAM_COMMIT=self.target, GITHUB_RUN_NUMBER="62")
+        self.prepare()
+        self.git(self.fork, "merge-base", "--is-ancestor", previous, "HEAD")
+        self.git(self.fork, "merge-base", "--is-ancestor", self.target, "HEAD")
+        self.assertEqual((self.fork / "core.go").read_text(), "second upstream update\n")
+        self.assertEqual((self.fork / "udpflow.go").read_text(), "fork feature\n")
+        self.assertFalse((self.fork / "obsolete.txt").exists())
+        self.assertEqual(release.properties(self.fork / "clients/android/version.properties")["VERSION_NAME"], "1.14.2-udpflow")
+
+    def test_uncommitted_edits_are_not_overwritten_or_included_in_release(self):
+        before = self.git(self.fork, "rev-parse", "HEAD")
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                (self.fork / "core.go").write_text("unfinished local edit\n")
+                if staged:
+                    self.git(self.fork, "add", "core.go")
+                with self.assertRaises(subprocess.CalledProcessError):
+                    self.prepare()
+                self.assertEqual(self.git(self.fork, "rev-parse", "HEAD"), before)
+                self.assertEqual((self.fork / "core.go").read_text(), "unfinished local edit\n")
+                self.assertFalse((Path(self.temp.name) / "udpflow-source.json").exists())
 
 
 if __name__ == "__main__":

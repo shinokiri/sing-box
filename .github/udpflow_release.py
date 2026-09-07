@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -14,8 +15,8 @@ MANIFEST = Path("release/udpflow.json")
 CLIENT = Path("clients/android")
 
 
-def git(*args, cwd=None):
-    return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+def git(*args, cwd=None, env=None):
+    return subprocess.check_output(["git", *args], cwd=cwd, env=env, text=True).strip()
 
 
 def api(path, missing_ok=False):
@@ -68,6 +69,8 @@ def plan():
         ref = api(f"repos/{UPSTREAM}/git/tags/{ref['sha']}")["object"]
     if ref["type"] != "commit":
         raise ValueError("Upstream tag does not point to a commit")
+    if tag == current["upstream_tag"] and ref["sha"] != current["upstream_commit"]:
+        raise ValueError("Recorded upstream tag was moved; review the new commit before publishing")
 
     repository = os.environ["GITHUB_REPOSITORY"]
     release = api(f"repos/{repository}/releases/tags/{tag}-udpflow", missing_ok=True)
@@ -76,6 +79,26 @@ def plan():
         raise ValueError("The udpflow release is incorrectly marked as a prerelease")
     build = os.environ["GITHUB_EVENT_NAME"] != "schedule" or not published or tag != current["upstream_tag"]
     output(build=build, publish=not published, upstream_tag=tag, upstream_commit=ref["sha"])
+
+
+def merge_upstream_tree(upstream_base, ours, upstream):
+    # Compare release snapshots explicitly: upstream development history may
+    # have been reset/rebased since the last stable release.
+    with tempfile.TemporaryDirectory() as directory:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(directory).resolve() / "index")}
+        git("read-tree", upstream, env=env)
+        # Neutralize upstream changes to paths owned by this fork. Android is
+        # pinned separately after its VERSION_NAME matches the stable core.
+        git("restore", f"--source={upstream_base}", "--staged", "--", ".github/workflows", str(CLIENT), env=env)
+        incoming = git("write-tree", env=env)
+    result = subprocess.run(
+        ["git", "merge-tree", "--write-tree", f"--merge-base={upstream_base}", ours, incoming],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 1:
+        raise ValueError("Upstream merge needs review:\n" + result.stdout)
+    result.check_returncode()
+    return result.stdout.strip()
 
 
 def prepare():
@@ -93,30 +116,25 @@ def prepare():
     if tag != current["upstream_tag"]:
         if stable_version(tag) <= stable_version(current["upstream_tag"]):
             raise ValueError("Refusing to downgrade the upstream base")
-        git("merge-base", "--is-ancestor", current["upstream_commit"], commit)
-        # This fork owns its workflows. The Android client is pinned below
-        # to upstream main only after its VERSION_NAME matches the stable core.
-        subprocess.run(["git", "-c", "user.name=github-actions[bot]", "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com", "merge", "--no-commit", "--no-ff", commit], check=False)
-        conflicts = set(git("diff", "--name-only", "--diff-filter=U").splitlines())
-        unresolved = {path for path in conflicts if not path.startswith(".github/workflows/") and path != str(CLIENT)}
-        if unresolved:
-            raise ValueError(f"Upstream merge needs review: {sorted(unresolved)}")
-        # A failed merge without conflicts (e.g. unrelated histories) must not
-        # be mistaken for a successfully merged release.
-        git("merge-base", "--is-ancestor", current["upstream_commit"], "HEAD")
-        if git("rev-parse", "--verify", "MERGE_HEAD") != commit:
-            raise ValueError("Upstream merge did not prepare the expected commit")
-        git("restore", "--source=HEAD", "--staged", "--worktree", ".github/workflows")
+        git("diff", "--quiet")
+        git("diff", "--cached", "--quiet")
+        git("merge-base", "--is-ancestor", current["upstream_commit"], base)
+        merged_tree = merge_upstream_tree(current["upstream_commit"], base, commit)
         git("fetch", "origin", "main", cwd=CLIENT)
         client_commit = git("rev-parse", "FETCH_HEAD", cwd=CLIENT)
         client_props = dict(line.split("=", 1) for line in git("show", f"{client_commit}:version.properties", cwd=CLIENT).splitlines() if "=" in line)
         if client_props["VERSION_NAME"] != tag[1:]:
             raise ValueError("Upstream Android main has not reached this stable version")
+        git("read-tree", "-m", "-u", base, merged_tree)
         git("checkout", "--detach", client_commit, cwd=CLIENT)
         git("submodule", "update", "--init", "--recursive", cwd=CLIENT)
         MANIFEST.write_text(json.dumps({"upstream_tag": tag, "upstream_commit": commit}, indent=2) + "\n")
         git("add", str(CLIENT), str(MANIFEST))
-        git("-c", "user.name=github-actions[bot]", "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com", "commit", "-m", f"release: follow upstream {tag}")
+        merged_commit = git(
+            "-c", "user.name=github-actions[bot]", "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+            "commit-tree", git("write-tree"), "-p", base, "-p", commit, "-m", f"release: follow upstream {tag}",
+        )
+        git("update-ref", "HEAD", merged_commit, base)
     elif commit != current["upstream_commit"]:
         raise ValueError("Recorded upstream commit does not match the stable tag")
     git("merge-base", "--is-ancestor", commit, "HEAD")
