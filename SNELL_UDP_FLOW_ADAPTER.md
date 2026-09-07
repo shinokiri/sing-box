@@ -60,11 +60,10 @@ proxy server or returned to applications.
 }
 ```
 
-For the first version, VLESS `udp_flow` requires XUDP and is deliberately
-incompatible with outbound `multiplex`. XUDP already multiplexes multiple UDP
-destinations inside one connection; adding the separate sing-box multiplex
-layer would complicate selector ownership and lifecycle without helping this
-use case.
+VLESS `udp_flow` requires XUDP. Outbound `multiplex` can remain enabled for TCP
+and the ordinary packet path. UDP flows open independent XUDP associations on
+the configured transport; they do not enter the separate multiplex layer.
+Resetting a UDP flow therefore does not close a TCP multiplex session.
 
 ## Route requirement
 
@@ -112,7 +111,8 @@ flow rather than leaking the Fake-IP.
   to 1,024 associations and 4 MiB of queued/in-flight payload data, excluding
   protocol framing and read buffers. Packets exceeding these limits are
   dropped with a trace-level forwarding error rather than blocking the TUN.
-- Dialing and each protocol write have a 15-second timeout. A stalled write
+- Flow setup uses the outbound's explicit `connect_timeout`, or 15 seconds
+  when unset. Each protocol write has a 15-second timeout. A stalled write
   closes the association, including when the protocol is awaiting a handshake
   reply inside its write method. Later packets can create a fresh association;
   failed or queued packets on the old association are not replayed.
@@ -135,17 +135,34 @@ IPv4/IPv6 exchanges over one association. Other tests cover buffer ownership,
 queue limits, cancel/timeout cleanup, failed-association replacement, late
 replies after detach, and cancellation of the VLESS initial request.
 VLESS/gRPC is also tested through the real outbound factory and transport.
+VLESS TCP multiplex and UDP flow coexistence is tested with smux, yamux, and
+h2mux, including keeping TCP streams alive after UDP flow reset. Constructor
+tests check both shorter and longer custom connection timeouts; virtual-clock
+tests exercise idle sweeping and receive-only activity without wall-clock waits.
+The root integration test decodes a complete configuration and exercises the
+real Fake-IP store, hosts resolver, route rules, and TUN routing entry point for
+IPv4/IPv6 Snell and VLESS destinations. It also checks rejection without a
+resolve rule. This needs the host's network-monitor permissions.
 Transport regressions cover concurrent response initialization and reads, and
 closing before a response arrives without leaking its late response body.
 QUIC dial and handshake cancellation, waiting for a shared connection, and
 reuse after canceling a completed dial (including a context-bound streaming
 UDP detour) are covered. WebSocket and HTTP Upgrade
 handshakes are tested against a silent peer, including preservation of the
-configured WebSocket subprotocol across attempts.
+configured WebSocket subprotocol across attempts. Closing an established
+WebSocket must interrupt blocked reads/writes immediately.
+
+The multiplex coexistence tests also exposed a response publication/close race
+in sing-mux v0.3.5. `third_party/sing-mux` contains that version with a local
+`h2mux_conn.go` fix and a late-response regression. The root module replacement
+applies it consistently to tests and Android builds. See its `README.udpflow.md`
+for provenance and the condition for removing the local copy.
 
 ```sh
-go test -race -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raygrpclite ./transport/v2rayhttp
-go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic
+go test -race -tags with_gvisor,with_quic -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux
+go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./common/udpflow ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic
+go test -exec sudo -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS)" ./...
+go test -tags with_gvisor -run '^$' -bench '^BenchmarkPortForward$' -benchmem ./common/udpflow
 CGO_ENABLED=0 go build -trimpath -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS) -s -w -buildid=" ./cmd/sing-box
 ```
 
@@ -154,25 +171,33 @@ proxy server, particularly when assessing public UDP mapping/filtering.
 
 ## GitHub Actions
 
-The included `.github/workflows/verify-snell-udp-flow.yml` runs on relevant
-pushes and pull requests with Go 1.25 and 1.26. It runs the race and gVisor checks
-above, then creates a Linux amd64 artifact with the repository's non-Naive
-release feature tags for each Go version.
+The dedicated `.github/workflows/build.yml` runs on `udpflow` pushes, pull
+requests, and manual dispatch. Its first job runs all core-module tests and
+`go vet` with release feature tags (excluding the unsafe-pointer diagnostic for
+the upstream daemon/libbox deliberate crash hooks), then targeted race tests with both grpclite
+(the Android implementation) and full gRPC. Forwarding benchmarks record
+allocation counts and throughput in the run summary; each iteration forwards
+32 packets, including queueing and buffer copies but excluding encryption and
+network latency. The separate `test/` module's external-server/Docker suite is
+not part of this core-module gate.
 
-Pushes to `udpflow` also run the existing `Build` workflow's Android jobs with
-Go 1.26.7, NDK r28, and JDK 17. Android builds on this branch, including manual
-Build selections, compile only ARM64 and the modern API 24 library with Naive.
-They use `build_libbox -target android -platform android/arm64
+After the checks pass, branch push/manual builds compile a signed ARM64 APK
+with Go 1.26.7, NDK r28, and JDK 17. Pull requests run checks only. The native
+library and APK are built on one runner, with one toolchain setup and cached
+Go native compilation. They use `build_libbox -target android -platform android/arm64
 -android-legacy=false` and package one signed `other` APK. The Gradle init script
 disables ABI splits and filters all native dependencies to `arm64-v8a`; CI
 checks that exactly one APK contains only that ABI and includes libbox.
 It also verifies the built APK's signature with `apksigner` before uploading.
 
-The push-build version is `1.14.0-udpflow.g<commit>`, and the APK is uploaded as
-the `binary-android-arm64` Actions artifact. No legacy API 21 library, legacy
-APK, other Android architecture, or universal APK is built for `udpflow`.
-These push builds do not run release publishing, other platforms, or
-repository-wide cache cleanup.
+The snapshot version is `<client version>-udpflow.g<commit>`, and the APK is
+uploaded as the `binary-android-arm64` Actions artifact. `versionCode` is
+`1000000 + GITHUB_RUN_NUMBER`: later runs increase it even though the client
+commit is pinned; rerunning a job preserves it. CI reads the actual APK manifest
+to check the version and API 24 minimum against the recorded metadata.
+No legacy API 21 library, legacy APK, other Android architecture, or universal
+APK is built. The workflow contains no release publishing or repository-wide
+cache cleanup, including when dispatched manually.
 
 Android builds on `udpflow` use the recorded `clients/android` submodule commit
 (`b7bf31b6e553b30ab69a90a1769f9273cb25f089`, the 1.14.0 client with its default
