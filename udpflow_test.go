@@ -74,7 +74,15 @@ func TestUDPFlowFakeIPRouting(t *testing.T) {
 						expected = fmt.Sprintf("[2001:db8::%d]:443", index+1)
 					}
 					require.Equal(t, netip.MustParseAddrPort(expected), verdict.Destination)
-					require.Equal(t, []string{"snell", "vless"}[index], verdict.Port.(adapter.Outbound).Tag())
+					outbound, found := instance.Outbound().Outbound([]string{"snell", "vless"}[index])
+					require.True(t, found)
+					expectedPort, err := outbound.(adapter.InboundFlowOutbound).FlowPortForInbound("tun")
+					require.NoError(t, err)
+					require.Same(t, expectedPort, verdict.Port)
+					other := adapter.JudgeFlow(instance.Router(), "other-tun", C.TypeTun, uint8(header.UDPProtocolNumber), source, netip.AddrPortFrom(fake, 443), nil)
+					require.Equal(t, tun.ActionFlow, other.Action)
+					require.NotSame(t, verdict.Port, other.Port)
+					require.Equal(t, verdict.Destination, other.Destination)
 					require.Equal(t, 20*time.Second, verdict.UDPTimeout)
 				}
 			}

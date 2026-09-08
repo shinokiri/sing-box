@@ -82,6 +82,62 @@ func TestPortPreservesRearHeadroom(t *testing.T) {
 	require.False(t, packetConn.headroomViolation.Load())
 }
 
+type framingPacketConn struct {
+	*testPacketConn
+	frame int // accessed only by the packet writer and its headroom methods
+	sent  chan testDatagram
+}
+
+var testFraming = [][2]int{{64, 16}, {512, 32}, {8, 0}, {128, 16}}
+
+func (c *framingPacketConn) FrontHeadroom() int { return testFraming[c.frame][0] }
+func (c *framingPacketConn) RearHeadroom() int  { return testFraming[c.frame][1] }
+
+func (c *framingPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	defer buffer.Release()
+	front, rear := c.FrontHeadroom(), c.RearHeadroom()
+	if buffer.Start() < front || buffer.FreeLen() < rear {
+		return io.ErrShortBuffer
+	}
+	packet := testDatagram{append([]byte(nil), buffer.Bytes()...), destination}
+	clear(buffer.ExtendHeader(front))
+	clear(buffer.Extend(rear))
+	if c.frame < len(testFraming)-1 {
+		c.frame++
+	}
+	c.sent <- packet
+	return nil
+}
+
+// Packets queued before a dial completes have no framing reservation. Later
+// requirements may grow or shrink, and enqueue must not inspect writer state.
+func TestPortHandlesChangingHeadroom(t *testing.T) {
+	conn := &framingPacketConn{testPacketConn: newTestPacketConn(0), sent: make(chan testDatagram, 8)}
+	release := make(chan struct{})
+	port, err := New(Options{DialPacketConn: func(ctx context.Context, _ M.Socksaddr) (N.NetPacketConn, error) {
+		select {
+		case <-release:
+			return conn, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}})
+	require.NoError(t, err)
+	defer port.Close()
+	for _, payload := range []string{"first", "larger header", "", "smaller header"} {
+		require.NoError(t, port.WritePackets([][]byte{testPortPacket(t, 50000, payload)}))
+	}
+	close(release)
+	for _, payload := range []string{"first", "larger header", "", "smaller header"} {
+		require.Equal(t, payload, string(receiveTestValue(t, conn.sent).payload))
+	}
+	// Steady traffic uses the reservation published by the worker.
+	for range 32 {
+		require.NoError(t, port.WritePackets([][]byte{testPortPacket(t, 50000, "established")}))
+		require.Equal(t, "established", string(receiveTestValue(t, conn.sent).payload))
+	}
+}
+
 type testPacketConn struct {
 	rearHeadroom     int
 	firstDestination M.Socksaddr

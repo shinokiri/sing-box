@@ -37,6 +37,13 @@ type FlowOutbound interface {
 	PreMatchFlow(network string, destination netip.Addr) PreMatchAction
 }
 
+// InboundFlowOutbound isolates ports when selector allocation belongs to the
+// inbound. Outbounds whose selectors are already global can use FlowOutbound.
+type InboundFlowOutbound interface {
+	FlowOutbound
+	FlowPortForInbound(inbound string) (tun.Port, error)
+}
+
 type OutboundRegistry interface {
 	option.OutboundOptionsRegistry
 	CreateOutbound(ctx context.Context, router Router, logger log.ContextLogger, tag string, outboundType string, options any) (Outbound, error)

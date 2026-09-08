@@ -82,6 +82,39 @@ func TestPortQueueLimitsAndCleanup(t *testing.T) {
 	}
 }
 
+func TestPortSharesLimitsAcrossInbounds(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		options Options
+		message string
+	}{
+		{"bytes", Options{MaxQueuedBytes: 3}, "queue byte limit"},
+		{"connections", Options{MaxFlows: 1}, "connection limit"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.options.DialPacketConn = func(ctx context.Context, _ M.Socksaddr) (N.NetPacketConn, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			port, err := New(test.options)
+			require.NoError(t, err)
+			defer port.Close()
+			bindingA, err := port.ForInbound("tun-a")
+			require.NoError(t, err)
+			bindingB, err := port.ForInbound("tun-b")
+			require.NoError(t, err)
+			require.NoError(t, bindingA.WritePackets([][]byte{testPortPacket(t, 50000, "ab")}))
+			err = bindingB.WritePackets([][]byte{testPortPacket(t, 50000, "cd")})
+			require.ErrorContains(t, err, test.message)
+			require.NoError(t, port.Close())
+			require.Zero(t, port.queuedBytes)
+			require.Empty(t, port.flows)
+			_, err = port.ForInbound("tun-c")
+			require.ErrorIs(t, err, net.ErrClosed)
+		})
+	}
+}
+
 func TestPortCancelsPendingDial(t *testing.T) {
 	for _, action := range []string{"close", "reset", "parent"} {
 		t.Run(action, func(t *testing.T) {
@@ -245,6 +278,103 @@ func TestPortWriteTimeoutClosesConnection(t *testing.T) {
 	require.Zero(t, port.queuedBytes)
 }
 
+func TestPortCountsInFlightBytesAcrossInbounds(t *testing.T) {
+	conn := &blockedWritePacketConn{testPacketConn: newTestPacketConn(0), started: make(chan struct{})}
+	port, err := New(Options{MaxQueuedBytes: 3, DialPacketConn: func(context.Context, M.Socksaddr) (N.NetPacketConn, error) {
+		return conn, nil
+	}})
+	require.NoError(t, err)
+	defer port.Close()
+	bindingA, err := port.ForInbound("tun-a")
+	require.NoError(t, err)
+	bindingB, err := port.ForInbound("tun-b")
+	require.NoError(t, err)
+	require.NoError(t, bindingA.WritePackets([][]byte{testPortPacket(t, 50000, "ab")}))
+	receiveTestValue(t, conn.started)
+	// Dequeueing and passing ownership to the protocol must not free the
+	// budget while the network write is still holding the payload.
+	err = bindingB.WritePackets([][]byte{testPortPacket(t, 50000, "cd")})
+	require.ErrorContains(t, err, "queue byte limit")
+	require.NoError(t, port.Close())
+	require.Zero(t, port.queuedBytes)
+}
+
+type timedWritePacketConn struct {
+	*channelPacketConn
+	started chan struct{}
+}
+
+func (c *timedWritePacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	switch string(buffer.Bytes()) {
+	case "slow":
+		time.Sleep(9 * time.Second)
+	case "stalled":
+		defer buffer.Release()
+		close(c.started)
+		<-c.closed
+		return net.ErrClosed
+	}
+	return c.channelPacketConn.WritePacket(buffer, destination)
+}
+
+func TestPortWriteTimerStopsWhileIdleAndRestarts(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		conn := &timedWritePacketConn{channelPacketConn: newChannelPacketConn(), started: make(chan struct{})}
+		port, err := New(Options{WriteTimeout: 10 * time.Second, DialPacketConn: func(context.Context, M.Socksaddr) (N.NetPacketConn, error) {
+			return conn, nil
+		}})
+		require.NoError(t, err)
+		defer port.Close()
+		for _, payload := range []string{"fast", "slow", "fast again"} {
+			require.NoError(t, port.WritePackets([][]byte{testPortPacket(t, 50000, payload)}))
+			require.Equal(t, payload, string((<-conn.sent).payload))
+			synctest.Wait()
+			// Cross both this write's deadline and the previous one's. Idle
+			// associations must not time out or retain an armed write timer.
+			time.Sleep(20 * time.Second)
+			synctest.Wait()
+			select {
+			case <-conn.closed:
+				t.Fatal("a completed write's timer closed the association")
+			default:
+			}
+		}
+		require.NoError(t, port.WritePackets([][]byte{testPortPacket(t, 50000, "stalled")}))
+		receiveTestValue(t, conn.started)
+		time.Sleep(9 * time.Second)
+		synctest.Wait()
+		select {
+		case <-conn.closed:
+			t.Fatal("a reused timer expired before the new write's deadline")
+		default:
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		receiveTestValue(t, conn.closed)
+		require.NoError(t, port.Close())
+		require.Zero(t, port.queuedBytes)
+	})
+}
+
+func TestPortReceivesVaryingPacketSizes(t *testing.T) {
+	conn := newChannelPacketConn()
+	port := newChannelPort(t, conn)
+	returnPath := newTestReturn()
+	require.NoError(t, port.AttachReturn(returnPath))
+	require.NoError(t, port.WritePackets([][]byte{testPortPacket(t, 50000, "query")}))
+	receiveTestValue(t, conn.sent)
+	for _, size := range []int{4096, 1, 0, 8192, 64} {
+		payload := make([]byte, size)
+		for i := range payload {
+			payload[i] = byte(i + size)
+		}
+		conn.received <- testDatagram{payload, M.ParseSocksaddr("203.0.113.1:443")}
+		_, _, reply, ok := parseUDPPacket(receiveTestValue(t, returnPath.packets))
+		require.True(t, ok)
+		require.Equal(t, payload, reply)
+	}
+}
+
 type failedWritePacketConn struct{ *testPacketConn }
 
 func (c *failedWritePacketConn) WritePacket(buffer *buf.Buffer, _ M.Socksaddr) error {
@@ -357,12 +487,14 @@ func TestPortConcurrentResetAndClose(t *testing.T) {
 	start := make(chan struct{})
 	for index := range 8 {
 		packet := testPortPacket(t, uint16(50000+index), "concurrent")
+		binding, err := port.ForInbound([]string{"tun-a", "tun-b"}[index%2])
+		require.NoError(t, err)
 		writers.Add(1)
 		go func() {
 			defer writers.Done()
 			<-start
 			for range 64 {
-				port.WritePackets([][]byte{packet})
+				binding.WritePackets([][]byte{packet})
 			}
 		}()
 	}

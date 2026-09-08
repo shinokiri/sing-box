@@ -2,8 +2,6 @@ package udpflow
 
 import (
 	"context"
-	"math"
-	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -25,8 +23,6 @@ const (
 	defaultMaxFlows       = 1024
 	defaultMaxQueuedBytes = 4 << 20
 )
-
-var nextPortID atomic.Uint64
 
 // PacketConnFactory creates one multi-destination packet connection for a
 // selector. firstDestination can be used by protocols whose initial request
@@ -54,16 +50,15 @@ type Options struct {
 var _ tun.PortWithSelectorRange = (*Port)(nil)
 
 // Port adapts a multi-destination L4 packet connection to sing-tun's flow port.
-// One packet connection is maintained per selector. Only one dispatcher may
-// attach, since selector allocation is local to each dispatcher.
+// Each inbound has its own selectors and return path, while association and
+// payload limits apply to the whole outbound.
 type Port struct {
+	*portBinding
 	ctx            context.Context
 	cancel         context.CancelFunc
 	logger         logger.ContextLogger
 	name           string
 	dialPacketConn PacketConnFactory
-	inet4Address   netip.Addr
-	inet6Address   netip.Addr
 	mtu            uint32
 	idleTimeout    time.Duration
 	sweepPeriod    time.Duration
@@ -76,8 +71,8 @@ type Port struct {
 	// Never hold access across protocol or return-path I/O: WritePackets runs
 	// on the TUN reader, which must also serve unrelated flows.
 	access      sync.Mutex
-	returnPath  tun.Return
-	flows       map[uint16]*flow
+	bindings    map[string]*portBinding
+	flows       map[*flow]struct{}
 	queuedBytes int
 
 	closeOnce sync.Once
@@ -91,6 +86,7 @@ type queuedPacket struct {
 
 type flow struct {
 	port             *Port
+	binding          *portBinding
 	ctx              context.Context
 	cancel           context.CancelFunc
 	selector         uint16
@@ -98,6 +94,12 @@ type flow struct {
 	returnPath       tun.Return
 	queue            chan queuedPacket
 	lastActivity     atomic.Int64
+
+	// The worker publishes framing requirements under port.access. Enqueue
+	// reserves this space without calling into a concurrently active writer.
+	frontHeadroom int
+	rearHeadroom  int
+	writeTimer    *time.Timer // owned by the writer, stopped between packets
 
 	connAccess sync.Mutex
 	packetConn N.NetPacketConn
@@ -137,10 +139,6 @@ func New(options Options) (*Port, error) {
 	if options.MaxQueuedBytes <= 0 {
 		options.MaxQueuedBytes = defaultMaxQueuedBytes
 	}
-	id := nextPortID.Add(1)
-	if id >= 1<<24 {
-		return nil, E.New("UDP flow: internal port addresses exhausted")
-	}
 	ctx, cancel := context.WithCancel(options.Context)
 	port := &Port{
 		ctx:            ctx,
@@ -148,11 +146,6 @@ func New(options Options) (*Port, error) {
 		logger:         options.Logger,
 		name:           options.Name,
 		dialPacketConn: options.DialPacketConn,
-		// These addresses are only used between the dispatcher and this port;
-		// they never appear on the proxy connection or the TUN return packet.
-		// Distinct addresses keep independently allocated selectors disjoint.
-		inet4Address:   netip.AddrFrom4([4]byte{127, byte(id >> 16), byte(id >> 8), byte(id)}),
-		inet6Address:   netip.AddrFrom16([16]byte{0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, byte(id >> 16), byte(id >> 8), byte(id)}),
 		mtu:            options.MTU,
 		idleTimeout:    options.IdleTimeout,
 		sweepPeriod:    options.SweepPeriod,
@@ -161,112 +154,18 @@ func New(options Options) (*Port, error) {
 		queueSize:      options.QueueSize,
 		maxFlows:       options.MaxFlows,
 		maxQueuedBytes: options.MaxQueuedBytes,
-		flows:          make(map[uint16]*flow),
+		bindings:       make(map[string]*portBinding),
+		flows:          make(map[*flow]struct{}),
+	}
+	var err error
+	port.portBinding, err = port.newBinding()
+	if err != nil {
+		cancel()
+		return nil, err
 	}
 	port.workers.Add(1)
 	go port.sweepLoop()
 	return port, nil
-}
-
-func (p *Port) PortAddresses() (netip.Addr, netip.Addr) {
-	return p.inet4Address, p.inet6Address
-}
-
-func (p *Port) PortMTU() uint32 {
-	return p.mtu
-}
-
-func (p *Port) PortSelectorRange() (uint16, uint16) {
-	// Preserve the application's UDP source port whenever the reverse-flow key
-	// is unambiguous. sing-tun allocates another selector only on a collision.
-	return 1, math.MaxUint16
-}
-
-func (p *Port) AttachReturn(returnPath tun.Return) error {
-	p.access.Lock()
-	defer p.access.Unlock()
-	if p.ctx.Err() != nil {
-		return net.ErrClosed
-	}
-	if returnPath == nil {
-		return E.New("UDP flow: missing return path")
-	}
-	if p.returnPath != nil && p.returnPath != returnPath {
-		return E.New("UDP flow: return path already attached")
-	}
-	p.returnPath = returnPath
-	return nil
-}
-
-func (p *Port) DetachReturn(returnPath tun.Return) error {
-	p.access.Lock()
-	if p.returnPath != returnPath {
-		p.access.Unlock()
-		return nil
-	}
-	p.returnPath = nil
-	flows := p.takeFlowsLocked()
-	p.access.Unlock()
-	for _, current := range flows {
-		current.closeConn()
-	}
-	return nil
-}
-
-// WritePackets copies packets into bounded queues. Dialing and protocol writes
-// happen on per-selector workers, so a stalled server cannot block the TUN.
-func (p *Port) WritePackets(packets [][]byte) error {
-	var errs []error
-	for _, packet := range packets {
-		if err := p.writePacket(packet); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return E.Errors(errs...)
-}
-
-func (p *Port) writePacket(packet []byte) error {
-	source, destination, payload, ok := parseUDPPacket(packet)
-	if !ok {
-		return nil
-	}
-	p.access.Lock()
-	defer p.access.Unlock()
-	if p.ctx.Err() != nil {
-		return net.ErrClosed
-	}
-	if len(payload) > p.maxQueuedBytes-p.queuedBytes {
-		return E.New(p.name, " UDP flow queue byte limit reached")
-	}
-	current := p.flows[source.Port()]
-	if current == nil {
-		if len(p.flows) >= p.maxFlows {
-			return E.New(p.name, " UDP flow connection limit reached")
-		}
-		ctx, cancel := context.WithCancel(p.ctx)
-		current = &flow{
-			port:             p,
-			ctx:              ctx,
-			cancel:           cancel,
-			selector:         source.Port(),
-			firstDestination: M.SocksaddrFromNetIP(destination),
-			returnPath:       p.returnPath,
-			queue:            make(chan queuedPacket, p.queueSize),
-		}
-		p.flows[current.selector] = current
-		p.workers.Add(1)
-		go current.run()
-	}
-	if len(current.queue) == cap(current.queue) {
-		return E.New(p.name, " UDP flow queue full for selector ", current.selector)
-	}
-	// sing-tun reuses its packet storage as soon as WritePackets returns.
-	buffer := buf.NewSize(len(payload))
-	copy(buffer.Extend(len(payload)), payload)
-	p.queuedBytes += len(payload)
-	current.queue <- queuedPacket{buffer, M.SocksaddrFromNetIP(destination)}
-	current.touch()
-	return nil
 }
 
 func (f *flow) touch() {
@@ -349,21 +248,40 @@ func (f *flow) writePacket(packetConn N.NetPacketConn, packet queuedPacket) erro
 	// the first frame, and writers are not universally concurrent.
 	frontHeadroom := N.CalculateFrontHeadroom(packetConn)
 	rearHeadroom := N.CalculateRearHeadroom(packetConn)
-	buffer := buf.NewSize(frontHeadroom + size + rearHeadroom)
-	buffer.Resize(frontHeadroom, 0)
-	copy(buffer.Extend(size), packet.buffer.Bytes())
-	packet.buffer.Release()
+	if frontHeadroom != f.frontHeadroom || rearHeadroom != f.rearHeadroom {
+		f.port.access.Lock()
+		f.frontHeadroom, f.rearHeadroom = frontHeadroom, rearHeadroom
+		f.port.access.Unlock()
+	}
+	buffer := packet.buffer
+	if buffer.Start() < frontHeadroom || buffer.FreeLen() < rearHeadroom {
+		// Packets queued before dialing or a framing change may need more
+		// space. Established flows normally pass their owned buffer through.
+		buffer = buf.NewSize(frontHeadroom + size + rearHeadroom)
+		buffer.Resize(frontHeadroom, 0)
+		copy(buffer.Extend(size), packet.buffer.Bytes())
+		packet.buffer.Release()
+	}
 	// Keep in-flight bytes charged to the queue budget until the write ends,
 	// but do not retain a second payload copy while waiting on the network.
 	defer f.port.releaseQueuedBytes(size)
 	// Some protocols read a handshake inside WritePacket. A write-only
 	// deadline cannot interrupt that read; closing can interrupt both.
-	timer := time.AfterFunc(f.port.writeTimeout, func() {
-		f.logError("write", context.DeadlineExceeded)
-		f.close()
-	})
-	defer timer.Stop()
-	return packetConn.WritePacket(buffer, packet.destination)
+	if f.writeTimer == nil {
+		f.writeTimer = time.AfterFunc(f.port.writeTimeout, func() {
+			f.logError("write", context.DeadlineExceeded)
+			f.close()
+		})
+	} else {
+		f.writeTimer.Reset(f.port.writeTimeout)
+	}
+	err := packetConn.WritePacket(buffer, packet.destination)
+	if !f.writeTimer.Stop() && err == nil {
+		// An expired callback may still be starting. End this association;
+		// never reuse its timer for another write while that callback can run.
+		err = context.DeadlineExceeded
+	}
+	return err
 }
 
 func (f *flow) releasePacket(packet queuedPacket) {
@@ -380,21 +298,20 @@ func (p *Port) releaseQueuedBytes(size int) {
 
 func (f *flow) readLoop(packetConn N.NetPacketConn) {
 	defer f.close()
+	buffer := buf.NewSize(65535)
+	defer buffer.Release()
 	for {
-		buffer := buf.NewSize(65535)
+		buffer.Resize(0, 0)
 		source, err := packetConn.ReadPacket(buffer)
 		if err != nil {
-			buffer.Release()
 			f.logError("read", err)
 			return
 		}
 		if f.ctx.Err() != nil {
-			buffer.Release()
 			return
 		}
 		f.touch()
 		err = f.returnPacket(source, buffer.Bytes())
-		buffer.Release()
 		if err != nil {
 			f.logError("return", err)
 		}
@@ -411,9 +328,9 @@ func (f *flow) returnPacket(source M.Socksaddr, payload []byte) error {
 	if f.returnPath == nil || f.ctx.Err() != nil {
 		return nil
 	}
-	address := f.port.inet6Address
+	address := f.binding.inet6Address
 	if source.Addr.Unmap().Is4() {
-		address = f.port.inet4Address
+		address = f.binding.inet4Address
 	}
 	packet, err := buildUDPResponse(f.returnPath.ReturnHeadroom(), source, netip.AddrPortFrom(address, f.selector), payload)
 	if err != nil {
@@ -444,7 +361,7 @@ func (p *Port) sweep() {
 	deadline := time.Now().Add(-p.idleTimeout).UnixNano()
 	var expired []*flow
 	p.access.Lock()
-	for _, current := range p.flows {
+	for current := range p.flows {
 		if current.lastActivity.Load() < deadline {
 			current.closeLocked()
 			expired = append(expired, current)
@@ -458,8 +375,9 @@ func (p *Port) sweep() {
 
 func (f *flow) closeLocked() {
 	f.cancel()
-	if f.port.flows[f.selector] == f {
-		delete(f.port.flows, f.selector)
+	delete(f.port.flows, f)
+	if f.binding.flows[f.selector] == f {
+		delete(f.binding.flows, f.selector)
 	}
 }
 
@@ -482,7 +400,7 @@ func (f *flow) close() {
 
 func (p *Port) takeFlowsLocked() []*flow {
 	flows := make([]*flow, 0, len(p.flows))
-	for _, current := range p.flows {
+	for current := range p.flows {
 		current.closeLocked()
 		flows = append(flows, current)
 	}

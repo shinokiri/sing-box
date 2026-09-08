@@ -79,6 +79,13 @@ func JudgeFlow(router Router, inbound string, inboundType string, network uint8,
 		if !isPort {
 			return tun.FlowVerdict{Action: tun.ActionAccept}
 		}
+		if scoped, ok := result.Outbound.(InboundFlowOutbound); ok {
+			var err error
+			port, err = scoped.FlowPortForInbound(inbound)
+			if err != nil {
+				return tun.FlowVerdict{Action: tun.ActionReject}
+			}
+		}
 		verdict := tun.FlowVerdict{Action: tun.ActionFlow, Port: port, UDPTimeout: result.UDPTimeout, NewTracker: result.NewTracker}
 		if result.Destination.IsValid() {
 			destinationPort := result.Destination.Port()

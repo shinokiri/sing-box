@@ -38,7 +38,7 @@ type Outbound struct {
 }
 
 var (
-	_ adapter.FlowOutbound            = (*Outbound)(nil)
+	_ adapter.InboundFlowOutbound     = (*Outbound)(nil)
 	_ adapter.InterfaceUpdateListener = (*Outbound)(nil)
 )
 
@@ -184,6 +184,13 @@ func (h *Outbound) PortAddresses() (netip.Addr, netip.Addr) {
 		return netip.Addr{}, netip.Addr{}
 	}
 	return h.flowPort.PortAddresses()
+}
+
+func (h *Outbound) FlowPortForInbound(inbound string) (tun.Port, error) {
+	if h.flowPort == nil {
+		return nil, E.New("snell: UDP flow port is disabled")
+	}
+	return h.flowPort.ForInbound(inbound)
 }
 
 func (h *Outbound) PortMTU() uint32 {

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,9 +150,9 @@ func TestDispatcherSeparatesOutbounds(t *testing.T) {
 	}
 }
 
-// A second dispatcher must fall back to the normal packet path, since its
-// independently allocated selectors cannot safely share the first association.
-func TestDispatcherRejectsSecondInbound(t *testing.T) {
+// A binding must still reject a second dispatcher. Different inbounds obtain
+// separate bindings through ForInbound instead of sharing this selector space.
+func TestDispatcherRejectsSharedBinding(t *testing.T) {
 	conn := newChannelPacketConn()
 	port := newChannelPort(t, conn)
 	fake := netip.MustParseAddr("198.18.0.1")
@@ -175,6 +176,62 @@ func TestDispatcherRejectsSecondInbound(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, netip.AddrPortFrom(clientA, 50000), destination)
 	require.Empty(t, writebackB.packets)
+}
+
+func TestDispatcherSeparatesInbounds(t *testing.T) {
+	for _, test := range []struct{ name, client, fake, real string }{
+		{"IPv4", "192.0.2.1", "198.18.0.1", "203.0.113.10:443"},
+		{"IPv6", "2001:db8::1", "fc00::1", "[2001:db8::10]:443"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			connections := []*channelPacketConn{newChannelPacketConn(), newChannelPacketConn()}
+			var calls atomic.Int32
+			port, err := New(Options{DialPacketConn: func(context.Context, M.Socksaddr) (N.NetPacketConn, error) {
+				return connections[calls.Add(1)-1], nil
+			}})
+			require.NoError(t, err)
+			defer port.Close()
+			client, fake, real := netip.MustParseAddr(test.client), netip.MustParseAddr(test.fake), netip.MustParseAddrPort(test.real)
+			var dispatchers []*tun.ForwardDispatcher
+			var writebacks []*testWriteback
+			for index, inbound := range []string{"tun-a", "tun-b"} {
+				binding, err := port.ForInbound(inbound)
+				require.NoError(t, err)
+				cached, err := port.ForInbound(inbound)
+				require.NoError(t, err)
+				require.Same(t, binding, cached)
+				writeback := newTestWriteback()
+				dispatcher := tun.NewForwardDispatcher(&testFlowHandler{ports: map[netip.Addr]tun.Port{fake: binding}, real: real}, writeback, logger.NOP(), time.Minute, time.Minute)
+				defer dispatcher.Close()
+				dispatchers = append(dispatchers, dispatcher)
+				writebacks = append(writebacks, writeback)
+				// Even identical five-tuples from separate inbounds must get
+				// separate associations and retain their own return path.
+				packet := buildTestUDPPacket(t, client, 50000, fake, 443, []byte(inbound))
+				require.True(t, dispatcher.Dispatch(packet))
+				dispatcher.Flush()
+				require.Equal(t, inbound, string(receiveTestValue(t, connections[index].sent).payload))
+			}
+			for index, conn := range connections {
+				reply := []byte{byte(index)}
+				conn.received <- testDatagram{reply, M.SocksaddrFromNetIP(real)}
+				source, destination, payload, ok := parseUDPPacket(receiveTestValue(t, writebacks[index].packets))
+				require.True(t, ok)
+				require.Equal(t, netip.AddrPortFrom(fake, 443), source)
+				require.Equal(t, netip.AddrPortFrom(client, 50000), destination)
+				require.Equal(t, reply, payload)
+			}
+			dispatchers[0].Close()
+			receiveTestValue(t, connections[0].closed)
+			packet := buildTestUDPPacket(t, client, 50000, fake, 443, []byte("still active"))
+			require.True(t, dispatchers[1].Dispatch(packet))
+			dispatchers[1].Flush()
+			require.Equal(t, "still active", string(receiveTestValue(t, connections[1].sent).payload))
+			require.Equal(t, int32(2), calls.Load())
+			port.Reset()
+			receiveTestValue(t, connections[1].closed)
+		})
+	}
 }
 
 type observedConn struct {

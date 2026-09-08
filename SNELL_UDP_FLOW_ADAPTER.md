@@ -22,11 +22,23 @@ by Snell and VLESS/XUDP. It preserves protocol front/rear headroom and
 serializes writes per selector on asynchronous workers. Packet data is copied
 before the TUN reader reuses its buffers. Dialing, handshake reads, and writes
 therefore do not hold up the TUN reader or other selectors.
+The worker publishes protocol headroom requirements so subsequent packets can
+reserve their framing space during that ownership copy. It rechecks the actual
+requirements before writing and only reallocates when a queued buffer is too
+small, such as during setup or a framing change. Each association reuses one
+write timer, stopped between writes, and one receive buffer. There is no worker
+or periodic wakeup per packet; these changes reduce allocation and copying
+without making the TUN reader wait for network I/O.
 
-Each adapter has distinct internal IPv4/IPv6 addresses so that two outbounds
-using the same selector and real server cannot match each other's replies.
+Each outbound/inbound binding has distinct internal IPv4/IPv6 addresses so
+that independently allocated selectors cannot match each other's replies.
 These addresses only identify dispatcher mappings; they are not sent to the
 proxy server or returned to applications.
+The router requests a stable port for each inbound through an optional outbound
+interface. Each binding owns its selector map and return path. Bindings share
+the outbound's connection/byte budgets, cleanup loop and network-reset handling;
+creating a binding starts no goroutines. Detaching an inbound closes only its
+associations, while resetting or closing the outbound closes all of them.
 
 ## Snell configuration
 
@@ -103,10 +115,10 @@ flow rather than leaking the Fake-IP.
 
 ## Known limits
 
-- A flow-enabled outbound can attach to one TUN dispatcher at a time. Additional
-  inbounds use the existing packet path. Use a separate outbound instance per
-  TUN inbound when each needs flow-based Fake-IP translation. This prevents
-  independent inbound selector allocators from sharing the wrong association.
+- Multiple TUN inbounds may use the same flow-enabled outbound. Each inbound
+  gets a separate binding; a binding still accepts only one dispatcher because
+  selectors are local to that dispatcher. Direct users of `udpflow.Port` must
+  call `ForInbound` when sharing it across inbounds, as the router does.
 - Each selector has a queue of up to 64 pending packets. Each adapter allows up
   to 1,024 associations and 4 MiB of queued/in-flight payload data, excluding
   protocol framing and read buffers. Packets exceeding these limits are
@@ -128,12 +140,16 @@ flow rather than leaking the Fake-IP.
 ## Validation
 
 The regression suite uses the real sing-tun dispatcher to cover IPv4/IPv6
-outbound isolation, colliding inbound selectors, and a silent Snell v6 server.
+outbound isolation, identical five-tuples across inbounds, independent detach,
+and a silent Snell v6 server. Resource-limit tests ensure inbound bindings
+cannot multiply an outbound's connection or queued-byte budget.
 In-process Snell v4/v5 (plain and HTTP-obfuscated), Snell v6 (default,
 unshaped, and unsafe-raw), and VLESS/XUDP servers exercise multi-destination
 IPv4/IPv6 exchanges over one association. Other tests cover buffer ownership,
 queue limits, cancel/timeout cleanup, failed-association replacement, late
 replies after detach, and cancellation of the VLESS initial request.
+Changing headroom, varying response sizes, and timer reuse across successful,
+idle, slow and stalled writes are covered, including virtual-clock tests.
 VLESS/gRPC is also tested through the real outbound factory and transport.
 VLESS TCP multiplex and UDP flow coexistence is tested with smux, yamux, and
 h2mux, including keeping TCP streams alive after UDP flow reset. Constructor
@@ -179,7 +195,10 @@ the upstream daemon/libbox deliberate crash hooks), then targeted race tests wit
 (the Android implementation) and full gRPC. Forwarding benchmarks record
 allocation counts and throughput in the run summary; each iteration forwards
 32 packets, including queueing and buffer copies but excluding encryption and
-network latency. The separate `test/` module's external-server/Docker suite is
+network latency. Both unframed buffers and buffers requiring 128 bytes of front
+headroom and 16 bytes of rear headroom are measured, with IPv4/IPv6 and 64/1200-byte
+payloads. Allocation counts and mock-transport throughput are not device power
+measurements or network RTT. The separate `test/` module's external-server/Docker suite is
 not part of this core-module gate.
 
 After the checks pass, branch push/manual builds compile a signed ARM64 APK
@@ -255,11 +274,9 @@ signed ARM64 build before it is pushed and released. Unchanged scheduled runs
 skip the build. No external access token is required; the same workflow publishes
 with `GITHUB_TOKEN` rather than relying on another workflow being triggered by its push.
 
-**Scheduling requires `udpflow` to be the repository's default branch.** GitHub
-loads scheduled workflows only from the default branch; while the default is
-`testing`, the six-hour schedule in this branch is inactive. Manual dispatch
-with `--ref udpflow` and ordinary `udpflow` pushes still work. Changing the default
-branch is a repository setting, not part of these branch commits.
+**Keep `udpflow` as the repository's default branch for scheduled updates.**
+GitHub loads schedules only from the default branch. Manual dispatch with
+`--ref udpflow` and ordinary `udpflow` pushes also run the workflow.
 
 ## Target base
 
