@@ -24,6 +24,10 @@ func (r *ruleSetItemTestRouter) PreMatch(adapter.InboundContext, []byte) adapter
 	return adapter.PreMatchResult{}
 }
 
+func (r *ruleSetItemTestRouter) PreMatchContext(context.Context, adapter.InboundContext, []byte) adapter.PreMatchResult {
+	return adapter.PreMatchResult{}
+}
+
 func (r *ruleSetItemTestRouter) HijackDNSPacket(context.Context, []byte, N.PacketWriter, adapter.InboundContext) {
 }
 
