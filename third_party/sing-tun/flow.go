@@ -19,6 +19,9 @@ type FlowVerdict struct {
 	Destination netip.AddrPort
 	UDPTimeout  time.Duration
 	NewTracker  func() FlowTracker
+	// RejectTimeout gives a rejection a fixed lifetime, without renewal on
+	// traffic. Zero retains the normal idle timeout for policy rejections.
+	RejectTimeout time.Duration
 }
 
 type FlowAction uint8

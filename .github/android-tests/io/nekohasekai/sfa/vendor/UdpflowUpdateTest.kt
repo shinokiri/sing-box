@@ -1,6 +1,8 @@
 package io.nekohasekai.sfa.vendor
 
 import io.nekohasekai.sfa.update.UpdateTrack
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -18,6 +20,52 @@ class UdpflowUpdateTest {
     @Test
     fun checksTheFork() {
         assertEquals("https://api.github.com/repos/shinokiri/sing-box/releases?per_page=100", GitHubUpdateChecker.RELEASES_URL)
+        assertEquals("https://api.github.com/repos/shinokiri/sing-box/releases/latest", GitHubUpdateChecker.LATEST_RELEASE_URL)
+    }
+
+    @Test
+    fun stableChecksReadOnlyLatestEvenWhenAlreadyCurrent() {
+        for (currentCode in listOf(1000060, 1000061, 1000062)) {
+            val urls = mutableListOf<String>()
+            val releases = getUdpflowReleases(UpdateTrack.STABLE) { url ->
+                urls += url
+                // A history request returns an array, which must not be used here.
+                if (url == GitHubUpdateChecker.LATEST_RELEASE_URL) Json.encodeToString(release())
+                else Json.encodeToString(List(100) { release() })
+            }
+            var metadataRequests = 0
+            val update = selectUdpflowUpdate(releases, UpdateTrack.STABLE, currentCode) {
+                metadataRequests++
+                GitHubUpdateChecker.VersionMetadata(1000061, "1.14.0-udpflow")
+            }
+            assertEquals(listOf(GitHubUpdateChecker.LATEST_RELEASE_URL), urls)
+            assertEquals(1, metadataRequests)
+            assertEquals(if (currentCode < 1000061) 1000061 else null, update?.versionCode)
+        }
+    }
+
+    @Test
+    fun betaChecksStillReadThePrereleaseFeed() {
+        val urls = mutableListOf<String>()
+        val releases = getUdpflowReleases(UpdateTrack.BETA) { url ->
+            urls += url
+            Json.encodeToString(listOf(release().copy(prerelease = true), release()))
+        }
+        assertEquals(listOf(GitHubUpdateChecker.RELEASES_URL), urls)
+        assertEquals(2, releases.size)
+        assertEquals(true, releases.first().prerelease)
+    }
+
+    @Test
+    fun incompleteLatestDoesNotTriggerAHistoryScan() {
+        var requests = 0
+        val releases = getUdpflowReleases(UpdateTrack.STABLE) { url ->
+            requests++
+            assertEquals(GitHubUpdateChecker.LATEST_RELEASE_URL, url)
+            Json.encodeToString(release())
+        }
+        assertNull(selectUdpflowUpdate(releases, UpdateTrack.STABLE, 1000060) { null })
+        assertEquals(1, requests)
     }
 
     @Test
@@ -77,9 +125,9 @@ class UdpflowUpdateTest {
     }
 
     @Test
-    fun incompleteReleasesDoNotHideTheLastInstallableUpdate() {
+    fun betaHistoryCanSkipIncompleteReleases() {
         val releases = listOf(release("1.14.2-udpflow"), release("1.14.1-udpflow").copy(assets = emptyList()), release())
-        val update = selectUdpflowUpdate(releases, UpdateTrack.STABLE, 1000060) {
+        val update = selectUdpflowUpdate(releases, UpdateTrack.BETA, 1000060) {
             when (it.tagName) {
                 "v1.14.2-udpflow" -> null
                 "v1.14.1-udpflow" -> GitHubUpdateChecker.VersionMetadata(1000063, "1.14.1-udpflow")

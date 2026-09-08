@@ -14,5 +14,7 @@ module replacement lets regular Go, gomobile, and CI builds use the same fix
 without modifying the module cache or adding build-time patch commands.
 The separate `test/` module repeats the replacement because Go does not inherit
 replacement directives from dependencies.
+CI checks both modules' required versions against `UPSTREAM_VERSION`, so an
+upstream dependency update requires rebasing this patch before publishing.
 Remove the replacement and this directory when an upstream release includes
 the fix, keeping the regressions in `protocol/vless`.

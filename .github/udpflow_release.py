@@ -194,6 +194,7 @@ def publish():
         "仅提供 Android 16+（API 36）ARM64 安装包，沿用本仓库签名。客户端默认从本仓库检查正式版及 fork 修订版更新；已关闭检查的设置保持不变。\n\n"
         "原生 libbox 使用 NDK r29 的最高原生 API 35（APK 最低 API 36），启用 RELR 重定位压缩。原生库直接从 APK 加载，并检查 16 KB 对齐；下载体积会增大，安装时不再额外解压原生库。\n\n"
         "TUN 首次分流与 DNS 解析在有界异步任务中执行，保留首包和同流包顺序；UDP 适配器使用单调时钟回收空闲连接。system、mixed 和 gVisor 栈均通过内存 TUN 回归测试。\n\n"
+        "DNS 解析失败按固定一秒间隔允许重试，持续流量不会延长失败缓存；DNS 回答及拒绝报文的设备写回不会持有分流器状态锁。稳定通道只检查 latest Release，避免遍历历史版本。\n\n"
         "已安装 udpflow 正式版的 Android 16 用户可通过客户端更新；从更新器仍指向官方的旧构建迁移时需手动安装一次。\n\n"
         f"Core: `{metadata['core_commit']}`\n\nAndroid client: `{metadata['android_client_commit']}`（含本仓库的更新补丁）\n\n"
         "发布前已通过核心测试、竞态测试、客户端更新选择测试及 APK 签名/ABI/API/版本/原生库对齐检查。真实 Android 16 设备的 TUN、耗电与公网代理环境仍需实测。\n"

@@ -179,6 +179,12 @@ late results after reset. In-memory TUN tests start the actual system, mixed
 and gVisor stacks and check normal UDP, TCP and ICMP fallback. gVisor reuses
 the installed pre-match decision instead of doing DNS again under UDP NAT
 creation. These are not physical-device tests.
+Transient resolve failures have a one-second fixed rejection deadline, so
+active retries recover without repeatedly extending a cached error. Virtual-time
+tests check IPv4/IPv6 recovery, coalescing retries and unchanged policy rejection.
+Cached DNS responses and synthesized reject/MTU writeback run outside the
+dispatcher mutex; regressions deliberately block device writes while forwarding,
+reset and close must still complete. Borrowed port batches remain under the lock.
 Transport regressions cover concurrent response initialization and reads, and
 closing before a response arrives without leaking its late response body.
 QUIC dial and handshake cancellation, waiting for a shared connection, and
@@ -196,7 +202,8 @@ for provenance and the condition for removing the local copy.
 
 `third_party/sing-tun` contains v0.9.0-beta.4 with the context-aware first-flow
 dispatcher patch. Its `README.udpflow.md` records the source and change scope.
-CI checks the required sing-tun version against the local patch base after an
+CI checks both sing-tun and sing-mux requirements in the root and `test/` modules
+against their local `UPSTREAM_VERSION` files after an
 upstream merge, so a dependency update requires porting the patch rather than
 silently building the older module. Other platforms and their workflows remain.
 
@@ -204,7 +211,8 @@ silently building the older module. Other platforms and their workflows remain.
 go test -race -tags with_gvisor,with_quic -count=1 ./route ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux github.com/sagernet/sing-tun
 go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./route ./common/udpflow ./protocol/vless ./transport/v2ray ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-tun
 go test -exec sudo -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS)" ./...
-go test -tags with_gvisor -run '^$' -bench '^BenchmarkPortForward$' -benchmem ./common/udpflow
+sh .github/check_local_patches.sh
+go test -tags with_gvisor -run '^$' -bench '^Benchmark(Port|Dispatcher)Forward$' -benchmem ./common/udpflow
 CGO_ENABLED=0 go build -trimpath -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS) -s -w -buildid=" ./cmd/sing-box
 ```
 
@@ -218,12 +226,19 @@ requests, and manual dispatch. Its planning job tests the release scripts,
 including actual Git merges in temporary repositories. The build job runs all core-module tests and
 `go vet` with release feature tags (excluding the unsafe-pointer diagnostic for
 the upstream daemon/libbox deliberate crash hooks), then targeted race tests with both grpclite
-(the Android implementation) and full gRPC. Forwarding benchmarks record
+(the Android implementation) and full gRPC. Port benchmarks record
 allocation counts and throughput in the run summary; each iteration forwards
 32 packets, including queueing and buffer copies but excluding encryption and
 network latency. Both unframed buffers and buffers requiring 128 bytes of front
 headroom and 16 bytes of rear headroom are measured, with IPv4/IPv6 and 64/1200-byte
-payloads. Allocation counts and mock-transport throughput are not device power
+payloads. Additional dispatcher benchmarks include parsing, first-tuple routing,
+NAT and the real Port queue through write completion, with one packet per
+iteration. They compare established traffic, new tuples on a warm association,
+and established traffic alongside 32 unresolved routes; p95/p99 delivery times
+are sampled as well as allocations and throughput. The new-tuple case resets
+every 1024 tuples to keep table size constant across benchmark lengths, including
+the amortized reset cost in ns/op. These fixtures copy inputs because NAT mutates
+them. Allocation counts and mock-transport throughput are not device power
 measurements or network RTT. The separate `test/` module's external-server/Docker suite is
 not part of this core-module gate.
 
@@ -295,6 +310,11 @@ The patched `other` client checks this fork's GitHub releases, selects its ARM64
 APK and compares monotonic `versionCode` values. Drafts, excluded prereleases,
 missing metadata/APKs, wrong architectures and mismatched release metadata are
 ignored. F-Droid is not an update source for this fork's signing key.
+Stable checks fetch `/releases/latest` and that release's metadata, including
+when already current; request count no longer grows with history. If latest
+is incomplete, the check offers no update and retries on the next check. Beta
+checks retain the release-list path to include prereleases. Unit tests exercise
+both JSON feeds and the stable path's constant request count.
 An already downloaded APK is reused only when its recorded URL matches the
 requested release, so a cached older APK cannot stand in for a newer update.
 Launch-time update checks default to enabled; an explicitly disabled setting

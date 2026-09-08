@@ -96,15 +96,10 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 	d.access.Lock()
 	first := p.packets[0]
 	d.access.Unlock()
-	packet, _ := parseForwardPacket(first)
-	var payload []byte
-	if packet.protocol == uint8(header.UDPProtocolNumber) {
-		payload = header.UDP(packet.transport).Payload()
-	}
 	if p.ctx.Err() != nil {
 		return
 	}
-	verdict := d.async.handler.JudgeFlowContext(p.ctx, packet.protocol, packet.source, packet.destination, payload)
+	verdict := d.judgePendingPacket(p.ctx, first)
 	installed := false
 	for {
 		d.access.Lock()
@@ -112,11 +107,32 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 			d.access.Unlock()
 			return
 		}
+		// A blocked writeback can leave new packets queued past the rejection
+		// deadline. Re-resolve instead of reinstalling the old failure verdict.
+		if installed && verdict.RejectTimeout > 0 {
+			entry := d.table[p.key]
+			if entry == nil || d.entryExpired(entry, d.now()) {
+				if entry != nil {
+					d.removeEntry(p.key, entry, FlowCloseTimeout)
+				}
+				first = p.packets[0]
+				d.access.Unlock()
+				verdict = d.judgePendingPacket(p.ctx, first)
+				installed = false
+				continue
+			}
+		}
 		packets := p.packets
 		p.packets = nil
-		var accepted [][]byte
+		dns := verdict.Action == ActionHijackDNS && p.key.protocol == uint8(header.UDPProtocolNumber)
+		var deferred [][]byte
 		var size int
 		for _, raw := range packets {
+			size += len(raw)
+			if dns {
+				deferred = append(deferred, raw)
+				continue
+			}
 			current, _ := parseForwardPacket(raw)
 			var handled bool
 			if entry := d.table[p.key]; installed && entry != nil {
@@ -126,20 +142,28 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 				installed = true
 			}
 			if !handled {
-				accepted = append(accepted, raw)
+				deferred = append(deferred, raw)
 			}
-			size += len(raw)
 		}
-		d.flushPackets()
+		replies := d.flushPackets()
 		d.access.Unlock()
-		// Ordinary UDP/TCP handling may perform its own connection setup. It
-		// must not run with the dispatcher locked. Keep the pending entry until
-		// this batch is delivered so later packets cannot overtake its first one.
-		for _, raw := range accepted {
+		if p.ctx.Err() != nil {
+			return
+		}
+		d.writeBackPackets(replies)
+		// DNS may answer inline, and ordinary UDP/TCP handling may connect.
+		// Keep both outside access, retaining the packet budget and pending
+		// entry until delivery so new packets cannot overtake this batch.
+		for _, raw := range deferred {
 			if p.ctx.Err() != nil || d.returnPath.closed.Load() {
 				return
 			}
-			d.async.accept(raw)
+			if dns {
+				current, _ := parseForwardPacket(raw)
+				d.hijackDNSPacket(&current)
+			} else {
+				d.async.accept(raw)
+			}
 		}
 		d.access.Lock()
 		p.count -= len(packets)
@@ -154,6 +178,15 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 		}
 		d.access.Unlock()
 	}
+}
+
+func (d *ForwardDispatcher) judgePendingPacket(ctx context.Context, raw []byte) FlowVerdict {
+	packet, _ := parseForwardPacket(raw)
+	var payload []byte
+	if packet.protocol == uint8(header.UDPProtocolNumber) {
+		payload = header.UDP(packet.transport).Payload()
+	}
+	return d.async.handler.JudgeFlowContext(ctx, packet.protocol, packet.source, packet.destination, payload)
 }
 
 // Canceled workers remain charged until their handlers return, so repeated

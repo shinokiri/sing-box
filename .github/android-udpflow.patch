@@ -35,7 +35,7 @@ index d90e2c7..53f3226 100644
 +internal fun cachedApkForUrl(file: File?, cachedUrl: String, requestedUrl: String): File? =
 +    file?.takeIf { cachedUrl == requestedUrl && it.isFile && it.length() > 0 }
 diff --git a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
-index ab0c1c2..e2fd99b 100644
+index ab0c1c2..eb60662 100644
 --- a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
 +++ b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
 @@ -1,6 +1,5 @@
@@ -45,16 +45,17 @@ index ab0c1c2..e2fd99b 100644
  import io.nekohasekai.libbox.Libbox
  import io.nekohasekai.sfa.BuildConfig
  import io.nekohasekai.sfa.ktx.unwrap
-@@ -14,7 +13,7 @@ import java.io.Closeable
+@@ -14,7 +13,8 @@ import java.io.Closeable
  
  class GitHubUpdateChecker : Closeable {
      companion object {
 -        private const val RELEASES_URL = "https://api.github.com/repos/SagerNet/sing-box/releases"
 +        internal const val RELEASES_URL = "https://api.github.com/repos/shinokiri/sing-box/releases?per_page=100"
++        internal const val LATEST_RELEASE_URL = "https://api.github.com/repos/shinokiri/sing-box/releases/latest"
          private const val METADATA_FILENAME = "SFA-version-metadata.json"
      }
  
-@@ -25,45 +24,11 @@ class GitHubUpdateChecker : Closeable {
+@@ -25,48 +25,14 @@ class GitHubUpdateChecker : Closeable {
  
      private val json = Json { ignoreUnknownKeys = true }
  
@@ -75,7 +76,7 @@ index ab0c1c2..e2fd99b 100644
 -                selected = ReleaseCandidate(release, metadata)
 -            }
 +    fun checkUpdate(track: UpdateTrack, githubToken: String): UpdateInfo? =
-+        selectUdpflowUpdate(getReleases(githubToken), track, BuildConfig.VERSION_CODE) { release ->
++        selectUdpflowUpdate(getUdpflowReleases(track) { getReleaseFeed(it, githubToken) }, track, BuildConfig.VERSION_CODE) { release ->
 +            runCatching { downloadMetadata(release) }.getOrNull()
          }
  
@@ -100,13 +101,24 @@ index ab0c1c2..e2fd99b 100644
 -        )
 -    }
 -
-     private fun getReleases(githubToken: String): List<GitHubRelease> {
+-    private fun getReleases(githubToken: String): List<GitHubRelease> {
++    private fun getReleaseFeed(url: String, githubToken: String): String {
          val request = client.newRequest()
-         request.setURL(RELEASES_URL)
-@@ -80,28 +45,6 @@ class GitHubUpdateChecker : Closeable {
-         return json.decodeFromString(content)
-     }
+-        request.setURL(RELEASES_URL)
++        request.setURL(url)
+         request.setHeader("Accept", "application/vnd.github.v3+json")
+         val token = githubToken.trim()
+         if (token.isNotEmpty()) {
+@@ -74,32 +40,7 @@ class GitHubUpdateChecker : Closeable {
+         }
+         request.setUserAgent(HTTPClient.userAgent)
  
+-        val response = request.execute()
+-        val content = response.content.unwrap
+-
+-        return json.decodeFromString(content)
+-    }
+-
 -    private fun isReleaseInTrack(release: GitHubRelease, track: UpdateTrack): Boolean {
 -        if (release.draft) {
 -            return false
@@ -127,12 +139,11 @@ index ab0c1c2..e2fd99b 100644
 -            return false
 -        }
 -        return version.versionCode > other.versionCode
--    }
--
++        return request.execute().content.unwrap
+     }
+
      private fun downloadMetadata(release: GitHubRelease): VersionMetadata? {
-         val metadataAsset = release.assets.find { it.name == METADATA_FILENAME }
-             ?: return null
-@@ -144,8 +87,32 @@ class GitHubUpdateChecker : Closeable {
+@@ -144,8 +85,45 @@ class GitHubUpdateChecker : Closeable {
          @SerialName("version_name") val versionName: String = "",
      )
  
@@ -140,6 +151,19 @@ index ab0c1c2..e2fd99b 100644
 -        val release: GitHubRelease,
 -        val metadata: VersionMetadata,
 -    )
++}
++
++// A stable check uses the published latest release, so its request count does
++// not grow with release history. Beta checks still consider prereleases.
++internal fun getUdpflowReleases(
++    track: UpdateTrack,
++    fetch: (String) -> String,
++): List<GitHubUpdateChecker.GitHubRelease> {
++    val json = Json { ignoreUnknownKeys = true }
++    return when (track) {
++        UpdateTrack.STABLE -> listOf(json.decodeFromString<GitHubUpdateChecker.GitHubRelease>(fetch(GitHubUpdateChecker.LATEST_RELEASE_URL)))
++        UpdateTrack.BETA -> json.decodeFromString(fetch(GitHubUpdateChecker.RELEASES_URL))
++    }
 +}
 +
 +// Android installs updates by versionCode. Release names deliberately keep the

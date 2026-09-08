@@ -38,7 +38,7 @@ type ForwardWriteback interface {
 type flowEntry struct {
 	action   FlowAction
 	deadline int64
-	idle     time.Duration
+	idle     time.Duration // Zero for a fixed rejection deadline.
 	flow     *forwardFlow
 }
 
@@ -283,7 +283,9 @@ func (d *ForwardDispatcher) handleHit(key flowKey, entry *flowEntry, packet *for
 		entry.deadline = now + int64(entry.idle)
 		return false
 	case ActionReject:
-		entry.deadline = now + int64(entry.idle)
+		if entry.idle > 0 {
+			entry.deadline = now + int64(entry.idle)
+		}
 		d.stageReject(packet)
 		return true
 	default:
@@ -298,6 +300,13 @@ func (d *ForwardDispatcher) judgeAndInstall(key flowKey, packet *forwardPacket, 
 		firstPacket = header.UDP(packet.transport).Payload()
 	}
 	verdict := d.handler.JudgeFlow(packet.protocol, packet.source, packet.destination, firstPacket)
+	if verdict.Action == ActionHijackDNS && packet.protocol == uint8(header.UDPProtocolNumber) {
+		if d.returnPath.closed.Load() {
+			return false
+		}
+		d.hijackDNSPacket(packet)
+		return true
+	}
 	d.access.Lock()
 	defer d.access.Unlock()
 	if d.returnPath.closed.Load() {
@@ -307,7 +316,8 @@ func (d *ForwardDispatcher) judgeAndInstall(key flowKey, packet *forwardPacket, 
 }
 
 // Caller holds access. Pending resolutions use the same routing/NAT logic as
-// synchronous dispatch, including reject, DNS hijack and ordinary-stack fallback.
+// synchronous dispatch. Callers handle UDP DNS hijacking outside access: a
+// cached DNS answer can synchronously write to the TUN device.
 func (d *ForwardDispatcher) installVerdict(key flowKey, packet *forwardPacket, raw []byte, verdict FlowVerdict) bool {
 	now := d.now()
 	switch verdict.Action {
@@ -334,19 +344,16 @@ func (d *ForwardDispatcher) installVerdict(key flowKey, packet *forwardPacket, r
 		d.installSimple(key, ActionAccept, packet.protocol, now)
 		return false
 	case ActionReject:
-		d.installSimple(key, ActionReject, packet.protocol, now)
+		if verdict.RejectTimeout > 0 {
+			d.insertEntry(key, &flowEntry{action: ActionReject, deadline: now + int64(verdict.RejectTimeout)}, now)
+		} else {
+			d.installSimple(key, ActionReject, packet.protocol, now)
+		}
 		d.stageReject(packet)
 		return true
 	case ActionDrop:
 		d.installSimple(key, ActionDrop, packet.protocol, now)
 		return true
-	case ActionHijackDNS:
-		if packet.protocol == uint8(header.UDPProtocolNumber) {
-			d.hijackDNSPacket(packet)
-			return true
-		}
-		d.installSimple(key, ActionAccept, packet.protocol, now)
-		return false
 	default:
 		d.installSimple(key, ActionAccept, packet.protocol, now)
 		return false
@@ -611,14 +618,19 @@ func (d *ForwardDispatcher) Flush() {
 		return
 	}
 	d.access.Lock()
-	defer d.access.Unlock()
 	if d.returnPath.closed.Load() {
+		d.access.Unlock()
 		return
 	}
-	d.flushPackets()
+	packets := d.flushPackets()
+	d.access.Unlock()
+	d.writeBackPackets(packets)
 }
 
-func (d *ForwardDispatcher) flushPackets() {
+// Caller holds access. Port batches borrow the caller's TUN storage, so they
+// must finish copying before unlocking. Synthesized replies own their buffers
+// and can be written after releasing the dispatcher lock.
+func (d *ForwardDispatcher) flushPackets() [][]byte {
 	for _, nat := range d.activeNATs {
 		d.flushPort(nat)
 	}
@@ -629,14 +641,19 @@ func (d *ForwardDispatcher) flushPackets() {
 		d.segmentSizes = d.segmentSizes[:retain]
 	}
 	d.segmentUsed = 0
-	if len(d.writebackBatch) > 0 {
-		err := d.writeback.WriteReturnPackets(d.writebackBatch)
+	packets := d.writebackBatch
+	d.writebackBatch = nil
+	d.maybeSweep(d.now())
+	return packets
+}
+
+func (d *ForwardDispatcher) writeBackPackets(packets [][]byte) {
+	if len(packets) > 0 && !d.returnPath.closed.Load() {
+		err := d.writeback.WriteReturnPackets(packets)
 		if err != nil {
 			d.logger.Trace(E.Cause(err, "write back packets"))
 		}
-		d.writebackBatch = d.writebackBatch[:0]
 	}
-	d.maybeSweep(d.now())
 }
 
 func (d *ForwardDispatcher) discardStagedPackets() {

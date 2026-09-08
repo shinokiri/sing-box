@@ -412,7 +412,9 @@ func (r *Router) PreMatchContext(ctx context.Context, metadata adapter.InboundCo
 			resolveErr := r.actionResolve(adapter.WithContext(ctx, &metadata), &metadata, action)
 			if resolveErr != nil {
 				r.logger.DebugContext(ctx, "pre-match[", currentRuleIndex, "] ", currentRule, " => ", action, ": ", resolveErr)
-				return adapter.PreMatchResult{Action: adapter.PreMatchReject}
+				// A failed lookup must not become a policy rejection that traffic
+				// can keep alive indefinitely. Briefly coalesce retries instead.
+				return adapter.PreMatchResult{Action: adapter.PreMatchReject, RejectTimeout: time.Second}
 			}
 		default:
 			return continueResult

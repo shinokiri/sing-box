@@ -48,6 +48,8 @@ type PreMatchResult struct {
 	Destination netip.AddrPort
 	UDPTimeout  time.Duration
 	NewTracker  func() tun.FlowTracker
+	// RejectTimeout bounds a transient failure; policy rejections use zero.
+	RejectTimeout time.Duration
 }
 
 func JudgeFlow(router Router, inbound string, inboundType string, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
@@ -107,7 +109,7 @@ func judgeFlow(preMatch func(InboundContext, []byte) PreMatchResult, inbound str
 		}
 		return verdict
 	case PreMatchReject:
-		return tun.FlowVerdict{Action: tun.ActionReject}
+		return tun.FlowVerdict{Action: tun.ActionReject, RejectTimeout: result.RejectTimeout}
 	case PreMatchDrop:
 		return tun.FlowVerdict{Action: tun.ActionDrop}
 	case PreMatchBypass:

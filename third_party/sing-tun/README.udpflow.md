@@ -20,13 +20,20 @@ separate from the outbound association/packet queues.
 
 Pending packets are copied before the caller reuses its storage. One pending
 entry keeps packets ordered through resolution and ordinary-stack fallback.
-Verdicts use the existing NAT, reject and DNS-hijack implementation. Fallback
-runs outside the dispatcher mutex; gVisor's ordinary forwarders reuse an
+Verdicts use the existing NAT, reject and DNS-hijack implementation. Fallback,
+DNS hijacking (including synchronous cache hits), and owned reject/MTU replies
+run outside the dispatcher mutex. Port batches finish copying borrowed TUN
+buffers under the lock. gVisor's ordinary forwarders reuse an
 installed verdict instead of repeating DNS under the UDP NAT creation lock.
 Reset/close cancel pending work, discard staged packets and prevent late
 verdicts from installing a new flow. Canceled workers remain charged until
 they exit. Dispatcher state uses an exclusive mutex because routing completion
 and the packet reader now both update it.
+
+A transient routing failure may set `RejectTimeout` to a fixed lifetime, which
+incoming traffic cannot extend. The core router uses one second for failed DNS
+resolve actions. A pending batch that outlives this deadline obtains a fresh
+verdict. Policy rejections still use the original idle timeout.
 
 Changes are confined to `flow.go`, `flow_dispatch.go`, `flow_pending.go`,
 `stack_system.go`, `stack_mixed.go`, and the gVisor stack/filter/forwarders.
@@ -36,9 +43,11 @@ stack implementations are exercised with an in-memory TUN in
 `stack_pending_test.go`, including ordinary UDP, TCP and ICMP delivery.
 The core repository also tests a deliberately stalled DNS lookup with its real
 router, Fake-IP metadata and IP-CIDR route rules for IPv4 and IPv6.
+`flow_writeback_test.go` additionally covers blocked writeback during forwarding,
+reset/close, and fixed failure deadlines, including packets queued during I/O.
 
 The root and integration modules both replace sing-tun with this directory.
-CI checks `UPSTREAM_VERSION` against the selected module version after preparing
+CI checks `UPSTREAM_VERSION` against both modules' required versions after preparing
 an upstream release. If upstream changes this dependency, rebase this patch
 onto that version and update the recorded version before publishing; do not
 silently keep the old implementation under a newer requirement. Remove the
