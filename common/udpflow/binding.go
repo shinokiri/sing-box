@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
@@ -68,9 +69,11 @@ func (b *portBinding) PortMTU() uint32 {
 	return b.port.mtu
 }
 
+func (b *portBinding) EndpointIndependentUDP() bool { return true }
+
 func (b *portBinding) PortSelectorRange() (uint16, uint16) {
-	// Preserve the application's UDP source port whenever the reverse-flow key
-	// is unambiguous. sing-tun allocates another selector only on a collision.
+	// Preserve the application's source port when reply ownership and Fake-IP
+	// aliases are unambiguous. sing-tun separates conflicting mappings.
 	return 1, math.MaxUint16
 }
 
@@ -99,6 +102,11 @@ func (b *portBinding) DetachReturn(returnPath tun.Return) error {
 		return nil
 	}
 	b.returnPath = nil
+	for key := range p.failures {
+		if key.binding == b {
+			delete(p.failures, key)
+		}
+	}
 	flows := make([]*flow, 0, len(b.flows))
 	for _, current := range b.flows {
 		current.closeLocked()
@@ -139,6 +147,13 @@ func (b *portBinding) writePacket(packet []byte) error {
 	}
 	current := b.flows[source.Port()]
 	if current == nil {
+		key := failureKey{b, source.Port()}
+		if retryAt, failed := p.failures[key]; failed {
+			if int64(time.Since(p.epoch)) < retryAt {
+				return nil
+			}
+			delete(p.failures, key)
+		}
 		if len(p.flows) >= p.maxFlows {
 			return E.New(p.name, " UDP flow connection limit reached")
 		}

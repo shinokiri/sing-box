@@ -1,6 +1,7 @@
 package tun
 
 import (
+	"context"
 	"maps"
 	"net/netip"
 	"sync"
@@ -43,14 +44,15 @@ type flowEntry struct {
 }
 
 type forwardFlow struct {
-	nat          *portNAT
-	reverseKey   flowKey
-	forwardRule  rewriteRule
-	reverseRule  rewriteRule
-	effectiveMTU uint32
-	protocol     uint8
-	udpTimeout   time.Duration
-	tracker      FlowTracker
+	nat           *portNAT
+	reverseKey    flowKey
+	forwardRule   rewriteRule
+	reverseRule   rewriteRule
+	effectiveMTU  uint32
+	protocol      uint8
+	udpTimeout    time.Duration
+	tracker       FlowTracker
+	routeContexts []context.Context
 
 	clientAddress            netip.Addr
 	clientSelector           uint16
@@ -319,6 +321,9 @@ func (d *ForwardDispatcher) judgeAndInstall(key flowKey, packet *forwardPacket, 
 // synchronous dispatch. Callers handle UDP DNS hijacking outside access: a
 // cached DNS answer can synchronously write to the TUN device.
 func (d *ForwardDispatcher) installVerdict(key flowKey, packet *forwardPacket, raw []byte, verdict FlowVerdict) bool {
+	if verdict.RouteExpired() {
+		return true
+	}
 	now := d.now()
 	switch verdict.Action {
 	case ActionFlow:
@@ -431,7 +436,7 @@ func (d *ForwardDispatcher) createFlow(packet *forwardPacket, verdict FlowVerdic
 	if nat == nil {
 		return nil, createFlowUnsupported
 	}
-	selector, reverseKey, allocated := nat.allocateSelector(packet.protocol, portAddress, serverAddress, serverPort, packet.source.Port())
+	selector, reverseKey, allocated := nat.allocateSelector(packet.protocol, portAddress, serverAddress, serverPort, packet.source, packet.destination)
 	if !allocated {
 		return nil, createFlowExhausted
 	}
@@ -445,6 +450,7 @@ func (d *ForwardDispatcher) createFlow(packet *forwardPacket, verdict FlowVerdic
 		effectiveMTU:             effectiveMTU,
 		protocol:                 packet.protocol,
 		udpTimeout:               udpTimeout,
+		routeContexts:            verdict.RouteContexts,
 		clientAddress:            packet.source.Addr(),
 		clientSelector:           packet.source.Port(),
 		clientDestinationAddress: clientDestinationAddress,
@@ -522,6 +528,9 @@ func (d *ForwardDispatcher) natFor(port Port) *portNAT {
 }
 
 func (d *ForwardDispatcher) forwardToPort(flow *forwardFlow, packet *forwardPacket, raw []byte) {
+	if routeExpired(flow.routeContexts) {
+		return
+	}
 	if flow.effectiveMTU != 0 && uint32(len(raw)) > flow.effectiveMTU {
 		if packet.protocol == uint8(header.TCPProtocolNumber) {
 			if flow.tracker != nil {
@@ -668,6 +677,9 @@ func (d *ForwardDispatcher) discardStagedPackets() {
 }
 
 func (d *ForwardDispatcher) entryExpired(entry *flowEntry, now int64) bool {
+	if entry.flow != nil && routeExpired(entry.flow.routeContexts) {
+		return true
+	}
 	if now <= entry.deadline {
 		return false
 	}
@@ -859,9 +871,12 @@ func (r *forwardReturn) classifyReturn(raw []byte, natList []*portNAT, revMap ma
 	}
 	flow := findReverseFlow(natList, revMap, parsed.flowKey())
 	if flow == nil {
+		if nat := revMap[parsed.destination.Addr()]; nat != nil && nat.returnUDP(&parsed, len(raw)-headroom, now) {
+			return returnWrite
+		}
 		return returnPass
 	}
-	if flow.closed.Load() {
+	if flow.closed.Load() || routeExpired(flow.routeContexts) {
 		return returnDrop
 	}
 	if flow.tracker != nil {
@@ -902,7 +917,7 @@ func returnICMPError(natList []*portNAT, revMap map[netip.Addr]*portNAT, parsed 
 		return false
 	}
 	flow := findReverseFlow(natList, revMap, embedded.flowKey().reversed())
-	if flow == nil || flow.closed.Load() {
+	if flow == nil || flow.closed.Load() || routeExpired(flow.routeContexts) {
 		return false
 	}
 	rewriteEmbeddedSource(&embedded, addrToTCPIP(flow.clientAddress), flow.clientSelector, true)

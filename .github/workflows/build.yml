@@ -85,9 +85,9 @@ jobs:
         # The daemon/libbox debug crash hooks intentionally dereference zero.
         run: go vet -unsafeptr=false -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" ./...
       - name: Race tests with the Android gRPC implementation
-        run: go test -race -tags with_gvisor,with_quic -count=1 ./route ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux github.com/sagernet/sing-tun
+        run: go test -race -tags with_gvisor,with_quic -count=1 ./route ./common/udpflow ./protocol/group ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux github.com/sagernet/sing-tun
       - name: Race tests with full gRPC
-        run: go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./route ./common/udpflow ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-tun
+        run: go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./route ./common/udpflow ./protocol/group ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-tun
       - name: Measure UDP forwarding allocations, throughput and dispatcher latency
         run: |
           go test -tags with_gvisor -run '^$' -bench '^Benchmark(Port|Dispatcher)Forward$' -benchmem ./common/udpflow | tee "$RUNNER_TEMP/udpflow-bench.txt"

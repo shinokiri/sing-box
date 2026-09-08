@@ -21,6 +21,8 @@ type portNAT struct {
 	shards        []natShard
 	selectorStart uint16
 	selectorCount uint16
+	udpAccess     sync.RWMutex
+	udpMappings   map[netip.AddrPort]*udpMapping
 
 	counter uint32
 	pending [][]byte
@@ -45,6 +47,9 @@ func newPortNAT(port Port) *portNAT {
 	if rangedPort, isRanged := port.(PortWithSelectorRange); isRanged {
 		nat.selectorStart, nat.selectorCount = rangedPort.PortSelectorRange()
 	}
+	if udpPort, ok := port.(PortWithUDPMapping); ok && udpPort.EndpointIndependentUDP() {
+		nat.udpMappings = make(map[netip.AddrPort]*udpMapping)
+	}
 	for i := range nat.shards {
 		nat.shards[i].flows = make(map[flowKey]*forwardFlow)
 	}
@@ -68,13 +73,16 @@ func (n *portNAT) insert(key flowKey, flow *forwardFlow) {
 	shard.access.Lock()
 	shard.flows[key] = flow
 	shard.access.Unlock()
+	n.insertUDPMapping(key, flow)
 }
 
 func (n *portNAT) delete(key flowKey) {
 	shard := n.shard(key)
 	shard.access.Lock()
+	flow := shard.flows[key]
 	delete(shard.flows, key)
 	shard.access.Unlock()
+	n.deleteUDPMapping(key, flow)
 }
 
 func (n *portNAT) reverseKeyFor(protocol uint8, portAddress, serverAddress netip.Addr, serverPort, selector uint16) flowKey {
@@ -100,12 +108,13 @@ func (n *portNAT) selectorRange(protocol uint8) (uint16, uint32) {
 	return n.selectorStart, uint32(n.selectorCount)
 }
 
-func (n *portNAT) allocateSelector(protocol uint8, portAddress, serverAddress netip.Addr, serverPort, clientSelector uint16) (uint16, flowKey, bool) {
+func (n *portNAT) allocateSelector(protocol uint8, portAddress, serverAddress netip.Addr, serverPort uint16, client, destination netip.AddrPort) (uint16, flowKey, bool) {
+	clientSelector := client.Port()
 	rangeStart, rangeCount := n.selectorRange(protocol)
 	if clientSelector != 0 &&
 		clientSelector >= rangeStart && uint32(clientSelector-rangeStart) < rangeCount {
 		key := n.reverseKeyFor(protocol, portAddress, serverAddress, serverPort, clientSelector)
-		if n.lookup(key) == nil {
+		if n.lookup(key) == nil && n.canShareUDPMapping(key, client, destination.Addr()) {
 			return clientSelector, key, true
 		}
 	}
@@ -113,7 +122,7 @@ func (n *portNAT) allocateSelector(protocol uint8, portAddress, serverAddress ne
 		n.counter++
 		candidate := rangeStart + uint16(n.counter%rangeCount)
 		key := n.reverseKeyFor(protocol, portAddress, serverAddress, serverPort, candidate)
-		if n.lookup(key) == nil {
+		if n.lookup(key) == nil && n.canShareUDPMapping(key, client, destination.Addr()) {
 			return candidate, key, true
 		}
 	}

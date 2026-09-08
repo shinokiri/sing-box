@@ -16,8 +16,9 @@ import (
 
 type benchmarkFlowHandler struct {
 	tun.Handler
-	port    tun.Port
-	blocked chan struct{}
+	port     tun.Port
+	blocked  chan struct{}
+	lifetime context.Context
 }
 
 func (h *benchmarkFlowHandler) JudgeFlowContext(ctx context.Context, _ uint8, source, _ netip.AddrPort, _ []byte) tun.FlowVerdict {
@@ -26,7 +27,11 @@ func (h *benchmarkFlowHandler) JudgeFlowContext(ctx context.Context, _ uint8, so
 		<-ctx.Done()
 		return tun.FlowVerdict{Action: tun.ActionDrop}
 	}
-	return tun.FlowVerdict{Action: tun.ActionFlow, Port: h.port}
+	verdict := tun.FlowVerdict{Action: tun.ActionFlow, Port: h.port}
+	if h.lifetime != nil {
+		verdict.RouteContexts = []context.Context{h.lifetime}
+	}
+	return verdict
 }
 
 // One packet per iteration, from dispatcher parsing/routing/NAT through the
@@ -38,10 +43,11 @@ func (h *benchmarkFlowHandler) JudgeFlowContext(ctx context.Context, _ uint8, so
 // Reset every 1024 tuples bounds table size independently of b.N; its amortized
 // cost is included in ns/op. Latency samples cover only packet delivery.
 // blocked_routes measures the established path with 32 unresolved other tuples.
+// selected_group also checks a shared outbound-group lifetime on the warm path.
 func BenchmarkDispatcherForward(b *testing.B) {
 	for _, ipv6 := range []bool{false, true} {
 		for _, size := range []int{64, 1200} {
-			for _, mode := range []string{"established", "new_tuple", "blocked_routes"} {
+			for _, mode := range []string{"established", "selected_group", "new_tuple", "blocked_routes"} {
 				b.Run(fmt.Sprintf("IPv6=%t/payload=%d/%s", ipv6, size, mode), func(b *testing.B) {
 					conn := &benchmarkPacketConn{testPacketConn: newTestPacketConn(16), frontHeadroom: 128, written: make(chan struct{}, 1)}
 					port, err := New(Options{DialPacketConn: func(context.Context, M.Socksaddr) (N.NetPacketConn, error) { return conn, nil }})
@@ -50,6 +56,11 @@ func BenchmarkDispatcherForward(b *testing.B) {
 					}
 					defer port.Close()
 					h := &benchmarkFlowHandler{port: port, blocked: make(chan struct{}, 32)}
+					if mode == "selected_group" {
+						var cancel context.CancelFunc
+						h.lifetime, cancel = context.WithCancel(context.Background())
+						defer cancel()
+					}
 					d := tun.NewForwardDispatcher(h, newTestWriteback(), logger.NOP(), time.Minute, time.Minute)
 					d.EnableAsyncFlow(context.Background(), func([]byte) { panic("unexpected ordinary fallback") })
 					defer d.Close()

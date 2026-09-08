@@ -383,23 +383,27 @@ func (c *failedWritePacketConn) WritePacket(buffer *buf.Buffer, _ M.Socksaddr) e
 }
 
 func TestPortRecreatesFailedAssociation(t *testing.T) {
-	failed := &failedWritePacketConn{newTestPacketConn(0)}
-	replacement := newChannelPacketConn()
-	var calls atomic.Int32
-	port, err := New(Options{DialPacketConn: func(context.Context, M.Socksaddr) (N.NetPacketConn, error) {
-		if calls.Add(1) == 1 {
-			return failed, nil
-		}
-		return replacement, nil
-	}})
-	require.NoError(t, err)
-	defer port.Close()
-	packet := testPortPacket(t, 50000, "retry")
-	require.NoError(t, port.WritePackets([][]byte{packet}))
-	receiveTestValue(t, failed.closed)
-	require.NoError(t, port.WritePackets([][]byte{packet}))
-	require.Equal(t, []byte("retry"), receiveTestValue(t, replacement.sent).payload)
-	require.Equal(t, int32(2), calls.Load())
+	synctest.Test(t, func(t *testing.T) {
+		failed := &failedWritePacketConn{newTestPacketConn(0)}
+		replacement := newChannelPacketConn()
+		var calls atomic.Int32
+		port, err := New(Options{DialPacketConn: func(context.Context, M.Socksaddr) (N.NetPacketConn, error) {
+			if calls.Add(1) == 1 {
+				return failed, nil
+			}
+			return replacement, nil
+		}})
+		require.NoError(t, err)
+		defer port.Close()
+		packet := testPortPacket(t, 50000, "retry")
+		require.NoError(t, port.WritePackets([][]byte{packet}))
+		receiveTestValue(t, failed.closed)
+		synctest.Wait()
+		time.Sleep(failedAssociationBackoff)
+		require.NoError(t, port.WritePackets([][]byte{packet}))
+		require.Equal(t, []byte("retry"), receiveTestValue(t, replacement.sent).payload)
+		require.Equal(t, int32(2), calls.Load())
+	})
 }
 
 type lateReadPacketConn struct {

@@ -37,6 +37,12 @@ type FlowOutbound interface {
 	PreMatchFlow(network string, destination netip.Addr) PreMatchAction
 }
 
+// FlowOutboundGroup selects a network-specific outbound and snapshots the
+// selection's lifetime. A nil context preserves existing flows on a switch.
+type FlowOutboundGroup interface {
+	NowForFlow(network string) (string, context.Context)
+}
+
 // InboundFlowOutbound isolates ports when selector allocation belongs to the
 // inbound. Outbounds whose selectors are already global can use FlowOutbound.
 type InboundFlowOutbound interface {

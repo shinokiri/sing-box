@@ -43,11 +43,12 @@ const (
 )
 
 type PreMatchResult struct {
-	Action      PreMatchAction
-	Outbound    Outbound
-	Destination netip.AddrPort
-	UDPTimeout  time.Duration
-	NewTracker  func() tun.FlowTracker
+	Action        PreMatchAction
+	Outbound      Outbound
+	Destination   netip.AddrPort
+	UDPTimeout    time.Duration
+	NewTracker    func() tun.FlowTracker
+	RouteContexts []context.Context
 	// RejectTimeout bounds a transient failure; policy rejections use zero.
 	RejectTimeout time.Duration
 }
@@ -99,7 +100,7 @@ func judgeFlow(preMatch func(InboundContext, []byte) PreMatchResult, inbound str
 				return tun.FlowVerdict{Action: tun.ActionReject}
 			}
 		}
-		verdict := tun.FlowVerdict{Action: tun.ActionFlow, Port: port, UDPTimeout: result.UDPTimeout, NewTracker: result.NewTracker}
+		verdict := tun.FlowVerdict{Action: tun.ActionFlow, Port: port, UDPTimeout: result.UDPTimeout, NewTracker: result.NewTracker, RouteContexts: result.RouteContexts}
 		if result.Destination.IsValid() {
 			destinationPort := result.Destination.Port()
 			if networkName == N.NetworkICMP {

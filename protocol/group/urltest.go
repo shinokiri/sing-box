@@ -31,6 +31,7 @@ func RegisterURLTest(registry *outbound.Registry) {
 
 var (
 	_ adapter.OutboundGroup           = (*URLTest)(nil)
+	_ adapter.FlowOutboundGroup       = (*URLTest)(nil)
 	_ adapter.InterfaceUpdateListener = (*URLTest)(nil)
 )
 
@@ -109,6 +110,27 @@ func (s *URLTest) Now() string {
 
 func (s *URLTest) All() []string {
 	return s.tags
+}
+
+func (s *URLTest) NowForFlow(network string) (string, context.Context) {
+	s.group.Touch()
+	s.group.updateAccess.Lock()
+	defer s.group.updateAccess.Unlock()
+	var lifetime context.Context
+	if s.interruptExternalConnections {
+		lifetime = s.group.interruptGroup.FlowContext()
+	}
+	outbound := s.group.selectedOutboundUDP
+	if network != N.NetworkUDP {
+		outbound = s.group.selectedOutboundTCP
+	}
+	if outbound == nil {
+		outbound, _ = s.group.Select(network)
+	}
+	if outbound == nil {
+		return "", lifetime
+	}
+	return outbound.Tag(), lifetime
 }
 
 func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {

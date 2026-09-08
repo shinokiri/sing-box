@@ -48,57 +48,8 @@ func (h *echoPacketHandler) NewPacketConnectionEx(_ context.Context, conn N.Pack
 func TestPortProtocolRoundTrip(t *testing.T) {
 	for _, protocol := range []string{"snell-v4", "snell-v4-http", "snell-v6", "snell-v6-unshaped", "snell-v6-unsafe-raw", "vless-xudp"} {
 		t.Run(protocol, func(t *testing.T) {
-			clientConn, serverConn := net.Pipe()
-			defer clientConn.Close()
-			defer serverConn.Close()
 			handler := &echoPacketHandler{packets: make(chan testDatagram, 8)}
-			var dial PacketConnFactory
-			var serve func() error
-			switch protocol {
-			case "vless-xudp":
-				const user = "b831381d-6324-4d53-ad4f-8cda48b30811"
-				client, err := vless.NewClient(user, "", logger.NOP())
-				require.NoError(t, err)
-				server := vless.NewService[string](logger.NOP(), handler)
-				server.UpdateUsers([]string{"test"}, []string{user}, []string{""})
-				dial = func(ctx context.Context, destination M.Socksaddr) (N.NetPacketConn, error) {
-					stop := context.AfterFunc(ctx, func() { clientConn.Close() })
-					defer stop()
-					return client.DialEarlyXUDPPacketConn(clientConn, destination)
-				}
-				serve = func() error { return server.NewConnection(context.Background(), serverConn, M.Socksaddr{}, nil) }
-			case "snell-v4", "snell-v4-http":
-				mode := snell.ObfsModeNone
-				if protocol == "snell-v4-http" {
-					mode = snell.ObfsModeHTTP
-				}
-				psk := []byte("udp-flow-test-key")
-				client, err := snellv4.NewClient(snellv4.ClientOptions{PSK: psk, ObfsMode: mode, ObfsHost: "example.com"})
-				require.NoError(t, err)
-				server, err := snellv5.NewService(snellv5.ServiceOptions{PSK: psk, ObfsMode: mode, Handler: handler})
-				require.NoError(t, err)
-				dial = func(context.Context, M.Socksaddr) (N.NetPacketConn, error) { return client.DialPacketConn(clientConn) }
-				serve = func() error { return server.NewConnection(context.Background(), serverConn, M.Socksaddr{}, nil) }
-			default:
-				mode := snellv6.ModeDefault
-				if protocol == "snell-v6-unshaped" {
-					mode = snellv6.ModeUnshaped
-				} else if protocol == "snell-v6-unsafe-raw" {
-					mode = snellv6.ModeUnsafeRaw
-				}
-				psk := []byte("udp-flow-test-key")
-				client, err := snellv6.NewClient(snellv6.ClientOptions{PSK: psk, Mode: mode})
-				require.NoError(t, err)
-				server, err := snellv6.NewService(snellv6.ServerOptions{PSK: psk, Mode: mode, Handler: handler})
-				require.NoError(t, err)
-				dial = func(context.Context, M.Socksaddr) (N.NetPacketConn, error) { return client.DialPacketConn(clientConn) }
-				serve = func() error { return server.NewConnection(context.Background(), serverConn, M.Socksaddr{}, nil) }
-			}
-			go func() {
-				if err := serve(); err != nil {
-					serverConn.Close()
-				}
-			}()
+			dial := newProtocolTestDialer(t, protocol, handler)
 			var calls atomic.Int32
 			port, err := New(Options{DialPacketConn: func(ctx context.Context, destination M.Socksaddr) (N.NetPacketConn, error) {
 				calls.Add(1)
@@ -130,4 +81,62 @@ func TestPortProtocolRoundTrip(t *testing.T) {
 			require.Equal(t, int32(1), calls.Load(), "all destinations must share one association")
 		})
 	}
+}
+
+func newProtocolTestDialer(t *testing.T, protocol string, handler interface {
+	N.TCPConnectionHandlerEx
+	N.UDPConnectionHandlerEx
+}) PacketConnFactory {
+	t.Helper()
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() { clientConn.Close() })
+	t.Cleanup(func() { serverConn.Close() })
+	var dial PacketConnFactory
+	var serve func() error
+	switch protocol {
+	case "vless-xudp":
+		const user = "b831381d-6324-4d53-ad4f-8cda48b30811"
+		client, err := vless.NewClient(user, "", logger.NOP())
+		require.NoError(t, err)
+		server := vless.NewService[string](logger.NOP(), handler)
+		server.UpdateUsers([]string{"test"}, []string{user}, []string{""})
+		dial = func(ctx context.Context, destination M.Socksaddr) (N.NetPacketConn, error) {
+			stop := context.AfterFunc(ctx, func() { clientConn.Close() })
+			defer stop()
+			return client.DialEarlyXUDPPacketConn(clientConn, destination)
+		}
+		serve = func() error { return server.NewConnection(context.Background(), serverConn, M.Socksaddr{}, nil) }
+	case "snell-v4", "snell-v4-http":
+		mode := snell.ObfsModeNone
+		if protocol == "snell-v4-http" {
+			mode = snell.ObfsModeHTTP
+		}
+		psk := []byte("udp-flow-test-key")
+		client, err := snellv4.NewClient(snellv4.ClientOptions{PSK: psk, ObfsMode: mode, ObfsHost: "example.com"})
+		require.NoError(t, err)
+		server, err := snellv5.NewService(snellv5.ServiceOptions{PSK: psk, ObfsMode: mode, Handler: handler})
+		require.NoError(t, err)
+		dial = func(context.Context, M.Socksaddr) (N.NetPacketConn, error) { return client.DialPacketConn(clientConn) }
+		serve = func() error { return server.NewConnection(context.Background(), serverConn, M.Socksaddr{}, nil) }
+	default:
+		mode := snellv6.ModeDefault
+		if protocol == "snell-v6-unshaped" {
+			mode = snellv6.ModeUnshaped
+		} else if protocol == "snell-v6-unsafe-raw" {
+			mode = snellv6.ModeUnsafeRaw
+		}
+		psk := []byte("udp-flow-test-key")
+		client, err := snellv6.NewClient(snellv6.ClientOptions{PSK: psk, Mode: mode})
+		require.NoError(t, err)
+		server, err := snellv6.NewService(snellv6.ServerOptions{PSK: psk, Mode: mode, Handler: handler})
+		require.NoError(t, err)
+		dial = func(context.Context, M.Socksaddr) (N.NetPacketConn, error) { return client.DialPacketConn(clientConn) }
+		serve = func() error { return server.NewConnection(context.Background(), serverConn, M.Socksaddr{}, nil) }
+	}
+	go func() {
+		if err := serve(); err != nil {
+			serverConn.Close()
+		}
+	}()
+	return dial
 }

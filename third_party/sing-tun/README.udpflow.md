@@ -35,7 +35,21 @@ incoming traffic cannot extend. The core router uses one second for failed DNS
 resolve actions. A pending batch that outlives this deadline obtains a fresh
 verdict. Policy rejections still use the original idle timeout.
 
+`FlowVerdict.RouteContexts` retains the lifetime of each selected outbound
+group. Cancellation expires the route and suppresses old replies, while the
+next packet obtains a fresh verdict instead of a drop tombstone. Pending
+verdicts are checked before delivery too. Shared contexts need no per-flow
+goroutine, callback or timer.
+
+`PortWithUDPMapping` opts a socket-style UDP port into endpoint-independent
+reply handling. `flow_udp.go` indexes application endpoint ownership by the
+internal address/selector. Allocation separates source endpoints and conflicting
+Fake-IP aliases. Exact reverse tuples retain the fast path; otherwise replies
+can preserve a new peer port/IP while restoring the original application
+destination and any known Fake-IP alias. Ordinary IP ports are unchanged.
+
 Changes are confined to `flow.go`, `flow_dispatch.go`, `flow_pending.go`,
+`flow_nat.go`, `flow_udp.go`,
 `stack_system.go`, `stack_mixed.go`, and the gVisor stack/filter/forwarders.
 `flow_pending_test.go` covers bounded queues, ordinary fallback ordering,
 verdict handling, cancellation and late results after reset. The three real
@@ -45,6 +59,9 @@ The core repository also tests a deliberately stalled DNS lookup with its real
 router, Fake-IP metadata and IP-CIDR route rules for IPv4 and IPv6.
 `flow_writeback_test.go` additionally covers blocked writeback during forwarding,
 reset/close, and fixed failure deadlines, including packets queued during I/O.
+Core regression tests also exercise real Selector routing, URL-test updates,
+switches during pending routing, late replies, IPv4/IPv6 application/alias
+isolation and changed peer ports through Snell and VLESS protocol servers.
 
 The root and integration modules both replace sing-tun with this directory.
 CI checks `UPSTREAM_VERSION` against both modules' required versions after preparing

@@ -107,6 +107,16 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 			d.access.Unlock()
 			return
 		}
+		if verdict.RouteExpired() {
+			if entry := d.table[p.key]; entry != nil {
+				d.removeEntry(p.key, entry, FlowCloseReset)
+			}
+			first = p.packets[0]
+			d.access.Unlock()
+			verdict = d.judgePendingPacket(p.ctx, first)
+			installed = false
+			continue
+		}
 		// A blocked writeback can leave new packets queued past the rejection
 		// deadline. Re-resolve instead of reinstalling the old failure verdict.
 		if installed && verdict.RejectTimeout > 0 {

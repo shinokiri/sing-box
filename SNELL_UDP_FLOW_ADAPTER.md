@@ -14,8 +14,25 @@ a later Fake-IP can be forwarded literally.
 The flow path tracks the complete UDP five-tuple. Each Fake-IP target is
 therefore independently resolved and DNATed, while sing-tun still reuses the
 original source-port selector whenever the reverse tuple is unambiguous.
-Different real targets can share one protocol-level UDP packet connection; only
-a genuine reverse-tuple collision gets another selector and packet connection.
+Different real targets can share one protocol-level UDP packet connection.
+Different application source addresses, conflicting Fake-IP aliases of the same
+real IP, and reverse-tuple collisions get separate selectors. Within each IP
+family a selector therefore has one unambiguous application endpoint.
+
+An exact reverse tuple remains the usual reply path. The adapter also accepts
+replies from another source port or peer IP on that UDP association. Known real
+IPs are translated back to their Fake-IP alias; new peers keep their real IP,
+and changed source ports are preserved. This socket mapping is opt-in for the
+proxy UDP port; ordinary IP-forwarding ports retain exact-tuple behavior.
+
+Selector and URL-test groups preserve their selection lifetime through routing.
+With `interrupt_exist_connections` enabled, a switch invalidates old routes and
+their replies; the next packet is routed again, without a drop tombstone. A
+switch during pending first-packet routing also obtains a fresh verdict. With
+the option disabled, existing flows stay on their selected outbound. Nested
+groups are supported, and URL-test selects the UDP-capable outbound for UDP.
+Flows share each group's lifetime context; there is no callback or timer per
+flow. Other flows sharing a protocol association remain usable.
 
 The common flow-port implementation now lives in `common/udpflow` and is shared
 by Snell and VLESS/XUDP. It preserves protocol front/rear headroom and
@@ -139,6 +156,11 @@ flow rather than leaking the Fake-IP.
   closes the association, including when the protocol is awaiting a handshake
   reply inside its write method. Later packets can create a fresh association;
   failed or queued packets on the old association are not replayed.
+  A failed association has a fixed 250 ms retry cooldown per inbound/selector.
+  Packets during that window are discarded; the next packet after it expires
+  may reconnect. Successful associations bypass the failure cache entirely.
+  The cache holds at most 1,024 entries (or the configured association limit),
+  uses the existing sweeper, and is cleared on network reset or inbound detach.
   Successful setup stops the dial timer without canceling the stream context,
   so HTTP/2 and gRPC associations remain usable until flow shutdown.
 - UDP packet connections are kept per selector and swept after five minutes of

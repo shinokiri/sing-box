@@ -16,12 +16,13 @@ import (
 )
 
 const (
-	defaultIdleTimeout    = 5 * time.Minute
-	defaultSweepPeriod    = time.Minute
-	defaultIOTimeout      = 15 * time.Second
-	defaultQueueSize      = 64
-	defaultMaxFlows       = 1024
-	defaultMaxQueuedBytes = 4 << 20
+	defaultIdleTimeout       = 5 * time.Minute
+	defaultSweepPeriod       = time.Minute
+	defaultIOTimeout         = 15 * time.Second
+	defaultQueueSize         = 64
+	defaultMaxFlows          = 1024
+	defaultMaxQueuedBytes    = 4 << 20
+	failedAssociationBackoff = 250 * time.Millisecond
 )
 
 // PacketConnFactory creates one multi-destination packet connection for a
@@ -74,6 +75,7 @@ type Port struct {
 	access      sync.Mutex
 	bindings    map[string]*portBinding
 	flows       map[*flow]struct{}
+	failures    map[failureKey]int64 // monotonic retry deadlines; at most maxFlows
 	queuedBytes int
 
 	closeOnce sync.Once
@@ -158,6 +160,7 @@ func New(options Options) (*Port, error) {
 		maxQueuedBytes: options.MaxQueuedBytes,
 		bindings:       make(map[string]*portBinding),
 		flows:          make(map[*flow]struct{}),
+		failures:       make(map[failureKey]int64),
 	}
 	var err error
 	port.portBinding, err = port.newBinding()
@@ -205,6 +208,7 @@ func (f *flow) run() {
 	}
 	if err != nil {
 		f.logError("dial", err)
+		f.closeFailed()
 		return
 	}
 	f.connAccess.Lock()
@@ -238,6 +242,7 @@ func (f *flow) run() {
 			err = f.writePacket(packetConn, packet)
 			if err != nil {
 				f.logError("write", err)
+				f.closeFailed()
 				return
 			}
 		}
@@ -307,6 +312,7 @@ func (f *flow) readLoop(packetConn N.NetPacketConn) {
 		source, err := packetConn.ReadPacket(buffer)
 		if err != nil {
 			f.logError("read", err)
+			f.closeFailed()
 			return
 		}
 		if f.ctx.Err() != nil {
@@ -363,6 +369,7 @@ func (p *Port) sweep() {
 	deadline := int64(time.Since(p.epoch) - p.idleTimeout)
 	var expired []*flow
 	p.access.Lock()
+	p.expireFailuresLocked(int64(time.Since(p.epoch)))
 	for current := range p.flows {
 		if current.lastActivity.Load() < deadline {
 			current.closeLocked()
@@ -401,6 +408,7 @@ func (f *flow) close() {
 }
 
 func (p *Port) takeFlowsLocked() []*flow {
+	clear(p.failures)
 	flows := make([]*flow, 0, len(p.flows))
 	for current := range p.flows {
 		current.closeLocked()

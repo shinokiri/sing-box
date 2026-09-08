@@ -19,9 +19,25 @@ type FlowVerdict struct {
 	Destination netip.AddrPort
 	UDPTimeout  time.Duration
 	NewTracker  func() FlowTracker
+	// Cancellation invalidates the route without installing a drop tombstone.
+	// Contexts are shared by a group's flows and are never canceled by the flow.
+	RouteContexts []context.Context
 	// RejectTimeout gives a rejection a fixed lifetime, without renewal on
 	// traffic. Zero retains the normal idle timeout for policy rejections.
 	RejectTimeout time.Duration
+}
+
+func (v FlowVerdict) RouteExpired() bool {
+	return routeExpired(v.RouteContexts)
+}
+
+func routeExpired(contexts []context.Context) bool {
+	for _, ctx := range contexts {
+		if ctx.Err() != nil {
+			return true
+		}
+	}
+	return false
 }
 
 type FlowAction uint8
@@ -77,6 +93,13 @@ type Port interface {
 type PortWithSelectorRange interface {
 	Port
 	PortSelectorRange() (start uint16, count uint16)
+}
+
+// PortWithUDPMapping carries socket associations, whose replies may come from
+// a different peer endpoint. Ordinary IP ports retain exact-tuple filtering.
+type PortWithUDPMapping interface {
+	Port
+	EndpointIndependentUDP() bool
 }
 
 type Return interface {

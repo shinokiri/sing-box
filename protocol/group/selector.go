@@ -25,6 +25,7 @@ func RegisterSelector(registry *outbound.Registry) {
 
 var (
 	_ adapter.OutboundGroup           = (*Selector)(nil)
+	_ adapter.FlowOutboundGroup       = (*Selector)(nil)
 	_ adapter.ConnectionHandler       = (*Selector)(nil)
 	_ adapter.PacketConnectionHandler = (*Selector)(nil)
 )
@@ -114,6 +115,14 @@ func (s *Selector) Now() string {
 		return s.tags[0]
 	}
 	return selected.Tag()
+}
+
+func (s *Selector) NowForFlow(string) (string, context.Context) {
+	var lifetime context.Context
+	if s.interruptExternalConnections {
+		lifetime = s.interruptGroup.FlowContext()
+	}
+	return s.Now(), lifetime
 }
 
 func (s *Selector) All() []string {

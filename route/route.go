@@ -455,12 +455,23 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 			return continueResult
 		}
 	}
+	var routeContexts []context.Context
 	for range 8 {
 		group, isGroup := outbound.(adapter.OutboundGroup)
 		if !isGroup {
 			break
 		}
-		selectedOutbound, selectedLoaded := r.outbound.Outbound(group.Now())
+		var selectedTag string
+		if flowGroup, ok := group.(adapter.FlowOutboundGroup); ok {
+			var lifetime context.Context
+			selectedTag, lifetime = flowGroup.NowForFlow(metadata.Network)
+			if lifetime != nil {
+				routeContexts = append(routeContexts, lifetime)
+			}
+		} else {
+			selectedTag = group.Now()
+		}
+		selectedOutbound, selectedLoaded := r.outbound.Outbound(selectedTag)
 		if !selectedLoaded {
 			return continueResult
 		}
@@ -477,7 +488,7 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 	if flowAction != adapter.PreMatchFlow {
 		return adapter.PreMatchResult{Action: flowAction, Outbound: outbound}
 	}
-	result := adapter.PreMatchResult{Action: adapter.PreMatchFlow, Outbound: outbound}
+	result := adapter.PreMatchResult{Action: adapter.PreMatchFlow, Outbound: outbound, RouteContexts: routeContexts}
 	if metadata.Network == N.NetworkUDP {
 		if metadata.UDPTimeout > 0 {
 			result.UDPTimeout = metadata.UDPTimeout
