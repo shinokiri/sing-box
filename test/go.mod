@@ -8,6 +8,8 @@ replace github.com/sagernet/sing-box => ../
 
 replace github.com/sagernet/sing-mux => ../third_party/sing-mux
 
+replace github.com/sagernet/sing-tun => ../third_party/sing-tun
+
 require (
 	github.com/docker/docker v27.3.1+incompatible
 	github.com/docker/go-connections v0.5.0

@@ -314,7 +314,11 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 }
 
 func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) adapter.PreMatchResult {
-	ctx := log.ContextWithNewID(r.ctx)
+	return r.PreMatchContext(r.ctx, metadata, firstPacket)
+}
+
+func (r *Router) PreMatchContext(ctx context.Context, metadata adapter.InboundContext, firstPacket []byte) adapter.PreMatchResult {
+	ctx = log.ContextWithNewID(ctx)
 	metadata.PreMatch = true
 	continueResult := adapter.PreMatchResult{Action: adapter.PreMatchContinue}
 	packetDestination := metadata.Destination

@@ -19,6 +19,7 @@ type Router interface {
 	Lifecycle
 	ConnectionRouter
 	PreMatch(metadata InboundContext, firstPacket []byte) PreMatchResult
+	PreMatchContext(ctx context.Context, metadata InboundContext, firstPacket []byte) PreMatchResult
 	HijackDNSPacket(ctx context.Context, payload []byte, writer N.PacketWriter, metadata InboundContext)
 	ConnectionRouterEx
 	RuleSet(tag string) (RuleSet, bool)
@@ -50,6 +51,16 @@ type PreMatchResult struct {
 }
 
 func JudgeFlow(router Router, inbound string, inboundType string, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
+	return judgeFlow(router.PreMatch, inbound, inboundType, network, source, destination, firstPacket)
+}
+
+func JudgeFlowContext(ctx context.Context, router Router, inbound string, inboundType string, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
+	return judgeFlow(func(metadata InboundContext, firstPacket []byte) PreMatchResult {
+		return router.PreMatchContext(ctx, metadata, firstPacket)
+	}, inbound, inboundType, network, source, destination, firstPacket)
+}
+
+func judgeFlow(preMatch func(InboundContext, []byte) PreMatchResult, inbound string, inboundType string, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
 	var networkName string
 	switch network {
 	case uint8(header.TCPProtocolNumber):
@@ -72,7 +83,7 @@ func JudgeFlow(router Router, inbound string, inboundType string, network uint8,
 		metadata.Source.Port = 0
 		metadata.Destination.Port = 0
 	}
-	result := router.PreMatch(metadata, firstPacket)
+	result := preMatch(metadata, firstPacket)
 	switch result.Action {
 	case PreMatchFlow:
 		port, isPort := result.Outbound.(tun.Port)

@@ -73,17 +73,27 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: android-arm64-api36-go-${{ steps.source.outputs.go_version }}-ndk-r29-${{ hashFiles('go.sum', 'third_party/sing-mux/go.sum') }}-${{ github.sha }}
-          restore-keys: android-arm64-api36-go-${{ steps.source.outputs.go_version }}-ndk-r29-${{ hashFiles('go.sum', 'third_party/sing-mux/go.sum') }}-
+          key: android-arm64-api36-go-${{ steps.source.outputs.go_version }}-ndk-r29-${{ hashFiles('go.sum', 'third_party/sing-mux/go.sum', 'third_party/sing-tun/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            android-arm64-api36-go-${{ steps.source.outputs.go_version }}-ndk-r29-${{ hashFiles('go.sum', 'third_party/sing-mux/go.sum', 'third_party/sing-tun/go.sum') }}-
+            android-arm64-api36-go-${{ steps.source.outputs.go_version }}-ndk-r29-
+      - name: Check the local TUN patch matches the required upstream version
+        run: |
+          required="$(go list -m -f '{{.Version}}' github.com/sagernet/sing-tun)"
+          base="$(cat third_party/sing-tun/UPSTREAM_VERSION)"
+          if [ "$required" != "$base" ]; then
+            echo "sing-tun changed from $base to $required; rebase the local routing patch before publishing."
+            exit 1
+          fi
       - name: Test all core packages with release features
         run: go test -exec sudo -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS)" ./...
       - name: Vet all core packages
         # The daemon/libbox debug crash hooks intentionally dereference zero.
         run: go vet -unsafeptr=false -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" ./...
       - name: Race tests with the Android gRPC implementation
-        run: go test -race -tags with_gvisor,with_quic -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux
+        run: go test -race -tags with_gvisor,with_quic -count=1 ./route ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux github.com/sagernet/sing-tun
       - name: Race tests with full gRPC
-        run: go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./common/udpflow ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic
+        run: go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./route ./common/udpflow ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-tun
       - name: Measure UDP forwarding allocations and throughput
         run: |
           go test -tags with_gvisor -run '^$' -bench '^BenchmarkPortForward$' -benchmem ./common/udpflow | tee "$RUNNER_TEMP/udpflow-bench.txt"

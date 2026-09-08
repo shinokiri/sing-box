@@ -60,6 +60,7 @@ type Port struct {
 	name           string
 	dialPacketConn PacketConnFactory
 	mtu            uint32
+	epoch          time.Time
 	idleTimeout    time.Duration
 	sweepPeriod    time.Duration
 	dialTimeout    time.Duration
@@ -147,6 +148,7 @@ func New(options Options) (*Port, error) {
 		name:           options.Name,
 		dialPacketConn: options.DialPacketConn,
 		mtu:            options.MTU,
+		epoch:          time.Now(),
 		idleTimeout:    options.IdleTimeout,
 		sweepPeriod:    options.SweepPeriod,
 		dialTimeout:    options.DialTimeout,
@@ -169,7 +171,7 @@ func New(options Options) (*Port, error) {
 }
 
 func (f *flow) touch() {
-	f.lastActivity.Store(time.Now().UnixNano())
+	f.lastActivity.Store(int64(time.Since(f.port.epoch)))
 }
 
 func (f *flow) run() {
@@ -358,7 +360,7 @@ func (p *Port) sweepLoop() {
 }
 
 func (p *Port) sweep() {
-	deadline := time.Now().Add(-p.idleTimeout).UnixNano()
+	deadline := int64(time.Since(p.epoch) - p.idleTimeout)
 	var expired []*flow
 	p.access.Lock()
 	for current := range p.flows {

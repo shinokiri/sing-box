@@ -521,13 +521,17 @@ func (t *Inbound) Close() error {
 }
 
 func (t *Inbound) JudgeFlow(network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
+	return t.JudgeFlowContext(t.ctx, network, source, destination, firstPacket)
+}
+
+func (t *Inbound) JudgeFlowContext(ctx context.Context, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
 	if slices.Contains(t.dnsHijackAddress, destination.Addr()) {
 		if network == uint8(header.UDPProtocolNumber) {
 			return tun.FlowVerdict{Action: tun.ActionHijackDNS}
 		}
 		return tun.FlowVerdict{Action: tun.ActionAccept}
 	}
-	return adapter.JudgeFlow(t.router, t.tag, C.TypeTun, network, source, destination, firstPacket)
+	return adapter.JudgeFlowContext(ctx, t.router, t.tag, C.TypeTun, network, source, destination, firstPacket)
 }
 
 func (t *Inbound) NewDNSPacket(payload []byte, source M.Socksaddr, destination M.Socksaddr, writer N.PacketWriter) {

@@ -22,6 +22,12 @@ by Snell and VLESS/XUDP. It preserves protocol front/rear headroom and
 serializes writes per selector on asynchronous workers. Packet data is copied
 before the TUN reader reuses its buffers. Dialing, handshake reads, and writes
 therefore do not hold up the TUN reader or other selectors.
+First-flow routing also runs away from the TUN reader. A cold Fake-IP resolve
+must not prevent packets for an already established flow from being read.
+The local sing-tun patch queues owned packets for that tuple while the original
+pre-match operation completes, preserving sniff/resolve/IP-rule order. It then
+installs the verdict and delivers the queued packets in order. Ordinary-stack
+fallback runs outside the dispatcher lock; system, mixed and gVisor are covered.
 The worker publishes protocol headroom requirements so subsequent packets can
 reserve their framing space during that ownership copy. It rechecks the actual
 requirements before writing and only reallocates when a queued buffer is too
@@ -123,6 +129,11 @@ flow rather than leaking the Fake-IP.
   to 1,024 associations and 4 MiB of queued/in-flight payload data, excluding
   protocol framing and read buffers. Packets exceeding these limits are
   dropped with a trace-level forwarding error rather than blocking the TUN.
+- Before a verdict is installed, each TUN dispatcher separately permits up to
+  64 routing workers, 64 packets per pending tuple and 4 MiB of owned packet
+  data, including batches being delivered to the ordinary stack. At capacity,
+  additional pending packets/new tuples are dropped; established tuples still
+  use the inline path. There is one task per new tuple, not per packet.
 - Flow setup uses the outbound's explicit `connect_timeout`, or 15 seconds
   when unset. Each protocol write has a 15-second timeout. A stalled write
   closes the association, including when the protocol is awaiting a handshake
@@ -131,7 +142,8 @@ flow rather than leaking the Fake-IP.
   Successful setup stops the dial timer without canceling the stream context,
   so HTTP/2 and gRPC associations remain usable until flow shutdown.
 - UDP packet connections are kept per selector and swept after five minutes of
-  inactivity. Network reset, inbound detach, parent context cancellation, and
+  inactivity, measured with a monotonic clock so system-clock adjustments do
+  not change the timeout. Network reset, inbound detach, parent context cancellation, and
   outbound close cancel pending dials and close active connections. Detach also
   discards queued packets and prevents late replies reaching a new inbound.
 - The external server implementation and its host/cloud firewall still decide
@@ -159,6 +171,14 @@ The root integration test decodes a complete configuration and exercises the
 real Fake-IP store, hosts resolver, route rules, and TUN routing entry point for
 IPv4/IPv6 Snell and VLESS destinations. It also checks rejection without a
 resolve rule. This needs the host's network-monitor permissions.
+An additional router regression holds DNS resolution pending while an existing
+flow forwards traffic, then checks owned first/second packets, IPv4/IPv6 DNAT
+and real IP-CIDR rule selection. Dispatcher tests cover pending-work bounds,
+ordinary fallback ordering, all verdict kinds, parent/close cancellation and
+late results after reset. In-memory TUN tests start the actual system, mixed
+and gVisor stacks and check normal UDP, TCP and ICMP fallback. gVisor reuses
+the installed pre-match decision instead of doing DNS again under UDP NAT
+creation. These are not physical-device tests.
 Transport regressions cover concurrent response initialization and reads, and
 closing before a response arrives without leaking its late response body.
 QUIC dial and handshake cancellation, waiting for a shared connection, and
@@ -174,9 +194,15 @@ in sing-mux v0.3.5. `third_party/sing-mux` contains that version with a local
 applies it consistently to tests and Android builds. See its `README.udpflow.md`
 for provenance and the condition for removing the local copy.
 
+`third_party/sing-tun` contains v0.9.0-beta.4 with the context-aware first-flow
+dispatcher patch. Its `README.udpflow.md` records the source and change scope.
+CI checks the required sing-tun version against the local patch base after an
+upstream merge, so a dependency update requires porting the patch rather than
+silently building the older module. Other platforms and their workflows remain.
+
 ```sh
-go test -race -tags with_gvisor,with_quic -count=1 ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux
-go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./common/udpflow ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic
+go test -race -tags with_gvisor,with_quic -count=1 ./route ./common/udpflow ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux github.com/sagernet/sing-tun
+go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./route ./common/udpflow ./protocol/vless ./transport/v2ray ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-tun
 go test -exec sudo -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS)" ./...
 go test -tags with_gvisor -run '^$' -bench '^BenchmarkPortForward$' -benchmem ./common/udpflow
 CGO_ENABLED=0 go build -trimpath -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS) -s -w -buildid=" ./cmd/sing-box
