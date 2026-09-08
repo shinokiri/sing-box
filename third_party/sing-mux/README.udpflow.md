@@ -2,12 +2,19 @@
 
 Source: `github.com/sagernet/sing-mux` **v0.3.5**, the existing dependency.
 The Go sources, module files, and upstream license are copied unchanged except
-for `h2mux_conn.go`.
+for `h2mux_conn.go` and `h2mux.go`.
 
 The VLESS TCP multiplex / UDP flow coexistence regression exposed a race
 between `httpConn.setup`, `Read`, and `Close`. `Read` now waits for response
 publication; `Close` serializes with setup, unblocks a pending reader, and
 disposes of a response body that arrives after closure. No protocol changes.
+
+The CI coexistence test also caught concurrent explicit/session-reader closes
+of the HTTP/2 server session panicking on its `done` channel. `sync.Once` now
+closes that channel and the transport together, returning the same result to
+all callers. Closing also releases an HTTP handler whose stream has not yet
+been accepted, instead of leaving it blocked on the inbound channel.
+`h2mux_test.go` covers concurrent closes and an unaccepted stream.
 
 The upstream v0.3.6 source still contains this race as of 2026-09-07. The local
 module replacement lets regular Go, gomobile, and CI builds use the same fix
