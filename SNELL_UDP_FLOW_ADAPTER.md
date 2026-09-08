@@ -202,26 +202,50 @@ measurements or network RTT. The separate `test/` module's external-server/Docke
 not part of this core-module gate.
 
 After the checks pass, branch push/manual builds compile a signed ARM64 APK
-with the pinned client's Go version (currently 1.26.7), NDK r28, and JDK 17.
+for Android 16 and later (minimum API 36), with the pinned client's Go version
+(currently 1.26.7), NDK r29, and JDK 17.
 Pull requests run core checks only. The native
 library and APK are built on one runner, with one toolchain setup and cached
-Go native compilation. They use `build_libbox -target android -platform android/arm64
--android-legacy=false` and package one signed `other` APK. The Gradle init script
+Go native compilation. They use
+`build_libbox -target android -platform android/arm64` and package one signed
+`other` APK. The Gradle init script
 disables ABI splits and filters all native dependencies to `arm64-v8a`; CI
 checks that exactly one APK contains only that ABI and includes libbox.
 It also verifies the built APK's signature with `apksigner` before uploading.
 
-Formal releases use exactly `<official version>-udpflow`, with one leading `v`
-in the Git tag. `release/udpflow.json` records the upstream stable tag and commit;
+The APK's API 36 minimum lets R8 optimize away obsolete Android compatibility
+paths. NDK r29's `meta/platforms.json` exposes native APIs only through 35, so
+libbox is compiled with `-androidapi 35`, the highest supported native interface,
+while the installable APK requires API 36. This also enables Clang's RELR
+relocation packing. The native build helper defaults to ARM64 and no longer
+builds an API 21 compatibility library. It honors the explicit NDK path selected
+by CI. The pinned client's compile/target SDK and core-library desugaring remain
+as upstream specifies; raising the system minimum does not justify guessing
+a newer CPU instruction set or rebuilding every third-party dependency.
+
+Native libraries are stored uncompressed, allowing Android to load them directly
+from the APK without extracting a second copy. This increases the downloadable
+APK size while avoiding that extracted installation copy. CI checks ZIP and ELF
+16 KB alignment for every native library, the APK's disabled extraction flag,
+and the actual libbox Android API note and RELR table. Prebuilt dependencies are
+checked too, but are not claimed to have been recompiled with the new API.
+These build improvements do not establish device RTT, throughput or power gains.
+
+Formal releases start at `<official version>-udpflow`, with one leading `v`
+in the Git tag. Fork fixes can be released as `<official version>-udpflow.1`,
+`.2`, and so on, without waiting for the next official version.
+`release/udpflow.json` records the upstream stable tag, commit and `fork_revision`;
+increment the revision for the next reviewed fork release (zero omits the number).
+Following a new official stable version resets it to zero.
 CI verifies that this commit is an ancestor of the built core and that the
 pinned Android client's version matches. Release APKs are named
-`SFA-<official version>-udpflow-arm64-v8a.apk`. Once that release is public,
-subsequent branch builds use `<official version>-udpflow.g<commit>` and remain
+`SFA-<version>-arm64-v8a.apk`. Once that revision is public,
+subsequent branch builds append `.g<commit>` to its version and remain
 Actions artifacts; published releases and tags are never overwritten.
 Both types upload the `binary-android-arm64` Actions artifact. `versionCode` is
 `1000000 + GITHUB_RUN_NUMBER`: later runs increase it even though the client
 commit is pinned; rerunning a job preserves it. CI reads the actual APK manifest
-to check the version and API 24 minimum against the recorded metadata.
+to check the version and API 36 minimum against the recorded metadata.
 No legacy API 21 library, legacy APK, other Android architecture, or universal
 APK is built. The same tested artifact is published with `SFA-version-metadata.json`
 and `SHA256SUMS`. Assets are uploaded to a draft before publication; the final

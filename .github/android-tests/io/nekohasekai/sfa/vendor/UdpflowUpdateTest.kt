@@ -32,6 +32,25 @@ class UdpflowUpdateTest {
     }
 
     @Test
+    fun forkRevisionsAreStableUpdatesBeforeTheNextOfficialVersion() {
+        val versions = listOf("1.14.0-udpflow", "1.14.0-udpflow.1", "1.14.0-udpflow.2", "1.14.1-udpflow")
+        val releases = versions.map { version ->
+            val url = "https://github.com/shinokiri/sing-box/releases/download/v$version/SFA-$version-arm64-v8a.apk"
+            release(version).copy(assets = listOf(GitHubUpdateChecker.GitHubAsset("SFA-$version-arm64-v8a.apk", url, 123)))
+        }
+        for (index in 1 until versions.size) {
+            val update = selectUdpflowUpdate(releases.take(index + 1).reversed(), UpdateTrack.STABLE, 1000061 + index) {
+                val version = it.tagName.removePrefix("v")
+                GitHubUpdateChecker.VersionMetadata(1000062 + versions.indexOf(version), version)
+            }
+            assertEquals(versions[index], update?.versionName)
+            assertEquals(1000062 + index, update?.versionCode)
+            assertEquals(false, update?.isPrerelease)
+            assertEquals(releases[index].assets.single().browserDownloadUrl, update?.downloadUrl)
+        }
+    }
+
+    @Test
     fun doesNotOfferAnUninstallableEqualOrLowerCode() {
         for (code in listOf(0, 730, 1000060)) {
             assertNull(selectUdpflowUpdate(listOf(release("1.15.0-udpflow")), UpdateTrack.STABLE, 1000060) {

@@ -14,6 +14,35 @@ spec.loader.exec_module(release)
 
 
 class ReleaseTest(unittest.TestCase):
+    def test_fork_versions_keep_official_version_and_allow_numeric_revisions(self):
+        self.assertEqual(release.fork_version("v1.14.0"), "1.14.0-udpflow")
+        self.assertEqual(release.fork_version("v1.14.0", 1), "1.14.0-udpflow.1")
+        self.assertEqual(release.fork_version("v1.14.0", 10), "1.14.0-udpflow.10")
+        for revision in (-1, "1", 1.5, True):
+            with self.subTest(revision=revision), self.assertRaises(ValueError):
+                release.fork_version("v1.14.0", revision)
+
+    def test_revision_selection_and_upstream_revision_reset(self):
+        for tag, published, expected_tag, build in (
+            ("v1.14.0", False, "v1.14.0-udpflow.2", "true"),
+            ("v1.14.0", True, "v1.14.0-udpflow.2", "false"),
+            ("v1.14.1", False, "v1.14.1-udpflow", "true"),
+        ):
+            with self.subTest(tag=tag, published=published), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "output"
+                current = {"upstream_tag": "v1.14.0", "upstream_commit": "a" * 40, "fork_revision": 2}
+                responses = [
+                    {"tag_name": tag, "draft": False, "prerelease": False},
+                    {"object": {"type": "commit", "sha": current["upstream_commit"]}},
+                    {"draft": False, "prerelease": False} if published else None,
+                ]
+                with patch.object(release.MANIFEST.__class__, "read_text", return_value=json.dumps(current)), patch.object(release, "api", side_effect=responses) as api, patch.dict(os.environ, GITHUB_EVENT_NAME="schedule", GITHUB_REPOSITORY="example/fork", GITHUB_OUTPUT=str(output), SYNC_UPSTREAM="true"):
+                    release.plan()
+                api.assert_any_call(f"repos/example/fork/releases/tags/{expected_tag}", missing_ok=True)
+                values = release.properties(output)
+                self.assertEqual(values["build"], build)
+                self.assertEqual(values["publish"], str(not published).lower())
+
     def test_only_canonical_stable_versions(self):
         self.assertEqual(release.stable_version("v1.14.0"), (1, 14, 0))
         for tag in ("vv1.14.0", "v1.14.0-rc.1", "v1.14.0-udpflow", "v01.14.0", "1.14.0"):
@@ -131,6 +160,51 @@ class FollowUpstreamTest(unittest.TestCase):
         self.assertEqual(self.git(self.fork, "describe", "--tags", "--exact-match"), "v1.14.1-udpflow")
         # Preparing/testing never publishes a branch or release.
         self.assertEqual(self.git(self.upstream, "rev-parse", "HEAD"), self.target)
+
+    def test_fork_revision_builds_existing_base_without_replacing_public_tag(self):
+        manifest = self.fork / "release/udpflow.json"
+        current = json.loads(manifest.read_text())
+        previous = self.git(self.fork, "rev-parse", "HEAD")
+        self.git(self.fork, "tag", "v1.14.0-udpflow", previous)
+        current["fork_revision"] = 1
+        manifest.write_text(json.dumps(current))
+        before = self.commit(self.fork, "release fork revision 1")
+        os.environ.update(UPSTREAM_TAG=current["upstream_tag"], UPSTREAM_COMMIT=current["upstream_commit"], GITHUB_RUN_NUMBER="67")
+        self.prepare()
+        self.assertEqual(self.git(self.fork, "rev-parse", "HEAD"), before)
+        self.assertEqual(self.git(self.fork, "rev-parse", "v1.14.0-udpflow"), previous)
+        self.assertEqual(self.git(self.fork, "rev-parse", "v1.14.0-udpflow.1"), before)
+        props = release.properties(self.fork / "clients/android/version.properties")
+        self.assertEqual(props["VERSION_NAME"], "1.14.0-udpflow.1")
+        self.assertEqual(props["VERSION_CODE"], "1000067")
+        state = json.loads((Path(self.temp.name) / "udpflow-source.json").read_text())
+        self.assertEqual(state["commit"], before)
+        self.assertEqual(state["tag"], "v1.14.0-udpflow.1")
+
+    def test_snapshot_after_revision_has_a_distinct_version_and_tag(self):
+        manifest = self.fork / "release/udpflow.json"
+        current = json.loads(manifest.read_text())
+        current["fork_revision"] = 1
+        manifest.write_text(json.dumps(current))
+        self.commit(self.fork, "release fork revision 1")
+        self.git(self.fork, "tag", "v1.14.0-udpflow.1")
+        (self.fork / "udpflow.go").write_text("next fork change\n")
+        before = self.commit(self.fork, "next change")
+        os.environ.update(UPSTREAM_TAG=current["upstream_tag"], UPSTREAM_COMMIT=current["upstream_commit"], PUBLISH_RELEASE="false")
+        self.prepare()
+        version = f"1.14.0-udpflow.1.g{before[:7]}"
+        self.assertEqual(release.properties(self.fork / "clients/android/version.properties")["VERSION_NAME"], version)
+        self.assertEqual(self.git(self.fork, "rev-parse", f"v{version}"), before)
+
+    def test_following_upstream_resets_recorded_fork_revision(self):
+        manifest = self.fork / "release/udpflow.json"
+        current = json.loads(manifest.read_text())
+        current["fork_revision"] = 3
+        manifest.write_text(json.dumps(current))
+        self.commit(self.fork, "third revision on previous official release")
+        self.prepare()
+        self.assertEqual(json.loads(manifest.read_text())["fork_revision"], 0)
+        self.assertEqual(release.properties(self.fork / "clients/android/version.properties")["VERSION_NAME"], "1.14.1-udpflow")
 
     def test_core_conflict_stops_before_commit_or_release(self):
         (self.fork / "core.go").write_text("fork changed the same line\n")

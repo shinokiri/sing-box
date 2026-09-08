@@ -34,8 +34,8 @@ jobs:
       upstream_commit: ${{ steps.source.outputs.upstream_commit }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
-      - name: Test release selection and upstream merges
-        run: python3 -m unittest discover -s .github -p 'test_udpflow_release.py' -v
+      - name: Test release selection, upstream merges and APK verification
+        run: python3 -m unittest discover -s .github -p 'test_*.py' -v
       - name: Select sources and skip unchanged scheduled runs
         id: source
         env:
@@ -73,8 +73,8 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: android-arm64-go-${{ steps.source.outputs.go_version }}-ndk-r28-${{ hashFiles('go.sum', 'third_party/sing-mux/go.sum') }}-${{ github.sha }}
-          restore-keys: android-arm64-go-${{ steps.source.outputs.go_version }}-ndk-r28-${{ hashFiles('go.sum', 'third_party/sing-mux/go.sum') }}-
+          key: android-arm64-api36-go-${{ steps.source.outputs.go_version }}-ndk-r29-${{ hashFiles('go.sum', 'third_party/sing-mux/go.sum') }}-${{ github.sha }}
+          restore-keys: android-arm64-api36-go-${{ steps.source.outputs.go_version }}-ndk-r29-${{ hashFiles('go.sum', 'third_party/sing-mux/go.sum') }}-
       - name: Test all core packages with release features
         run: go test -exec sudo -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS)" ./...
       - name: Vet all core packages
@@ -97,7 +97,7 @@ jobs:
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r28
+          ndk-version: r29
       - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
         if: env.BUILD_ANDROID == 'true'
         with:
@@ -107,14 +107,14 @@ jobs:
         if: env.BUILD_ANDROID == 'true'
         with:
           cache-provider: basic
-      - name: Build API 24 ARM64 library with Naive
+      - name: Build Android 16 ARM64 library with Naive
         if: env.BUILD_ANDROID == 'true'
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
-          go run ./cmd/internal/build_libbox -target android -platform android/arm64 -android-legacy=false
+          go run ./cmd/internal/build_libbox -target android -platform android/arm64
           mkdir -p clients/android/app/libs
           cp libbox.aar clients/android/app/libs/
       - name: Install signing key

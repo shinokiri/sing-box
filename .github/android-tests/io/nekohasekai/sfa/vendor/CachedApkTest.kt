@@ -12,7 +12,7 @@ class CachedApkTest {
         try {
             file.writeText("previous APK")
             val previous = "https://github.com/shinokiri/sing-box/releases/download/v1.14.0-udpflow/SFA-1.14.0-udpflow-arm64-v8a.apk"
-            val next = "https://github.com/shinokiri/sing-box/releases/download/v1.14.1-udpflow/SFA-1.14.1-udpflow-arm64-v8a.apk"
+            val next = "https://github.com/shinokiri/sing-box/releases/download/v1.14.0-udpflow.1/SFA-1.14.0-udpflow.1-arm64-v8a.apk"
             assertNull(cachedApkForUrl(file, previous, next))
             assertNull(cachedApkForUrl(file, "", next))
             assertEquals(file, cachedApkForUrl(file, previous, previous))

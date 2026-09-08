@@ -4,6 +4,11 @@ gradle.beforeProject { project ->
         project.extensions.getByName("androidComponents").finalizeDsl { android ->
             // AGP 9 creates unit tests only for the selected test build type.
             android.testBuildType = "release"
+            android.defaultConfig.minSdk = 36
+            android.ndkVersion = "29.0.14206865"
+            // Load page-aligned libraries directly from the APK, without an
+            // extracted second copy in the installation directory.
+            android.packaging.jniLibs.useLegacyPackaging = false
             android.splits.abi.setEnable(false)
             android.defaultConfig.ndk.abiFilters.clear()
             android.defaultConfig.ndk.abiFilters.add("arm64-v8a")

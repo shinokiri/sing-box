@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	_ "github.com/sagernet/gomobile"
@@ -17,16 +16,14 @@ import (
 )
 
 var (
-	debugEnabled  bool
-	androidLegacy bool
-	target        string
-	platform      string
+	debugEnabled bool
+	target       string
+	platform     string
 	// withTailscale bool
 )
 
 func init() {
 	flag.BoolVar(&debugEnabled, "debug", false, "enable debug")
-	flag.BoolVar(&androidLegacy, "android-legacy", true, "also build the Android API 21 compatibility library")
 	flag.StringVar(&target, "target", "android", "target platform")
 	flag.StringVar(&platform, "platform", "", "specify platform")
 	// flag.BoolVar(&withTailscale, "with-tailscale", false, "build tailscale for iOS and tvOS")
@@ -73,26 +70,6 @@ func init() {
 	debugTags = append(debugTags, "debug")
 }
 
-type AndroidBuildConfig struct {
-	AndroidAPI int
-	OutputName string
-	Tags       []string
-}
-
-func filterTags(tags []string, exclude ...string) []string {
-	excludeMap := make(map[string]bool)
-	for _, tag := range exclude {
-		excludeMap[tag] = true
-	}
-	var result []string
-	for _, tag := range tags {
-		if !excludeMap[tag] {
-			result = append(result, tag)
-		}
-	}
-	return result
-}
-
 func checkJavaVersion() {
 	var javaPath string
 	javaHome := os.Getenv("JAVA_HOME")
@@ -111,22 +88,25 @@ func checkJavaVersion() {
 	}
 }
 
-func getAndroidBindTarget() string {
-	if platform != "" {
-		return platform
-	} else if debugEnabled {
-		return "android/arm64"
-	}
-	return "android"
-}
+func buildAndroid() {
+	build_shared.FindSDK()
+	checkJavaVersion()
 
-func buildAndroidVariant(config AndroidBuildConfig, bindTarget string) {
+	bindTarget := platform
+	if bindTarget == "" {
+		bindTarget = "android/arm64"
+	}
+	tags := append([]string{}, sharedTags...)
+	if debugEnabled {
+		tags = append(tags, debugTags...)
+	}
 	args := []string{
 		"bind",
 		"-v",
-		"-o", config.OutputName,
+		"-o", "libbox.aar",
 		"-target", bindTarget,
-		"-androidapi", strconv.Itoa(config.AndroidAPI),
+		// NDK r29 exposes native APIs through 35; the APK requires API 36.
+		"-androidapi", "35",
 		"-javapkg=io.nekohasekai",
 		"-libname=box",
 	}
@@ -137,7 +117,7 @@ func buildAndroidVariant(config AndroidBuildConfig, bindTarget string) {
 		args = append(args, debugFlags...)
 	}
 
-	args = append(args, "-tags", strings.Join(config.Tags, ","))
+	args = append(args, "-tags", strings.Join(tags, ","))
 	args = append(args, "./experimental/libbox")
 
 	command := exec.Command(build_shared.GoBinPath+"/gomobile", args...)
@@ -151,47 +131,12 @@ func buildAndroidVariant(config AndroidBuildConfig, bindTarget string) {
 	copyPath := filepath.Join("..", "sing-box-for-android", "app", "libs")
 	if rw.IsDir(copyPath) {
 		copyPath, _ = filepath.Abs(copyPath)
-		err = rw.CopyFile(config.OutputName, filepath.Join(copyPath, config.OutputName))
+		err = rw.CopyFile("libbox.aar", filepath.Join(copyPath, "libbox.aar"))
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Info("copied ", config.OutputName, " to ", copyPath)
+		log.Info("copied libbox.aar to ", copyPath)
 	}
-}
-
-func buildAndroid() {
-	build_shared.FindSDK()
-	checkJavaVersion()
-
-	bindTarget := getAndroidBindTarget()
-
-	// Build main variant (SDK 24)
-	mainTags := append([]string{}, sharedTags...)
-	// mainTags = append(mainTags, memcTags...)
-	if debugEnabled {
-		mainTags = append(mainTags, debugTags...)
-	}
-	buildAndroidVariant(AndroidBuildConfig{
-		AndroidAPI: 24,
-		OutputName: "libbox.aar",
-		Tags:       mainTags,
-	}, bindTarget)
-
-	if !androidLegacy {
-		return
-	}
-
-	// Build legacy variant (SDK 21, no naive outbound)
-	legacyTags := filterTags(sharedTags, "with_naive_outbound")
-	// legacyTags = append(legacyTags, memcTags...)
-	if debugEnabled {
-		legacyTags = append(legacyTags, debugTags...)
-	}
-	buildAndroidVariant(AndroidBuildConfig{
-		AndroidAPI: 21,
-		OutputName: "libbox-legacy.aar",
-		Tags:       legacyTags,
-	}, bindTarget)
 }
 
 func buildApple() {
