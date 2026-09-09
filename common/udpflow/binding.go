@@ -127,14 +127,30 @@ func (b *portBinding) DetachReturn(returnPath tun.Return) error {
 func (b *portBinding) WritePackets(packets [][]byte) error {
 	var errs []error
 	for _, packet := range packets {
-		if err := b.writePacket(packet); err != nil {
+		if err := b.writePacket(packet, nil); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return E.Errors(errs...)
 }
 
-func (b *portBinding) writePacket(packet []byte) error {
+// Keep the dispatcher's tuple identity through both the borrowed TUN batch and
+// our owned queue. Checking a destination again after dialing could instead
+// find a replacement flow and accidentally revive canceled data.
+func (b *portBinding) WriteUDPFlowPackets(packets []tun.UDPFlowPacket) error {
+	var errs []error
+	for _, packet := range packets {
+		if err := b.writePacket(packet.Packet, packet.Flow); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return E.Errors(errs...)
+}
+
+func (b *portBinding) writePacket(packet []byte, packetFlow tun.UDPFlow) error {
+	if packetFlow != nil && !packetFlow.IsActive() {
+		return nil
+	}
 	p := b.port
 	source, destination, payload, ok := parseUDPPacket(packet)
 	if !ok {
@@ -162,7 +178,9 @@ func (b *portBinding) writePacket(packet []byte) error {
 	}
 	if current == nil {
 		var mapping tun.UDPMapping
-		if b.mappingReturn != nil {
+		if packetFlow != nil {
+			mapping = packetFlow.UDPMapping()
+		} else if b.mappingReturn != nil {
 			mapping = b.mappingReturn.UDPMapping(source)
 			if mapping == nil || mapping.Context().Err() != nil {
 				return nil
@@ -207,7 +225,7 @@ func (b *portBinding) writePacket(packet []byte) error {
 	buffer.Resize(current.frontHeadroom, 0)
 	copy(buffer.Extend(len(payload)), payload)
 	p.queuedBytes += len(payload)
-	current.queue <- queuedPacket{buffer, M.SocksaddrFromNetIP(destination)}
+	current.queue <- queuedPacket{buffer: buffer, destination: M.SocksaddrFromNetIP(destination), flow: packetFlow}
 	current.touch()
 	return nil
 }

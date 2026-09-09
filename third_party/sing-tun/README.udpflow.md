@@ -55,9 +55,18 @@ connection from following a recycled selector. The adapter performs connection
 shutdown asynchronously, outside the dispatcher mutex. Inactive peer aliases
 remain reserved for the mapping's lifetime, with history capped at the existing
 flow-table capacity. A new peer beyond that cap uses another association.
+An intrusive list of installed tuples keeps activity checks and new-source
+reply ownership independent of retired peer history, without allocating a
+second set of flow entries.
+
+`PortWithUDPMapping.WriteUDPFlowPackets` receives borrowed packets with their
+original `UDPFlow` handles. The dispatcher captures the handle before staging
+the packet, and the adapter retains it through its owned queue. Canceled or
+closed tuples cannot regain permission to send through a replacement at the
+same addresses. Unaffected tuples retain their shared association.
 
 Changes are confined to `flow.go`, `flow_dispatch.go`, `flow_pending.go`,
-`flow_nat.go`, `flow_udp.go`,
+`flow_nat.go`, `flow_udp.go`, `flow_mtu.go`,
 `stack_system.go`, `stack_mixed.go`, and the gVisor stack/filter/forwarders.
 `flow_pending_test.go` covers bounded queues, ordinary fallback ordering,
 verdict handling, cancellation and late results after reset. The three real
@@ -70,6 +79,8 @@ reset/close, and fixed failure deadlines, including packets queued during I/O.
 Core regression tests also exercise real Selector routing, URL-test updates,
 switches during pending routing, late replies, IPv4/IPv6 application/alias
 isolation and changed peer ports through Snell and VLESS protocol servers.
+`flow_udp_test.go` checks live reply ownership after peer retirement and route
+cancellation, and benchmarks replies/activity with increasing retired history.
 
 The root and integration modules both replace sing-tun with this directory.
 CI checks `UPSTREAM_VERSION` against both modules' required versions after preparing

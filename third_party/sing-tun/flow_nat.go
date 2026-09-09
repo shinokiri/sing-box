@@ -22,12 +22,14 @@ type portNAT struct {
 	selectorStart uint16
 	selectorCount uint16
 	udpAccess     sync.RWMutex
+	udpPort       PortWithUDPMapping
 	udpMappings   map[netip.AddrPort]*udpMapping
 	udpClients    map[netip.AddrPort]map[netip.AddrPort]*udpMapping
 	returnPath    *forwardReturn
 
-	counter uint32
-	pending [][]byte
+	counter    uint32
+	pending    [][]byte
+	pendingUDP []UDPFlowPacket
 }
 
 type natShard struct {
@@ -51,6 +53,7 @@ func newPortNAT(port Port, returnPath *forwardReturn) *portNAT {
 		nat.selectorStart, nat.selectorCount = rangedPort.PortSelectorRange()
 	}
 	if udpPort, ok := port.(PortWithUDPMapping); ok && udpPort.EndpointIndependentUDP() {
+		nat.udpPort = udpPort
 		nat.udpMappings = make(map[netip.AddrPort]*udpMapping)
 		nat.udpClients = make(map[netip.AddrPort]map[netip.AddrPort]*udpMapping)
 	}

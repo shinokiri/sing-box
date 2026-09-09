@@ -90,7 +90,9 @@ jobs:
         run: go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./route ./common/udpflow ./protocol/group ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-tun
       - name: Measure UDP forwarding allocations, throughput and dispatcher latency
         run: |
+          set -o pipefail
           go test -tags with_gvisor -run '^$' -bench '^Benchmark(Port|Dispatcher)Forward$' -benchmem ./common/udpflow | tee "$RUNNER_TEMP/udpflow-bench.txt"
+          go test -run '^$' -bench '^BenchmarkUDPMappingHistory$' -benchmem github.com/sagernet/sing-tun | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           {
             echo '```text'
             cat "$RUNNER_TEMP/udpflow-bench.txt"

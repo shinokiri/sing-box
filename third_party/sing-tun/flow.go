@@ -100,6 +100,20 @@ type PortWithSelectorRange interface {
 type PortWithUDPMapping interface {
 	Port
 	EndpointIndependentUDP() bool
+	WriteUDPFlowPackets(packets []UDPFlowPacket) error
+}
+
+// UDPFlowPacket borrows Packet until WriteUDPFlowPackets returns. Flow captures
+// the original tuple before batching, so a replacement at the same addresses
+// cannot give queued data a new lifetime.
+type UDPFlowPacket struct {
+	Packet []byte
+	Flow   UDPFlow
+}
+
+type UDPFlow interface {
+	UDPMapping() UDPMapping
+	IsActive() bool
 }
 
 // UDPMapping is one application endpoint's association lifetime. Implementations

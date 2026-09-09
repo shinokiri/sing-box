@@ -50,7 +50,7 @@ func (d *ForwardDispatcher) resegmentTCP(flow *forwardFlow, packet *forwardPacke
 		return
 	}
 	for i := range n {
-		d.stagePort(flow.nat, bufs[i][:sizes[i]])
+		d.stagePort(flow, bufs[i][:sizes[i]])
 	}
 }
 

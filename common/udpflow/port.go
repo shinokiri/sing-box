@@ -49,6 +49,7 @@ type Options struct {
 }
 
 var _ tun.PortWithSelectorRange = (*Port)(nil)
+var _ tun.PortWithUDPMapping = (*portBinding)(nil)
 
 // Port adapts a multi-destination L4 packet connection to sing-tun's flow port.
 // Each inbound has its own selectors and return path, while association and
@@ -85,6 +86,7 @@ type Port struct {
 type queuedPacket struct {
 	buffer      *buf.Buffer
 	destination M.Socksaddr
+	flow        tun.UDPFlow
 }
 
 type flow struct {
@@ -244,6 +246,10 @@ func (f *flow) run() {
 			if f.ctx.Err() != nil {
 				f.releasePacket(packet)
 				return
+			}
+			if packet.flow != nil && !packet.flow.IsActive() {
+				f.releasePacket(packet)
+				continue
 			}
 			err = f.writePacket(packetConn, packet)
 			if err != nil {

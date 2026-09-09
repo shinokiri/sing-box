@@ -36,6 +36,8 @@ While a socket has other active tuples, it retains inactive peers' alias
 ownership: an expired peer cannot become an unknown peer or a different alias.
 Peer history is limited to the flow-table capacity (16,384) per mapping; further
 new peers use another association rather than growing that history indefinitely.
+Installed tuples have a separate association list. Finding a live reply owner
+or checking association activity does not scan retained, expired peer history.
 
 Selector and URL-test groups preserve their selection lifetime through routing.
 With `interrupt_exist_connections` enabled, a switch invalidates old routes and
@@ -55,6 +57,11 @@ by Snell and VLESS/XUDP. It preserves protocol front/rear headroom and
 serializes writes per selector on asynchronous workers. Packet data is copied
 before the TUN reader reuses its buffers. Dialing, handshake reads, and writes
 therefore do not hold up the TUN reader or other selectors.
+Each datagram keeps its original flow handle through the borrowed TUN batch and
+the owned outbound queue. The writer checks that handle before sending, so a
+canceled route's pending data is discarded even if another route keeps the
+association alive or the same five-tuple is recreated. Discarding a packet
+releases its queue budget; other valid packets keep their order.
 First-flow routing also runs away from the TUN reader. A cold Fake-IP resolve
 must not prevent packets for an already established flow from being read.
 The local sing-tun patch queues owned packets for that tuple while the original
@@ -253,6 +260,7 @@ go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./route ./common/ud
 go test -exec sudo -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS)" ./...
 sh .github/check_local_patches.sh
 go test -tags with_gvisor -run '^$' -bench '^Benchmark(Port|Dispatcher)Forward$' -benchmem ./common/udpflow
+go test -run '^$' -bench '^BenchmarkUDPMappingHistory$' -benchmem github.com/sagernet/sing-tun
 CGO_ENABLED=0 go build -trimpath -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS) -s -w -buildid=" ./cmd/sing-box
 ```
 
@@ -278,7 +286,11 @@ and established traffic alongside 32 unresolved routes; p95/p99 delivery times
 are sampled as well as allocations and throughput. The new-tuple case resets
 every 1024 tuples to keep table size constant across benchmark lengths, including
 the amortized reset cost in ns/op. These fixtures copy inputs because NAT mutates
-them. Allocation counts and mock-transport throughput are not device power
+them. Mapping benchmarks retain one live tuple alongside 0, 4,096 or 16,383
+expired peers and measure both new-source replies and activity checks. Queue
+lifetime regressions cover delayed dials/writes, TUN batches, and replacement
+of the same tuple, including real in-process Snell and VLESS/XUDP protocols.
+Allocation counts and mock-transport throughput are not device power
 measurements or network RTT. The separate `test/` module's external-server/Docker suite is
 not part of this core-module gate.
 

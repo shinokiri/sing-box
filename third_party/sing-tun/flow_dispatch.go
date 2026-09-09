@@ -54,6 +54,9 @@ type forwardFlow struct {
 	tracker       FlowTracker
 	routeContexts []context.Context
 	udpMapping    *udpMapping
+	// Intrusive association list, protected by nat.udpAccess. Removed tuples
+	// leave this list even while their peer aliases remain reserved.
+	udpPrev, udpNext *forwardFlow
 
 	clientAddress            netip.Addr
 	clientSelector           uint16
@@ -551,7 +554,7 @@ func (d *ForwardDispatcher) forwardToPort(flow *forwardFlow, packet *forwardPack
 				fragments, ok := fragmentIPv4Packet(ipHdr, flow.effectiveMTU)
 				if ok {
 					for _, fragment := range fragments {
-						d.stagePort(flow.nat, fragment)
+						d.stagePort(flow, fragment)
 					}
 				}
 				return
@@ -572,7 +575,7 @@ func (d *ForwardDispatcher) forwardToPort(flow *forwardFlow, packet *forwardPack
 		flow.tracker.CountForward(len(raw))
 	}
 	d.rewriteForward(flow, packet)
-	d.stagePort(flow.nat, raw)
+	d.stagePort(flow, raw)
 }
 
 func (d *ForwardDispatcher) rewriteForward(flow *forwardFlow, packet *forwardPacket) {
@@ -585,22 +588,32 @@ func (d *ForwardDispatcher) rewriteForward(flow *forwardFlow, packet *forwardPac
 	}
 }
 
-func (d *ForwardDispatcher) stagePort(nat *portNAT, packet []byte) {
-	if len(nat.pending) == 0 {
+func (d *ForwardDispatcher) stagePort(flow *forwardFlow, packet []byte) {
+	nat := flow.nat
+	if len(nat.pending) == 0 && len(nat.pendingUDP) == 0 {
 		d.activeNATs = append(d.activeNATs, nat)
 	}
-	nat.pending = append(nat.pending, packet)
+	if flow.udpMapping != nil {
+		nat.pendingUDP = append(nat.pendingUDP, UDPFlowPacket{Packet: packet, Flow: flow})
+	} else {
+		nat.pending = append(nat.pending, packet)
+	}
 }
 
 func (d *ForwardDispatcher) flushPort(nat *portNAT) {
-	if len(nat.pending) == 0 {
-		return
+	if len(nat.pending) > 0 {
+		if err := nat.port.WritePackets(nat.pending); err != nil {
+			d.logger.Trace(E.Cause(err, "forward packets"))
+		}
+		nat.pending = nat.pending[:0]
 	}
-	err := nat.port.WritePackets(nat.pending)
-	if err != nil {
-		d.logger.Trace(E.Cause(err, "forward packets"))
+	if len(nat.pendingUDP) > 0 {
+		if err := nat.udpPort.WriteUDPFlowPackets(nat.pendingUDP); err != nil {
+			d.logger.Trace(E.Cause(err, "forward UDP packets"))
+		}
+		clear(nat.pendingUDP)
+		nat.pendingUDP = nat.pendingUDP[:0]
 	}
-	nat.pending = nat.pending[:0]
 }
 
 func (d *ForwardDispatcher) stageReject(packet *forwardPacket) {
@@ -670,6 +683,8 @@ func (d *ForwardDispatcher) discardStagedPackets() {
 	for _, nat := range d.activeNATs {
 		clear(nat.pending)
 		nat.pending = nat.pending[:0]
+		clear(nat.pendingUDP)
+		nat.pendingUDP = nat.pendingUDP[:0]
 	}
 	d.activeNATs = d.activeNATs[:0]
 	clear(d.writebackBatch)
