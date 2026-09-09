@@ -47,6 +47,14 @@ internal address/selector. Allocation separates source endpoints and conflicting
 Fake-IP aliases. Exact reverse tuples retain the fast path; otherwise replies
 can preserve a new peer port/IP while restoring the original application
 destination and any known Fake-IP alias. Ordinary IP ports are unchanged.
+An application endpoint index reuses compatible mappings after selector
+collisions. `ReturnWithUDPMapping` supplies each proxy connection with a captured
+`UDPMapping` handle; final-tuple removal cancels that handle. Replies check its
+identity before using either exact or alternate-peer routing, preventing an old
+connection from following a recycled selector. The adapter performs connection
+shutdown asynchronously, outside the dispatcher mutex. Inactive peer aliases
+remain reserved for the mapping's lifetime, with history capped at the existing
+flow-table capacity. A new peer beyond that cap uses another association.
 
 Changes are confined to `flow.go`, `flow_dispatch.go`, `flow_pending.go`,
 `flow_nat.go`, `flow_udp.go`,

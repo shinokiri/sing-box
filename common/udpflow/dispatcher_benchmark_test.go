@@ -41,7 +41,8 @@ func (h *benchmarkFlowHandler) JudgeFlowContext(ctx context.Context, _ uint8, so
 //
 // new_tuple exercises first-packet routing with a warm outbound association.
 // Reset every 1024 tuples bounds table size independently of b.N; its amortized
-// cost is included in ns/op. Latency samples cover only packet delivery.
+// cost, including creation of the next association, is included in ns/op.
+// Latency samples cover only packet delivery.
 // blocked_routes measures the established path with 32 unresolved other tuples.
 // selected_group also checks a shared outbound-group lifetime on the warm path.
 func BenchmarkDispatcherForward(b *testing.B) {
@@ -49,8 +50,10 @@ func BenchmarkDispatcherForward(b *testing.B) {
 		for _, size := range []int{64, 1200} {
 			for _, mode := range []string{"established", "selected_group", "new_tuple", "blocked_routes"} {
 				b.Run(fmt.Sprintf("IPv6=%t/payload=%d/%s", ipv6, size, mode), func(b *testing.B) {
-					conn := &benchmarkPacketConn{testPacketConn: newTestPacketConn(16), frontHeadroom: 128, written: make(chan struct{}, 1)}
-					port, err := New(Options{DialPacketConn: func(context.Context, M.Socksaddr) (N.NetPacketConn, error) { return conn, nil }})
+					written := make(chan struct{}, 1)
+					port, err := New(Options{DialPacketConn: func(context.Context, M.Socksaddr) (N.NetPacketConn, error) {
+						return &benchmarkPacketConn{testPacketConn: newTestPacketConn(16), frontHeadroom: 128, written: written}, nil
+					}})
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -78,7 +81,7 @@ func BenchmarkDispatcherForward(b *testing.B) {
 					}
 					d.Dispatch(buildTestUDPPacket(b, source, 50000, destination, 443, make([]byte, size)))
 					d.Flush()
-					<-conn.written // Warm the outbound association.
+					<-written // Warm the outbound association.
 					if mode == "blocked_routes" {
 						for i := range cap(h.blocked) {
 							d.Dispatch(buildTestUDPPacket(b, source, uint16(50001+i), destination, 443, nil))
@@ -90,7 +93,7 @@ func BenchmarkDispatcherForward(b *testing.B) {
 						copy(raw, templates[0])
 						d.Dispatch(raw)
 						d.Flush()
-						<-conn.written
+						<-written
 					}
 					samples := make([]int64, 0, min(b.N, 8192))
 					stride := max((b.N+8191)/8192, 1)
@@ -107,7 +110,7 @@ func BenchmarkDispatcherForward(b *testing.B) {
 							b.Fatal("packet bypassed dispatcher")
 						}
 						d.Flush()
-						<-conn.written
+						<-written
 						elapsed := time.Since(start).Nanoseconds()
 						if i%stride == 0 {
 							samples = append(samples, elapsed)

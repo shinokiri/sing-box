@@ -93,6 +93,9 @@ type flow struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
 	selector         uint16
+	key              netip.AddrPort
+	mapping          tun.UDPMapping
+	stopMapping      func() bool
 	firstDestination M.Socksaddr
 	returnPath       tun.Return
 	queue            chan queuedPacket
@@ -179,6 +182,9 @@ func (f *flow) touch() {
 
 func (f *flow) run() {
 	defer f.port.workers.Done()
+	if f.stopMapping != nil {
+		defer f.stopMapping()
+	}
 	defer func() {
 		f.close()
 		// close prevents any further enqueues before draining owned buffers.
@@ -318,8 +324,11 @@ func (f *flow) readLoop(packetConn N.NetPacketConn) {
 		if f.ctx.Err() != nil {
 			return
 		}
-		f.touch()
-		err = f.returnPacket(source, buffer.Bytes())
+		var accepted bool
+		accepted, err = f.returnPacket(source, buffer.Bytes())
+		if accepted {
+			f.touch()
+		}
 		if err != nil {
 			f.logError("return", err)
 		}
@@ -332,9 +341,9 @@ func (f *flow) logError(operation string, err error) {
 	}
 }
 
-func (f *flow) returnPacket(source M.Socksaddr, payload []byte) error {
+func (f *flow) returnPacket(source M.Socksaddr, payload []byte) (bool, error) {
 	if f.returnPath == nil || f.ctx.Err() != nil {
-		return nil
+		return false, nil
 	}
 	address := f.binding.inet6Address
 	if source.Addr.Unmap().Is4() {
@@ -342,12 +351,15 @@ func (f *flow) returnPacket(source M.Socksaddr, payload []byte) error {
 	}
 	packet, err := buildUDPResponse(f.returnPath.ReturnHeadroom(), source, netip.AddrPortFrom(address, f.selector), payload)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if f.mapping != nil {
+		return f.mapping.ReturnPacket(packet), nil
 	}
 	// Keep the return path captured at creation. A detached flow must never
 	// send a late response through a newly attached dispatcher's selectors.
 	f.returnPath.ReturnPackets([][]byte{packet})
-	return nil
+	return true, nil
 }
 
 func (p *Port) sweepLoop() {
@@ -371,7 +383,7 @@ func (p *Port) sweep() {
 	p.access.Lock()
 	p.expireFailuresLocked(int64(time.Since(p.epoch)))
 	for current := range p.flows {
-		if current.lastActivity.Load() < deadline {
+		if current.lastActivity.Load() < deadline || (current.mapping != nil && !current.mapping.IsActive()) {
 			current.closeLocked()
 			expired = append(expired, current)
 		}
@@ -385,8 +397,8 @@ func (p *Port) sweep() {
 func (f *flow) closeLocked() {
 	f.cancel()
 	delete(f.port.flows, f)
-	if f.binding.flows[f.selector] == f {
-		delete(f.binding.flows, f.selector)
+	if f.binding.flows[f.key] == f {
+		delete(f.binding.flows, f.key)
 	}
 }
 

@@ -19,11 +19,12 @@ var nextPortID atomic.Uint64
 // Each binding belongs to one inbound's selector allocator. All mutable
 // binding state is protected by port.access; there is no worker per binding.
 type portBinding struct {
-	port         *Port
-	inet4Address netip.Addr
-	inet6Address netip.Addr
-	returnPath   tun.Return
-	flows        map[uint16]*flow
+	port          *Port
+	inet4Address  netip.Addr
+	inet6Address  netip.Addr
+	returnPath    tun.Return
+	mappingReturn tun.ReturnWithUDPMapping
+	flows         map[netip.AddrPort]*flow
 }
 
 // ForInbound returns a stable port for this inbound. Creating a binding does
@@ -57,7 +58,7 @@ func (p *Port) newBinding() (*portBinding, error) {
 		// appear on the proxy connection or the TUN return packet.
 		inet4Address: netip.AddrFrom4([4]byte{127, byte(id >> 16), byte(id >> 8), byte(id)}),
 		inet6Address: netip.AddrFrom16([16]byte{0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, byte(id >> 16), byte(id >> 8), byte(id)}),
-		flows:        make(map[uint16]*flow),
+		flows:        make(map[netip.AddrPort]*flow),
 	}, nil
 }
 
@@ -91,6 +92,7 @@ func (b *portBinding) AttachReturn(returnPath tun.Return) error {
 		return E.New("UDP flow: return path already attached")
 	}
 	b.returnPath = returnPath
+	b.mappingReturn, _ = returnPath.(tun.ReturnWithUDPMapping)
 	return nil
 }
 
@@ -102,6 +104,7 @@ func (b *portBinding) DetachReturn(returnPath tun.Return) error {
 		return nil
 	}
 	b.returnPath = nil
+	b.mappingReturn = nil
 	for key := range p.failures {
 		if key.binding == b {
 			delete(p.failures, key)
@@ -145,14 +148,32 @@ func (b *portBinding) writePacket(packet []byte) error {
 	if len(payload) > p.maxQueuedBytes-p.queuedBytes {
 		return E.New(p.name, " UDP flow queue byte limit reached")
 	}
-	current := b.flows[source.Port()]
+	key := source
+	if b.mappingReturn == nil {
+		// Direct Port users own their selectors, including dual-stack sockets.
+		key = netip.AddrPortFrom(netip.Addr{}, source.Port())
+	}
+	current := b.flows[key]
+	if current != nil && current.mapping != nil && current.mapping.Context().Err() != nil {
+		// Mapping cancellation schedules protocol Close off the TUN reader.
+		// Release its slot now even if that callback has not acquired access yet.
+		current.closeLocked()
+		current = nil
+	}
 	if current == nil {
-		key := failureKey{b, source.Port()}
-		if retryAt, failed := p.failures[key]; failed {
+		var mapping tun.UDPMapping
+		if b.mappingReturn != nil {
+			mapping = b.mappingReturn.UDPMapping(source)
+			if mapping == nil || mapping.Context().Err() != nil {
+				return nil
+			}
+		}
+		failedKey := failureKey{b, key, mapping}
+		if retryAt, failed := p.failures[failedKey]; failed {
 			if int64(time.Since(p.epoch)) < retryAt {
 				return nil
 			}
-			delete(p.failures, key)
+			delete(p.failures, failedKey)
 		}
 		if len(p.flows) >= p.maxFlows {
 			return E.New(p.name, " UDP flow connection limit reached")
@@ -164,12 +185,17 @@ func (b *portBinding) writePacket(packet []byte) error {
 			ctx:              ctx,
 			cancel:           cancel,
 			selector:         source.Port(),
+			key:              key,
+			mapping:          mapping,
 			firstDestination: M.SocksaddrFromNetIP(destination),
 			returnPath:       b.returnPath,
 			queue:            make(chan queuedPacket, p.queueSize),
 		}
-		b.flows[current.selector] = current
+		b.flows[key] = current
 		p.flows[current] = struct{}{}
+		if mapping != nil {
+			current.stopMapping = context.AfterFunc(mapping.Context(), current.close)
+		}
 		p.workers.Add(1)
 		go current.run()
 	}

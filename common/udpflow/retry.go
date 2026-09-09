@@ -1,10 +1,16 @@
 package udpflow
 
-import "time"
+import (
+	"net/netip"
+	"time"
+
+	"github.com/sagernet/sing-tun"
+)
 
 type failureKey struct {
-	binding  *portBinding
-	selector uint16
+	binding *portBinding
+	source  netip.AddrPort
+	mapping tun.UDPMapping
 }
 
 // Keep only a retry deadline; failed queues and workers are still released.
@@ -13,7 +19,7 @@ type failureKey struct {
 func (f *flow) closeFailed() {
 	p := f.port
 	p.access.Lock()
-	if f.ctx.Err() == nil {
+	if f.ctx.Err() == nil && (f.mapping == nil || f.mapping.Context().Err() == nil) {
 		now := int64(time.Since(p.epoch))
 		if len(p.failures) >= p.maxFlows {
 			p.expireFailuresLocked(now)
@@ -28,7 +34,7 @@ func (f *flow) closeFailed() {
 			}
 			delete(p.failures, oldest)
 		}
-		p.failures[failureKey{f.binding, f.selector}] = now + int64(failedAssociationBackoff)
+		p.failures[failureKey{f.binding, f.key, f.mapping}] = now + int64(failedAssociationBackoff)
 	}
 	f.closeLocked()
 	p.access.Unlock()

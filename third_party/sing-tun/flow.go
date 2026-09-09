@@ -102,6 +102,24 @@ type PortWithUDPMapping interface {
 	EndpointIndependentUDP() bool
 }
 
+// UDPMapping is one application endpoint's association lifetime. Implementations
+// must have comparable identity (the dispatcher supplies a pointer). A port must
+// capture it when dialing; an old connection must never acquire a new mapping
+// merely because its numeric selector was reused. ReturnPacket reports whether
+// a reply had a live owner, so discarded traffic need not renew idle timeouts.
+type UDPMapping interface {
+	Context() context.Context
+	IsActive() bool
+	ReturnPacket(packet []byte) bool
+}
+
+// ReturnWithUDPMapping supplies association handles to PortWithUDPMapping.
+// Ordinary IP ports continue to use ReturnPackets directly.
+type ReturnWithUDPMapping interface {
+	Return
+	UDPMapping(source netip.AddrPort) UDPMapping
+}
+
 type Return interface {
 	ReturnHeadroom() int
 	ReturnPackets(packets [][]byte) [][]byte

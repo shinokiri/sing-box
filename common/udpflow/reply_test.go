@@ -125,6 +125,14 @@ func TestDispatcherRouteChangeDropsOldUDPReplies(t *testing.T) {
 // An IP port exposes only tun.Port, without the proxy socket mapping option.
 type exactReplyPort struct{ tun.Port }
 
+func (p exactReplyPort) AttachReturn(r tun.Return) error {
+	return p.Port.AttachReturn(struct{ tun.Return }{r})
+}
+
+func (p exactReplyPort) DetachReturn(r tun.Return) error {
+	return p.Port.DetachReturn(struct{ tun.Return }{r})
+}
+
 func TestDispatcherIPPortKeepsExactReplyFiltering(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		conn := newChannelPacketConn()

@@ -3,15 +3,47 @@ package udpflow
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDispatcherNewMappingDoesNotInheritFailureCooldown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		conn := newChannelPacketConn()
+		port, err := New(Options{DialPacketConn: func(context.Context, M.Socksaddr) (N.NetPacketConn, error) {
+			if calls.Add(1) == 1 {
+				return nil, errors.New("connection refused")
+			}
+			return conn, nil
+		}})
+		require.NoError(t, err)
+		defer port.Close()
+		real, fake := netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("198.18.0.1")
+		d := tun.NewForwardDispatcher(&replyFlowHandler{port: port, real: real}, newTestWriteback(), logger.NOP(), time.Minute, time.Minute)
+		defer d.Close()
+		send := func() {
+			require.True(t, d.Dispatch(buildTestUDPPacket(t, netip.MustParseAddr("192.0.2.1"), 50000, fake, 69, []byte("request"))))
+			d.Flush()
+		}
+		send()
+		synctest.Wait()
+		require.Len(t, port.failures, 1)
+		d.ResetNetwork()
+		send() // Same selector, new owner generation, still inside the cooldown.
+		receiveTestValue(t, conn.sent)
+		require.Equal(t, int32(2), calls.Load())
+	})
+}
 
 func TestPortFailureBackoffAndRecovery(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

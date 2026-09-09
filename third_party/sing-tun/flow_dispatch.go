@@ -53,6 +53,7 @@ type forwardFlow struct {
 	udpTimeout    time.Duration
 	tracker       FlowTracker
 	routeContexts []context.Context
+	udpMapping    *udpMapping
 
 	clientAddress            netip.Addr
 	clientSelector           uint16
@@ -503,7 +504,7 @@ func (d *ForwardDispatcher) natFor(port Port) *portNAT {
 		d.logger.Trace(E.Cause(err, "attach return path"))
 		return nil
 	}
-	nat = newPortNAT(port)
+	nat = newPortNAT(port, &d.returnPath)
 	d.ports[port] = nat
 	var natList []*portNAT
 	current := d.natList.Load()
@@ -871,7 +872,7 @@ func (r *forwardReturn) classifyReturn(raw []byte, natList []*portNAT, revMap ma
 	}
 	flow := findReverseFlow(natList, revMap, parsed.flowKey())
 	if flow == nil {
-		if nat := revMap[parsed.destination.Addr()]; nat != nil && nat.returnUDP(&parsed, len(raw)-headroom, now) {
+		if nat := revMap[parsed.destination.Addr()]; nat != nil && nat.returnUDP(&parsed, len(raw)-headroom, now, nil) {
 			return returnWrite
 		}
 		return returnPass

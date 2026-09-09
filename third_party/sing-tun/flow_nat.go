@@ -23,6 +23,8 @@ type portNAT struct {
 	selectorCount uint16
 	udpAccess     sync.RWMutex
 	udpMappings   map[netip.AddrPort]*udpMapping
+	udpClients    map[netip.AddrPort]map[netip.AddrPort]*udpMapping
+	returnPath    *forwardReturn
 
 	counter uint32
 	pending [][]byte
@@ -33,22 +35,24 @@ type natShard struct {
 	flows  map[flowKey]*forwardFlow
 }
 
-func newPortNAT(port Port) *portNAT {
+func newPortNAT(port Port, returnPath *forwardReturn) *portNAT {
 	shardCount := 1
 	for shardCount < runtime.GOMAXPROCS(0) {
 		shardCount <<= 1
 	}
 	nat := &portNAT{
-		port:      port,
-		hasher:    maphash.NewHasher[flowKey](),
-		shardMask: uint32(shardCount - 1),
-		shards:    make([]natShard, shardCount),
+		port:       port,
+		returnPath: returnPath,
+		hasher:     maphash.NewHasher[flowKey](),
+		shardMask:  uint32(shardCount - 1),
+		shards:     make([]natShard, shardCount),
 	}
 	if rangedPort, isRanged := port.(PortWithSelectorRange); isRanged {
 		nat.selectorStart, nat.selectorCount = rangedPort.PortSelectorRange()
 	}
 	if udpPort, ok := port.(PortWithUDPMapping); ok && udpPort.EndpointIndependentUDP() {
 		nat.udpMappings = make(map[netip.AddrPort]*udpMapping)
+		nat.udpClients = make(map[netip.AddrPort]map[netip.AddrPort]*udpMapping)
 	}
 	for i := range nat.shards {
 		nat.shards[i].flows = make(map[flowKey]*forwardFlow)
@@ -69,11 +73,12 @@ func (n *portNAT) lookup(key flowKey) *forwardFlow {
 }
 
 func (n *portNAT) insert(key flowKey, flow *forwardFlow) {
+	// Publish the captured mapping before the reverse tuple becomes readable.
+	n.insertUDPMapping(key, flow)
 	shard := n.shard(key)
 	shard.access.Lock()
 	shard.flows[key] = flow
 	shard.access.Unlock()
-	n.insertUDPMapping(key, flow)
 }
 
 func (n *portNAT) delete(key flowKey) {
@@ -109,6 +114,16 @@ func (n *portNAT) selectorRange(protocol uint8) (uint16, uint32) {
 }
 
 func (n *portNAT) allocateSelector(protocol uint8, portAddress, serverAddress netip.Addr, serverPort uint16, client, destination netip.AddrPort) (uint16, flowKey, bool) {
+	if protocol == uint8(header.UDPProtocolNumber) {
+		if source, ok := n.findUDPMapping(client, serverAddress, destination.Addr(), serverPort); ok {
+			return source.Port(), n.reverseKeyFor(protocol, portAddress, serverAddress, serverPort, source.Port()), true
+		}
+	}
+	return n.allocateFreshSelector(protocol, portAddress, serverAddress, serverPort, client, destination)
+}
+
+// Keep the selector search frame out of the common association-reuse path.
+func (n *portNAT) allocateFreshSelector(protocol uint8, portAddress, serverAddress netip.Addr, serverPort uint16, client, destination netip.AddrPort) (uint16, flowKey, bool) {
 	clientSelector := client.Port()
 	rangeStart, rangeCount := n.selectorRange(protocol)
 	if clientSelector != 0 &&

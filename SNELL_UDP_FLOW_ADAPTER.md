@@ -18,12 +18,24 @@ Different real targets can share one protocol-level UDP packet connection.
 Different application source addresses, conflicting Fake-IP aliases of the same
 real IP, and reverse-tuple collisions get separate selectors. Within each IP
 family a selector therefore has one unambiguous application endpoint.
+An application-endpoint index finds an existing compatible association even
+after a collision changed its selector. A known peer/alias takes precedence,
+so replying to the server's changed source port stays on the same association.
 
 An exact reverse tuple remains the usual reply path. The adapter also accepts
 replies from another source port or peer IP on that UDP association. Known real
 IPs are translated back to their Fake-IP alias; new peers keep their real IP,
 and changed source ports are preserved. This socket mapping is opt-in for the
 proxy UDP port; ordinary IP-forwarding ports retain exact-tuple behavior.
+Each protocol connection captures a mapping handle at creation. Releasing the
+last tuple cancels that handle and closes its connection asynchronously; a
+recycled numeric selector cannot redirect a late reply through a newer handle.
+Managed IPv4 and IPv6 mappings have separate association lifetimes, even when
+their numeric source ports match. Direct Port users still own their selectors.
+While a socket has other active tuples, it retains inactive peers' alias
+ownership: an expired peer cannot become an unknown peer or a different alias.
+Peer history is limited to the flow-table capacity (16,384) per mapping; further
+new peers use another association rather than growing that history indefinitely.
 
 Selector and URL-test groups preserve their selection lifetime through routing.
 With `interrupt_exist_connections` enabled, a switch invalidates old routes and
@@ -32,7 +44,11 @@ switch during pending first-packet routing also obtains a fresh verdict. With
 the option disabled, existing flows stay on their selected outbound. Nested
 groups are supported, and URL-test selects the UDP-capable outbound for UDP.
 Flows share each group's lifetime context; there is no callback or timer per
-flow. Other flows sharing a protocol association remain usable.
+five-tuple. Each UDP association has one mapping-cancellation callback, which
+closes protocol I/O away from the TUN reader. Other flows sharing a protocol
+association remain usable. The existing port sweeper also releases associations
+with no active routes, even if the TUN has stopped sending packets. Discarded
+replies do not renew association idle timeouts.
 
 The common flow-port implementation now lives in `common/udpflow` and is shared
 by Snell and VLESS/XUDP. It preserves protocol front/rear headroom and
@@ -156,7 +172,9 @@ flow rather than leaking the Fake-IP.
   closes the association, including when the protocol is awaiting a handshake
   reply inside its write method. Later packets can create a fresh association;
   failed or queued packets on the old association are not replayed.
-  A failed association has a fixed 250 ms retry cooldown per inbound/selector.
+  A failed association has a fixed 250 ms retry cooldown per inbound/mapping
+  (per selector for direct Port users). A new mapping does not inherit the old
+  mapping's cooldown.
   Packets during that window are discarded; the next packet after it expires
   may reconnect. Successful associations bypass the failure cache entirely.
   The cache holds at most 1,024 entries (or the configured association limit),
