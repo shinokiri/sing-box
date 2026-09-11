@@ -27,9 +27,8 @@ type portNAT struct {
 	udpClients    map[netip.AddrPort]map[netip.AddrPort]*udpMapping
 	returnPath    *forwardReturn
 
-	counter    uint32
-	pending    [][]byte
-	pendingUDP []UDPFlowPacket
+	allocateAccess sync.Mutex
+	counter        uint32
 }
 
 type natShard struct {
@@ -85,6 +84,8 @@ func (n *portNAT) insert(key flowKey, flow *forwardFlow) {
 }
 
 func (n *portNAT) delete(key flowKey) {
+	n.allocateAccess.Lock()
+	defer n.allocateAccess.Unlock()
 	shard := n.shard(key)
 	shard.access.Lock()
 	flow := shard.flows[key]

@@ -31,6 +31,7 @@ type GunConn struct {
 	readRemaining int
 	setupAccess   sync.Mutex
 	closed        bool
+	onClose       func()
 }
 
 func newGunConn(reader io.Reader, writer io.Writer, flusher http.Flusher) *GunConn {
@@ -167,7 +168,11 @@ func (c *GunConn) Close() error {
 	}
 	reader := c.rawReader
 	c.setupAccess.Unlock()
-	return common.Close(reader, c.writer)
+	err := common.Close(reader, c.writer)
+	if c.onClose != nil {
+		c.onClose()
+	}
+	return err
 }
 
 func (c *GunConn) LocalAddr() net.Addr {

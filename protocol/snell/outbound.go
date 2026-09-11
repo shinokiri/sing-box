@@ -35,17 +35,22 @@ type Outbound struct {
 	client     snellClient
 	serverAddr M.Socksaddr
 	flowPort   *udpflow.Port
+	reuse      bool
 }
 
 var (
 	_ adapter.InboundFlowOutbound     = (*Outbound)(nil)
 	_ adapter.InterfaceUpdateListener = (*Outbound)(nil)
+	_ adapter.IdleConnectionKeeper    = (*Outbound)(nil)
+	_ adapter.OutboundWithMultiplex   = (*Outbound)(nil)
 )
 
 type snellClient interface {
 	snellprotocol.Method
 	DialContext(ctx context.Context, destination M.Socksaddr) (net.Conn, error)
 	Reset()
+	SetKeepIdleConnections(keep bool)
+	CloseIdleConnections()
 	Close() error
 }
 
@@ -100,6 +105,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		dialer:     outboundDialer,
 		client:     client,
 		serverAddr: serverAddr,
+		reuse:      options.Reuse,
 	}
 	if options.UDPFlow {
 		outbound.flowPort, err = udpflow.New(udpflow.Options{
@@ -233,6 +239,18 @@ func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 		h.flowPort.Reset()
 	}
 	h.client.Reset()
+}
+
+func (h *Outbound) MultiplexEnabled() bool {
+	return h.reuse
+}
+
+func (h *Outbound) SetKeepIdleConnections(keep bool) {
+	h.client.SetKeepIdleConnections(keep)
+}
+
+func (h *Outbound) CloseIdleConnections() {
+	h.client.CloseIdleConnections()
 }
 
 func (h *Outbound) Close() error {

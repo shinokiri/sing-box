@@ -52,6 +52,7 @@ type System struct {
 	udpNat               *UDPNat
 	udpNATOptions        UDPNatOptions
 	dispatcher           *ForwardDispatcher
+	dispatchStage        *ForwardStage
 	bindInterface        bool
 	interfaceFinder      control.InterfaceFinder
 	frontHeadroom        int
@@ -208,6 +209,7 @@ func (s *System) start() error {
 	}
 	if s.handler != nil {
 		s.dispatcher = NewForwardDispatcher(s.handler, newSystemWriteback(s.tun, s.frontHeadroom), s.logger, s.udpTimeout, s.icmpTimeout)
+		s.dispatchStage = s.dispatcher.NewStage(nil)
 	}
 	return nil
 }
@@ -248,7 +250,7 @@ func (s *System) tunLoop() {
 				s.logger.Trace(E.Cause(err, "write packet"))
 			}
 		}
-		s.dispatcher.Flush()
+		s.dispatchStage.Flush()
 	}
 }
 
@@ -268,7 +270,7 @@ func (s *System) wintunLoop(winTun WinTun) {
 				s.logger.Trace(E.Cause(err, "write packet"))
 			}
 		}
-		s.dispatcher.Flush()
+		s.dispatchStage.Flush()
 		release()
 	}
 }
@@ -309,7 +311,7 @@ func (s *System) batchLoopLinux(linuxTUN LinuxTUN, batchSize int) {
 			}
 			writeBuffers = writeBuffers[:0]
 		}
-		s.dispatcher.Flush()
+		s.dispatchStage.Flush()
 	}
 }
 
@@ -348,7 +350,7 @@ func (s *System) batchLoopDarwin(darwinTUN DarwinTUN) {
 			}
 			buf.ReleaseMulti(writeBuffers)
 		}
-		s.dispatcher.Flush()
+		s.dispatchStage.Flush()
 		buf.ReleaseMulti(releaseBuffers)
 	}
 }
@@ -406,7 +408,7 @@ func (s *System) dispatchIPv4(ipHdr header.IPv4, destination netip.Addr) bool {
 			return false
 		}
 	}
-	return s.dispatcher.Dispatch(ipHdr)
+	return s.dispatchStage.Dispatch(ipHdr)
 }
 
 func (s *System) dispatchIPv6(ipHdr header.IPv6, destination netip.Addr) bool {
@@ -425,7 +427,7 @@ func (s *System) dispatchIPv6(ipHdr header.IPv6, destination netip.Addr) bool {
 			return false
 		}
 	}
-	return s.dispatcher.Dispatch(ipHdr)
+	return s.dispatchStage.Dispatch(ipHdr)
 }
 
 func (s *System) processIPv4(ipHdr header.IPv4) (writeBack bool, err error) {
@@ -724,8 +726,16 @@ func (s *System) preparePacketConnection(source M.Socksaddr, destination M.Socks
 }
 
 func (s *System) processIPv4ICMP(ipHdr header.IPv4, icmpHdr header.ICMPv4) (bool, error) {
+	return rewriteEchoReplyIPv4(ipHdr, icmpHdr), nil
+}
+
+func (s *System) processIPv6ICMP(ipHdr header.IPv6, icmpHdr header.ICMPv6) (bool, error) {
+	return rewriteEchoReplyIPv6(ipHdr, icmpHdr), nil
+}
+
+func rewriteEchoReplyIPv4(ipHdr header.IPv4, icmpHdr header.ICMPv4) bool {
 	if icmpHdr.Type() != header.ICMPv4Echo || icmpHdr.Code() != 0 {
-		return false, nil
+		return false
 	}
 	icmpHdr.SetType(header.ICMPv4EchoReply)
 	sourceAddress := ipHdr.SourceAddr()
@@ -733,12 +743,12 @@ func (s *System) processIPv4ICMP(ipHdr header.IPv4, icmpHdr header.ICMPv4) (bool
 	ipHdr.SetDestinationAddr(sourceAddress)
 	icmpHdr.SetChecksum(header.ICMPv4Checksum(icmpHdr, 0))
 	ipHdr.SetChecksum(^ipHdr.CalculateChecksum())
-	return true, nil
+	return true
 }
 
-func (s *System) processIPv6ICMP(ipHdr header.IPv6, icmpHdr header.ICMPv6) (bool, error) {
+func rewriteEchoReplyIPv6(ipHdr header.IPv6, icmpHdr header.ICMPv6) bool {
 	if icmpHdr.Type() != header.ICMPv6EchoRequest || icmpHdr.Code() != 0 {
-		return false, nil
+		return false
 	}
 	icmpHdr.SetType(header.ICMPv6EchoReply)
 	sourceAddress := ipHdr.SourceAddr()
@@ -749,7 +759,7 @@ func (s *System) processIPv6ICMP(ipHdr header.IPv6, icmpHdr header.ICMPv6) (bool
 		Src:    ipHdr.SourceAddressSlice(),
 		Dst:    ipHdr.DestinationAddressSlice(),
 	}))
-	return true, nil
+	return true
 }
 
 type systemUDPPacketWriter4 struct {

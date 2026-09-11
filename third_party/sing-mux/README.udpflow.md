@@ -1,6 +1,6 @@
 # Local sing-mux patch
 
-Source: `github.com/sagernet/sing-mux` **v0.3.5**, the existing dependency.
+Source: `github.com/sagernet/sing-mux` **v0.3.7-0.20260905054442-91d1502591ce**, pinned by upstream testing.
 The Go sources, module files, and upstream license are copied unchanged except
 for `h2mux_conn.go` and `h2mux.go`.
 
@@ -16,7 +16,7 @@ all callers. Closing also releases an HTTP handler whose stream has not yet
 been accepted, instead of leaving it blocked on the inbound channel.
 `h2mux_test.go` covers concurrent closes and an unaccepted stream.
 
-The upstream v0.3.6 source still contains this race as of 2026-09-07. The local
+The pinned upstream source still needs the response publication and idempotent server close fixes. The local
 module replacement lets regular Go, gomobile, and CI builds use the same fix
 without modifying the module cache or adding build-time patch commands.
 The separate `test/` module repeats the replacement because Go does not inherit

@@ -86,7 +86,8 @@ func (m *udpMapping) ReturnPacket(raw []byte) bool {
 		return false
 	}
 	now, size := d.now(), len(raw)-headroom
-	if flow := m.nat.lookup(packet.flowKey()); flow != nil {
+	flow := m.nat.lookup(packet.flowKey())
+	if flow != nil {
 		if flow.udpMapping != m || !flow.IsActive() {
 			return false
 		}
@@ -95,10 +96,13 @@ func (m *udpMapping) ReturnPacket(raw []byte) bool {
 		}
 		flow.observeReverse(&packet, now)
 		applyRewrite(&packet, &flow.reverseRule)
-	} else if !m.nat.returnUDP(&packet, size, now, m) {
-		return false
+	} else {
+		flow = m.nat.returnUDPFlow(&packet, size, now, m)
+		if flow == nil {
+			return false
+		}
 	}
-	d.writeBackPackets([][]byte{raw})
+	flow.owner.writeBackPackets([][]byte{raw})
 	return true
 }
 
@@ -210,9 +214,9 @@ func (n *portNAT) deleteUDPMapping(key flowKey, f *forwardFlow) {
 	}
 }
 
-func (n *portNAT) returnUDP(packet *forwardPacket, size int, now int64, expected *udpMapping) bool {
+func (n *portNAT) returnUDPFlow(packet *forwardPacket, size int, now int64, expected *udpMapping) *forwardFlow {
 	if n.udpMappings == nil || packet.protocol != uint8(header.UDPProtocolNumber) {
-		return false
+		return nil
 	}
 	n.udpAccess.RLock()
 	var owner *forwardFlow
@@ -225,7 +229,7 @@ func (n *portNAT) returnUDP(packet *forwardPacket, size int, now int64, expected
 	}
 	n.udpAccess.RUnlock()
 	if owner == nil {
-		return false
+		return nil
 	}
 	// Keep the responder's actual port. Only a known real IP has a Fake-IP
 	// alias; a new peer keeps its own source address.
@@ -242,5 +246,5 @@ func (n *portNAT) returnUDP(packet *forwardPacket, size int, now int64, expected
 	}
 	owner.observeReverse(packet, now)
 	applyRewrite(packet, &rule)
-	return true
+	return owner
 }

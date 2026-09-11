@@ -136,6 +136,7 @@ type HTTP2Conn struct {
 	err         error
 	setupAccess sync.Mutex
 	closed      bool
+	onClose     func()
 }
 
 func NewHTTPConn(reader io.Reader, writer io.Writer) HTTP2Conn {
@@ -198,7 +199,11 @@ func (c *HTTP2Conn) Close() error {
 	}
 	reader := c.reader
 	c.setupAccess.Unlock()
-	return common.Close(reader, c.writer)
+	err := common.Close(reader, c.writer)
+	if c.onClose != nil {
+		c.onClose()
+	}
+	return err
 }
 
 func (c *HTTP2Conn) LocalAddr() net.Addr {

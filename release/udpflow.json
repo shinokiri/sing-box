@@ -1,5 +1,7 @@
 {
-  "upstream_tag": "v1.14.0",
-  "upstream_commit": "0b8995879f29a9b98ee027bc17b75e101445b238",
-  "fork_revision": 6
+  "upstream_branch": "testing",
+  "upstream_version": "1.15.0-alpha.2",
+  "upstream_commit": "f6ce1d5be042436d2b498d216cef718ea87a1ca8",
+  "android_client_commit": "ec05af8afa066b87025784355590a802168a0e07",
+  "fork_revision": 1
 }

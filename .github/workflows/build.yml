@@ -2,18 +2,10 @@ name: Android ARM64
 
 on:
   push:
-    branches: [udpflow]
+    branches: [udpflow-testing]
   pull_request:
-    branches: [udpflow]
+    branches: [udpflow-testing]
   workflow_dispatch:
-    inputs:
-      sync_upstream:
-        description: Follow the latest official stable release
-        type: boolean
-        default: false
-  # GitHub runs schedules only from the repository's default branch.
-  schedule:
-    - cron: '23 */6 * * *'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,24 +16,21 @@ permissions:
 
 jobs:
   plan:
-    name: Select stable release
+    name: Select pinned testing snapshot
     if: github.repository == 'shinokiri/sing-box'
     runs-on: ubuntu-latest
     outputs:
       build: ${{ steps.source.outputs.build }}
       publish: ${{ steps.source.outputs.publish }}
-      upstream_tag: ${{ steps.source.outputs.upstream_tag }}
-      upstream_commit: ${{ steps.source.outputs.upstream_commit }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
       - name: Test release selection, upstream merges and APK verification
         run: python3 -m unittest discover -s .github -p 'test_*.py' -v
-      - name: Select sources and skip unchanged scheduled runs
+      - name: Select reviewed snapshot
         id: source
         env:
           GH_TOKEN: ${{ github.token }}
-          SYNC_UPSTREAM: ${{ github.event_name == 'schedule' || inputs.sync_upstream }}
-        run: python3 .github/udpflow_release.py plan
+        run: python3 .github/udpflow_testing_release.py plan
 
   build:
     name: Test, build and release ARM64
@@ -51,7 +40,7 @@ jobs:
     permissions:
       contents: write
     env:
-      BUILD_ANDROID: ${{ github.ref == 'refs/heads/udpflow' && github.event_name != 'pull_request' }}
+      BUILD_ANDROID: ${{ github.ref == 'refs/heads/udpflow-testing' && github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
@@ -59,10 +48,8 @@ jobs:
       - name: Prepare exact upstream and Android sources
         id: source
         env:
-          UPSTREAM_TAG: ${{ needs.plan.outputs.upstream_tag }}
-          UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
           PUBLISH_RELEASE: ${{ needs.plan.outputs.publish }}
-        run: python3 .github/udpflow_release.py prepare
+        run: python3 .github/udpflow_testing_release.py prepare
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ steps.source.outputs.go_version }}
@@ -84,10 +71,12 @@ jobs:
       - name: Vet all core packages
         # The daemon/libbox debug crash hooks intentionally dereference zero.
         run: go vet -unsafeptr=false -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" ./...
+      - name: Test the Go TUN stack against the Linux kernel
+        run: go test -exec sudo -tags with_gvisor github.com/sagernet/sing-tun
       - name: Race tests with the Android gRPC implementation
-        run: go test -race -tags with_gvisor,with_quic -count=1 ./route ./common/udpflow ./protocol/group ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux github.com/sagernet/sing-tun
+        run: go test -race -exec sudo -skip '^TestGoKernel' -tags with_gvisor,with_quic -count=1 ./route ./common/udpflow ./protocol/group ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux github.com/sagernet/sing-tun
       - name: Race tests with full gRPC
-        run: go test -race -tags with_gvisor,with_grpc,with_quic -count=1 ./route ./common/udpflow ./protocol/group ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-tun
+        run: go test -race -exec sudo -skip '^TestGoKernel' -tags with_gvisor,with_grpc,with_quic -count=1 ./route ./common/udpflow ./protocol/group ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-tun
       - name: Measure UDP forwarding allocations, throughput and dispatcher latency
         run: |
           set -o pipefail
@@ -148,8 +137,8 @@ jobs:
           path: dist/android/
           if-no-files-found: error
           compression-level: 0
-      - name: Publish the tested stable release
+      - name: Publish the tested development snapshot
         if: env.BUILD_ANDROID == 'true' && needs.plan.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 .github/udpflow_release.py publish
+        run: python3 .github/udpflow_testing_release.py publish

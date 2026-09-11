@@ -114,7 +114,11 @@ func judgeFlow(preMatch func(InboundContext, []byte) PreMatchResult, inbound str
 	case PreMatchDrop:
 		return tun.FlowVerdict{Action: tun.ActionDrop}
 	case PreMatchBypass:
-		return tun.FlowVerdict{Action: tun.ActionBypass}
+		port, isPort := result.Outbound.(tun.Port)
+		if !isPort {
+			return tun.FlowVerdict{Action: tun.ActionBypass}
+		}
+		return tun.FlowVerdict{Action: tun.ActionBypass, Port: port, UDPTimeout: result.UDPTimeout, NewTracker: result.NewTracker}
 	case PreMatchHijackDNS:
 		return tun.FlowVerdict{Action: tun.ActionHijackDNS}
 	default:

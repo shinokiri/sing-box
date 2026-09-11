@@ -122,7 +122,7 @@ func (m *Mixed) tunLoop() {
 				m.logger.Trace(E.Cause(err, "write packet"))
 			}
 		}
-		m.dispatcher.Flush()
+		m.dispatchStage.Flush()
 	}
 }
 
@@ -142,7 +142,7 @@ func (m *Mixed) wintunLoop(winTun WinTun) {
 				m.logger.Trace(E.Cause(err, "write packet"))
 			}
 		}
-		m.dispatcher.Flush()
+		m.dispatchStage.Flush()
 		release()
 	}
 }
@@ -183,7 +183,7 @@ func (m *Mixed) batchLoopLinux(linuxTUN LinuxTUN, batchSize int) {
 			}
 			writeBuffers = writeBuffers[:0]
 		}
-		m.dispatcher.Flush()
+		m.dispatchStage.Flush()
 	}
 }
 
@@ -222,7 +222,7 @@ func (m *Mixed) batchLoopDarwin(darwinTUN DarwinTUN) {
 			}
 			buf.ReleaseMulti(writeBuffers)
 		}
-		m.dispatcher.Flush()
+		m.dispatchStage.Flush()
 		buf.ReleaseMulti(releaseBuffers)
 	}
 }

@@ -27,6 +27,10 @@ type LinkEndpointFilter struct {
 }
 
 func (w *LinkEndpointFilter) Attach(dispatcher stack.NetworkDispatcher) {
+	if dispatcher == nil {
+		w.LinkEndpoint.Attach(nil)
+		return
+	}
 	if dispatcher != nil {
 		w.Dispatcher.EnableAsyncFlow(w.Context, func(raw []byte) {
 			protocol := header.IPv4ProtocolNumber
@@ -44,7 +48,7 @@ func (w *LinkEndpointFilter) Attach(dispatcher stack.NetworkDispatcher) {
 		NetworkDispatcher:    dispatcher,
 		broadcastAddress:     w.BroadcastAddress,
 		writer:               w.Writer,
-		dispatcher:           w.Dispatcher,
+		dispatchStage:        w.Dispatcher.NewStage(nil),
 		inet4Address:         w.Inet4Address,
 		inet6Address:         w.Inet6Address,
 		inet4LoopbackAddress: w.Inet4LoopbackAddress,
@@ -58,7 +62,7 @@ type networkDispatcherFilter struct {
 	stack.NetworkDispatcher
 	broadcastAddress     netip.Addr
 	writer               GVisorTun
-	dispatcher           *ForwardDispatcher
+	dispatchStage        *ForwardStage
 	inet4Address         netip.Addr
 	inet6Address         netip.Addr
 	inet4LoopbackAddress []netip.Addr
@@ -85,10 +89,10 @@ func (w *networkDispatcherFilter) DeliverNetworkPacket(protocol tcpip.NetworkPro
 		w.writer.WritePacket(pkt)
 		return
 	}
-	if w.dispatcher != nil && pkt.GSOOptions.Type == stack.GSONone && !pkt.GSOOptions.NeedsCsum {
+	if w.dispatchStage != nil && pkt.GSOOptions.Type == stack.GSONone && !pkt.GSOOptions.NeedsCsum {
 		if view, loaded := pkt.Data().PullUp(pkt.Data().Size()); loaded {
 			consumed := w.dispatch(protocol, destination, view)
-			w.dispatcher.Flush()
+			w.dispatchStage.Flush()
 			if consumed {
 				return
 			}
@@ -125,5 +129,5 @@ func (w *networkDispatcherFilter) dispatch(protocol tcpip.NetworkProtocolNumber,
 			}
 		}
 	}
-	return w.dispatcher.Dispatch(view)
+	return w.dispatchStage.Dispatch(view)
 }
