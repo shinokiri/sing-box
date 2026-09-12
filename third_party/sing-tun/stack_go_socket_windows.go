@@ -1,6 +1,7 @@
 package tun
 
 import (
+	"encoding/binary"
 	"net/netip"
 	"runtime"
 	"syscall"
@@ -8,13 +9,15 @@ import (
 
 	"github.com/sagernet/sing-tun/internal/afd"
 	E "github.com/sagernet/sing/common/exceptions"
+	M "github.com/sagernet/sing/common/metadata"
 
 	"golang.org/x/sys/windows"
 )
 
 const (
-	goSocketFIONBIO       = 0x8004667e
-	goSocketReceiveBuffer = 4 << 20
+	goSpliceDuplicatesSocket = false
+	goSocketFIONBIO          = 0x8004667e
+	goSocketReceiveBuffer    = 4 << 20
 )
 
 type goIOVector = windows.WSABuf
@@ -64,6 +67,9 @@ func goSpliceSocket(conn syscall.Conn) (goSocket, error) {
 	return goSocket{handle: handle}, nil
 }
 
+func (s *goSocket) close() {
+}
+
 func (s *goSocket) shutdownWrite() {
 	windows.Shutdown(s.handle, windows.SHUT_WR)
 }
@@ -88,14 +94,8 @@ func (s *goSocket) peerAddress() (netip.AddrPort, bool) {
 	if err != nil {
 		return netip.AddrPort{}, false
 	}
-	switch address := name.(type) {
-	case *windows.SockaddrInet4:
-		return netip.AddrPortFrom(netip.AddrFrom4(address.Addr), uint16(address.Port)), true
-	case *windows.SockaddrInet6:
-		return netip.AddrPortFrom(netip.AddrFrom16(address.Addr).Unmap(), uint16(address.Port)), true
-	default:
-		return netip.AddrPort{}, false
-	}
+	address := M.SocksaddrFromNetIP(M.AddrPortFromSockaddr(name)).Unwrap()
+	return address.AddrPort(), address.IsValid()
 }
 
 func goIovecsFromSegments(iovecs []goIOVector, segments [][]byte) []goIOVector {
@@ -117,17 +117,6 @@ func goSocketDropped(errno syscall.Errno) bool {
 	return errno == windows.WSAEMSGSIZE || errno == windows.WSAEAFNOSUPPORT || errno == windows.WSAENOBUFS
 }
 
-func goErrno(err error) syscall.Errno {
-	if err == nil {
-		return 0
-	}
-	errno, isErrno := err.(syscall.Errno)
-	if !isErrno {
-		return windows.WSAEINVAL
-	}
-	return errno
-}
-
 func (s *goSocket) readVector(iovecs []goIOVector) (int, syscall.Errno) {
 	var (
 		received uint32
@@ -135,7 +124,7 @@ func (s *goSocket) readVector(iovecs []goIOVector) (int, syscall.Errno) {
 	)
 	err := windows.WSARecv(s.handle, &iovecs[0], uint32(len(iovecs)), &received, &flags, nil, nil)
 	if err != nil {
-		return 0, goErrno(err)
+		return 0, err.(syscall.Errno)
 	}
 	return int(received), 0
 }
@@ -144,7 +133,7 @@ func (s *goSocket) writeVector(iovecs []goIOVector) (int, syscall.Errno) {
 	var sent uint32
 	err := windows.WSASend(s.handle, &iovecs[0], uint32(len(iovecs)), &sent, 0, nil, nil)
 	if err != nil {
-		return 0, goErrno(err)
+		return 0, err.(syscall.Errno)
 	}
 	return int(sent), 0
 }
@@ -157,7 +146,7 @@ func (s *goSocket) write(data []byte) (int, syscall.Errno) {
 	var sent uint32
 	err := windows.WSASend(s.handle, &vector, 1, &sent, 0, nil, nil)
 	if err != nil {
-		return 0, goErrno(err)
+		return 0, err.(syscall.Errno)
 	}
 	return int(sent), 0
 }
@@ -175,13 +164,13 @@ func (s *goSocket) sendTo(data []byte, destination netip.AddrPort, family uint8)
 		inet4 := (*windows.RawSockaddrInet4)(unsafe.Pointer(&storage))
 		inet4.Family = windows.AF_INET
 		inet4.Addr = address.As4()
-		goEncodePort(&inet4.Port, destination.Port())
+		binary.BigEndian.PutUint16((*[2]byte)(unsafe.Pointer(&inet4.Port))[:], destination.Port())
 		length = int32(unsafe.Sizeof(*inet4))
 	} else {
 		inet6 := (*windows.RawSockaddrInet6)(unsafe.Pointer(&storage))
 		inet6.Family = windows.AF_INET6
 		inet6.Addr = address.As16()
-		goEncodePort(&inet6.Port, destination.Port())
+		binary.BigEndian.PutUint16((*[2]byte)(unsafe.Pointer(&inet6.Port))[:], destination.Port())
 		length = int32(unsafe.Sizeof(*inet6))
 	}
 	vector := windows.WSABuf{Len: uint32(len(data))}
@@ -189,7 +178,11 @@ func (s *goSocket) sendTo(data []byte, destination netip.AddrPort, family uint8)
 		vector.Buf = &data[0]
 	}
 	var sent uint32
-	return goErrno(windows.WSASendTo(s.handle, &vector, 1, &sent, 0, &storage, length, nil, nil))
+	err := windows.WSASendTo(s.handle, &vector, 1, &sent, 0, &storage, length, nil, nil)
+	if err != nil {
+		return err.(syscall.Errno)
+	}
+	return 0
 }
 
 func (s *goSocket) receiveFrom(buffer []byte) (int, netip.AddrPort, syscall.Errno) {
@@ -202,28 +195,7 @@ func (s *goSocket) receiveFrom(buffer []byte) (int, netip.AddrPort, syscall.Errn
 	vector := windows.WSABuf{Len: uint32(len(buffer)), Buf: &buffer[0]}
 	err := windows.WSARecvFrom(s.handle, &vector, 1, &received, &flags, &storage, &length, nil, nil)
 	if err != nil {
-		return 0, netip.AddrPort{}, goErrno(err)
+		return 0, netip.AddrPort{}, err.(syscall.Errno)
 	}
-	return int(received), goDecodeSockaddr(&storage), 0
-}
-
-func goEncodePort(target *uint16, port uint16) {
-	encoded := (*[2]byte)(unsafe.Pointer(target))
-	encoded[0] = byte(port >> 8)
-	encoded[1] = byte(port)
-}
-
-func goDecodeSockaddr(storage *windows.RawSockaddrAny) netip.AddrPort {
-	switch storage.Addr.Family {
-	case windows.AF_INET:
-		inet4 := (*windows.RawSockaddrInet4)(unsafe.Pointer(storage))
-		encoded := (*[2]byte)(unsafe.Pointer(&inet4.Port))
-		return netip.AddrPortFrom(netip.AddrFrom4(inet4.Addr), uint16(encoded[0])<<8|uint16(encoded[1]))
-	case windows.AF_INET6:
-		inet6 := (*windows.RawSockaddrInet6)(unsafe.Pointer(storage))
-		encoded := (*[2]byte)(unsafe.Pointer(&inet6.Port))
-		return netip.AddrPortFrom(netip.AddrFrom16(inet6.Addr).Unmap(), uint16(encoded[0])<<8|uint16(encoded[1]))
-	default:
-		return netip.AddrPort{}
-	}
+	return int(received), M.SocksaddrFromNetIP(M.AddrPortFromRawSockaddr(&storage.Addr)).Unwrap().AddrPort(), 0
 }

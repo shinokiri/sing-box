@@ -83,7 +83,7 @@ type GoConn struct {
 	receiveSpaceCopied     uint64
 	receiveSpaceStamp      int64
 	receiveChain           goSlabChain
-	oooRanges              goRangeSet
+	oooRanges              *goRangeSet
 	dsackStart             uint64
 	dsackEnd               uint64
 	congestionWindow       uint32
@@ -214,9 +214,9 @@ type GoConn struct {
 
 	writeAccess       sync.Mutex
 	readAccess        sync.Mutex
-	readSignal        chan struct{}
-	writeSignal       chan struct{}
-	transmitSignal    chan struct{}
+	readSignal        goSignal
+	writeSignal       goSignal
+	transmitSignal    goSignal
 	establishedSignal chan struct{}
 	closeSignal       chan struct{}
 	connErr           atomic.Pointer[goConnError]
@@ -238,36 +238,22 @@ type GoConn struct {
 	splice            *goSpliceStream
 }
 
-var (
-	_ net.Conn           = (*GoConn)(nil)
-	_ N.ReadWaiter       = (*GoConn)(nil)
-	_ N.ExtendedWriter   = (*GoConn)(nil)
-	_ N.FrontHeadroom    = (*GoConn)(nil)
-	_ N.WriterWithMTU    = (*GoConn)(nil)
-	_ N.ReadCloser       = (*GoConn)(nil)
-	_ N.WriteCloser      = (*GoConn)(nil)
-	_ N.EarlyReader      = (*GoConn)(nil)
-	_ N.EarlyWriter      = (*GoConn)(nil)
-	_ N.HandshakeSuccess = (*GoConn)(nil)
-	_ N.HandshakeFailure = (*GoConn)(nil)
-)
-
 func (c *GoConn) initialize(engine *goEngine, key flowKey, source M.Socksaddr, destination M.Socksaddr) {
 	c.engine = engine
 	c.key = key
 	c.source = source
 	c.destination = destination
 	c.epoch = engine.now()
-	c.receiveChain.init(make([]*goSlab, goReceiveCapacityMax/goSlabSize+1), engine.slabPool, &c.slabHolder)
-	c.transmitStore.init(make([]*goSlab, goTransmitCapacityMax/goSlabSize+1), engine.slabPool, &c.slabHolder)
-	c.transmitSegments = make([][]byte, 0, 8)
-	c.readSignal = make(chan struct{}, 1)
-	c.writeSignal = make(chan struct{}, 1)
-	c.transmitSignal = make(chan struct{}, 1)
-	c.establishedSignal = make(chan struct{})
-	c.closeSignal = make(chan struct{})
 	c.readDeadline = pipe.MakeDeadline()
 	c.writeDeadline = pipe.MakeDeadline()
+	c.readSignal = make(goSignal, 1)
+	c.writeSignal = make(goSignal, 1)
+	c.transmitSignal = make(goSignal, 1)
+	c.establishedSignal = make(chan struct{})
+	c.closeSignal = make(chan struct{})
+	c.receiveChain = goSlabChain{maxSlots: goReceiveCapacityMax/goSlabSize + 1, pool: engine.slabPool, holder: &c.slabHolder}
+	c.transmitStore.chain = goSlabChain{maxSlots: goTransmitCapacityMax/goSlabSize + 1, pool: engine.slabPool, holder: &c.slabHolder}
+	c.descriptors.pool = &engine.descriptorPool
 	c.timerNode.expire = c.expireTimer
 	c.engageMessage = goMessage{kind: goMessageConnEngage, conn: c}
 	c.closeMessage = goMessage{kind: goMessageConnClose, conn: c}
@@ -390,8 +376,6 @@ func (c *GoConn) awaitHandshake(ctx context.Context, deadlineSignal <-chan struc
 		cause := context.Cause(c.engine.stack.ctx)
 		c.requestAbort(cause)
 		return E.Cause(cause, "go: handshake")
-	case <-c.closeSignal:
-		return c.handshakeResult()
 	}
 }
 
@@ -555,14 +539,8 @@ func (c *GoConn) receiveResult() error {
 }
 
 func (c *GoConn) wakeUser() {
-	select {
-	case c.readSignal <- struct{}{}:
-	default:
-	}
-	select {
-	case c.writeSignal <- struct{}{}:
-	default:
-	}
+	c.readSignal.notify()
+	c.writeSignal.notify()
 }
 
 func (c *GoConn) copyReceived(target []byte, consumed uint64, available uint64) int {
@@ -603,10 +581,7 @@ func (c *GoConn) parkReader() (bool, error) {
 		target.target = target.direct
 	}
 	c.targetDone.Store(false)
-	select {
-	case <-c.readSignal:
-	default:
-	}
+	c.readSignal.drain()
 	c.postedTarget.Store(target)
 	c.readerParked.Store(true)
 	if c.receiveAvailable.Load() > c.consumedTail.Load() || c.receiveResult() != nil {
@@ -686,10 +661,7 @@ func (c *GoConn) CloseRead() error {
 	}
 	c.readShut.Store(true)
 	c.engine.postMessage(&c.readShutMessage)
-	select {
-	case c.readSignal <- struct{}{}:
-	default:
-	}
+	c.readSignal.notify()
 	return nil
 }
 
@@ -701,10 +673,7 @@ func (c *GoConn) CloseWrite() error {
 	c.closeMode.CompareAndSwap(goCloseModeNone, goCloseModeGraceful)
 	c.finRequested.Store(true)
 	c.engine.postMessage(&c.closeMessage)
-	select {
-	case c.writeSignal <- struct{}{}:
-	default:
-	}
+	c.writeSignal.notify()
 	return nil
 }
 
@@ -731,3 +700,35 @@ func (c *GoConn) SetWriteDeadline(t time.Time) error {
 	c.writeDeadline.Set(t)
 	return nil
 }
+
+type goSignal chan struct{}
+
+func (s goSignal) notify() bool {
+	select {
+	case s <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s goSignal) drain() {
+	select {
+	case <-s:
+	default:
+	}
+}
+
+var (
+	_ net.Conn           = (*GoConn)(nil)
+	_ N.ReadWaiter       = (*GoConn)(nil)
+	_ N.ExtendedWriter   = (*GoConn)(nil)
+	_ N.FrontHeadroom    = (*GoConn)(nil)
+	_ N.WriterWithMTU    = (*GoConn)(nil)
+	_ N.ReadCloser       = (*GoConn)(nil)
+	_ N.WriteCloser      = (*GoConn)(nil)
+	_ N.EarlyReader      = (*GoConn)(nil)
+	_ N.EarlyWriter      = (*GoConn)(nil)
+	_ N.HandshakeSuccess = (*GoConn)(nil)
+	_ N.HandshakeFailure = (*GoConn)(nil)
+)

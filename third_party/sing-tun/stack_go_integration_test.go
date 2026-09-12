@@ -5,6 +5,7 @@ package tun
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
+	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -26,6 +28,7 @@ import (
 )
 
 type kernelStackConfig struct {
+	stackFactory         func(StackOptions) (Stack, error)
 	mtu                  uint32
 	gso                  bool
 	multiQueue           bool
@@ -108,17 +111,27 @@ func newKernelStackFixture(t *testing.T, config kernelStackConfig) *kernelStackF
 	if config.ctx == nil {
 		config.ctx = context.Background()
 	}
-	fixture.stack = NewGo(StackOptions{
+	stackOptions := StackOptions{
 		Context: config.ctx, Tun: device, TunOptions: fixture.options,
 		Handler: fixture, Logger: logger.NOP(), UDPTimeout: time.Minute, ICMPTimeout: time.Minute,
 		MemoryPressure: config.pressure,
 		UDPMapping:     config.udpMapping, UDPFiltering: config.udpFiltering,
-	})
-	err = fixture.stack.Start()
+	}
+	var stack Stack
+	if config.stackFactory != nil {
+		stack, err = config.stackFactory(stackOptions)
+		if err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		fixture.stack = NewGo(stackOptions)
+		stack = fixture.stack
+	}
+	err = stack.Start()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { fixture.stack.Close() })
+	t.Cleanup(func() { stack.Close() })
 	return fixture
 }
 
@@ -206,19 +219,38 @@ type kernelSocket struct {
 	*net.TCPConn
 	access sync.Mutex
 	owner  io.Closer
+	closed bool
 }
 
-func (s *kernelSocket) Attach(owner io.Closer) bool {
+func (s *kernelSocket) Attach(owner io.Closer) (io.Closer, bool) {
 	s.access.Lock()
+	defer s.access.Unlock()
+	if s.closed || s.owner != nil {
+		return nil, false
+	}
 	s.owner = owner
-	s.access.Unlock()
-	return true
+	return s.TCPConn, true
 }
 
 func (s *kernelSocket) Detach() {
 	s.access.Lock()
 	s.owner = nil
+	closed := s.closed
 	s.access.Unlock()
+	if closed {
+		s.TCPConn.Close()
+	}
+}
+
+func (s *kernelSocket) Close() error {
+	s.access.Lock()
+	s.closed = true
+	owner := s.owner
+	s.access.Unlock()
+	if owner != nil {
+		return owner.Close()
+	}
+	return s.TCPConn.Close()
 }
 
 func (f *kernelStackFixture) splicePair(t *testing.T, ipv6 bool) (*net.TCPConn, *net.TCPConn, *atomic.Int64, *atomic.Int64) {
@@ -442,3 +474,228 @@ var (
 	_ Handler      = (*kernelStackFixture)(nil)
 	_ SpliceSocket = (*kernelSocket)(nil)
 )
+
+func TestGoKernelFlowControl(t *testing.T) {
+	previous := runtime.GOMAXPROCS(4)
+	defer runtime.GOMAXPROCS(previous)
+	configs := []kernelStackConfig{{mtu: 1500}, {mtu: 9000}, {mtu: 65535}}
+	if runtime.GOOS == "linux" {
+		configs = append(configs, kernelStackConfig{mtu: 1500, gso: true, multiQueue: true}, kernelStackConfig{mtu: 9000, gso: true, multiQueue: true})
+	}
+	for _, config := range configs {
+		t.Run(fmt.Sprintf("mtu=%d/gso=%v/mq=%v", config.mtu, config.gso, config.multiQueue), func(configTest *testing.T) {
+			config.socketBuffer = 128 << 10
+			config.upstreamSocketBuffer = 128 << 10
+			fixture := newKernelStackFixture(configTest, config)
+			for _, ipv6 := range []bool{false, true} {
+				for _, mode := range []string{"write", "buffer", "splice"} {
+					configTest.Run(fmt.Sprintf("ipv6=%v/mode=%s", ipv6, mode), func(test *testing.T) {
+						test.Parallel()
+						size := 4 << 20
+						if runtime.GOOS == "windows" && mode == "splice" {
+							size = 16 << 20
+						}
+						kernelBackpressure(test, fixture, ipv6, mode, size)
+					})
+				}
+			}
+		})
+	}
+}
+
+func kernelBackpressure(t *testing.T, fixture *kernelStackFixture, ipv6 bool, mode string, size int) {
+	t.Helper()
+	var client, server net.Conn
+	if mode == "splice" {
+		client, server, _, _ = fixture.splicePair(t, ipv6)
+	} else {
+		client, server = fixture.pair(t, ipv6)
+	}
+	err := client.(*net.TCPConn).SetReadBuffer(4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("flow %s -> %s", client.LocalAddr(), client.RemoteAddr())
+	deadline := time.Now().Add(10 * time.Second)
+	client.SetDeadline(deadline)
+	server.SetDeadline(deadline)
+	upload := kernelPayload(size, 113)
+	download := kernelPayload(size, 127)
+	var uploadAccepted, downloadAccepted atomic.Int64
+	written := make(chan error, 2)
+	go func() { written <- kernelFlowWrite(client, upload, false, &uploadAccepted) }()
+	go func() { written <- kernelFlowWrite(server, download, mode == "buffer", &downloadAccepted) }()
+	time.Sleep(100 * time.Millisecond)
+	if uploadAccepted.Load() == int64(len(upload)) || downloadAccepted.Load() == int64(len(download)) {
+		t.Fatalf("stalled readers did not backpressure both writers: upload=%d download=%d", uploadAccepted.Load(), downloadAccepted.Load())
+	}
+	read := make(chan error, 2)
+	go func() { read <- kernelFlowRead(server, upload, mode == "buffer") }()
+	go func() { read <- kernelFlowRead(client, download, false) }()
+	for range 2 {
+		err = <-read
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	for range 2 {
+		err = <-written
+		if err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func kernelFlowWrite(conn net.Conn, payload []byte, buffered bool, accepted *atomic.Int64) error {
+	for offset := 0; offset < len(payload); {
+		length := min(32749, len(payload)-offset)
+		var n int
+		var err error
+		if buffered {
+			buffer := buf.NewSize(length + 128)
+			buffer.Resize(128, 0)
+			common.Must1(buffer.Write(payload[offset : offset+length]))
+			err = conn.(N.ExtendedWriter).WriteBuffer(buffer)
+			if err == nil {
+				n = length
+			}
+		} else {
+			n, err = conn.Write(payload[offset : offset+length])
+		}
+		offset += n
+		accepted.Add(int64(n))
+		if err != nil {
+			return E.Cause(err, "write flow after ", offset, " bytes")
+		}
+	}
+	return N.CloseWrite(conn)
+}
+
+func kernelFlowRead(conn net.Conn, payload []byte, buffered bool) error {
+	var waiter N.ReadWaiter
+	if buffered {
+		var created bool
+		waiter, created = bufio.CreateReadWaiter(conn)
+		if !created {
+			return E.New("flow connection has no read waiter")
+		}
+		waiter.InitializeReadWaiter(N.ReadWaitOptions{MTU: 4093, FrontHeadroom: 91, RearHeadroom: 73})
+	}
+	storage := make([]byte, 16381)
+	sizes := [...]int{1, 127, 4093, len(storage)}
+	paused := 0
+	for offset, index := 0, 0; ; index++ {
+		if offset/65536 > paused && paused < 4 && offset < len(payload) {
+			paused = offset / 65536
+			time.Sleep(25 * time.Millisecond)
+		}
+		var data []byte
+		var buffer *buf.Buffer
+		var err error
+		if buffered {
+			buffer, err = waiter.WaitReadBuffer()
+			if buffer != nil {
+				data = buffer.Bytes()
+			}
+		} else {
+			var n int
+			n, err = conn.Read(storage[:sizes[index%len(sizes)]])
+			data = storage[:n]
+		}
+		end := offset + len(data)
+		matches := end <= len(payload) && bytes.Equal(data, payload[offset:min(end, len(payload))])
+		if buffer != nil {
+			buffer.ExtendHeader(91)
+			buffer.Extend(73)
+			buffer.Release()
+		}
+		if !matches {
+			return E.New("flow mismatch at byte ", offset)
+		}
+		offset = end
+		if err == io.EOF && offset == len(payload) {
+			return nil
+		}
+		if err != nil {
+			return E.Cause(err, "read flow after ", offset, "/", len(payload), " bytes")
+		}
+	}
+}
+
+func TestGoKernelSequenceWrap(t *testing.T) {
+	previous := runtime.GOMAXPROCS(4)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+	fixture := newKernelStackFixture(t, kernelStackConfig{mtu: 1500, gso: runtime.GOOS == "linux"})
+	for _, ipv6 := range []bool{false, true} {
+		for _, mode := range []string{"write", "buffer", "splice"} {
+			t.Run(fmt.Sprintf("ipv6=%v/mode=%s", ipv6, mode), func(test *testing.T) {
+				test.Parallel()
+				var client, server net.Conn
+				if mode == "splice" {
+					client, server, _, _ = fixture.splicePair(test, ipv6)
+				} else {
+					client, server = fixture.pair(test, ipv6)
+				}
+				deadline := time.Now().Add(60 * time.Second)
+				client.SetDeadline(deadline)
+				server.SetDeadline(deadline)
+				completed := make(chan error, 1)
+				go func() { completed <- kernelWrapTransfer(client, server, false) }()
+				err := kernelWrapTransfer(server, client, mode == "buffer")
+				if err != nil {
+					test.Error("download:", err)
+				}
+				err = <-completed
+				if err != nil {
+					test.Error("upload:", err)
+				}
+			})
+		}
+	}
+}
+
+func kernelWrapTransfer(sender net.Conn, receiver net.Conn, buffered bool) error {
+	const total = uint64(1)<<32 | 123
+	const blockSize = 32768
+	pattern := kernelPayload(blockSize, 53)
+	completed := make(chan error, 1)
+	go func() {
+		block := bytes.Clone(pattern)
+		for offset := uint64(0); offset < total; {
+			length := min(uint64(blockSize), total-offset)
+			binary.BigEndian.PutUint64(block, offset)
+			var err error
+			if buffered {
+				buffer := buf.NewSize(int(length) + 128)
+				buffer.Resize(128, 0)
+				common.Must1(buffer.Write(block[:length]))
+				err = sender.(N.ExtendedWriter).WriteBuffer(buffer)
+			} else {
+				_, err = sender.Write(block[:length])
+			}
+			if err != nil {
+				completed <- err
+				return
+			}
+			offset += length
+		}
+		completed <- N.CloseWrite(sender)
+	}()
+	block := make([]byte, blockSize)
+	for offset := uint64(0); offset < total; {
+		length := min(uint64(blockSize), total-offset)
+		_, err := io.ReadFull(receiver, block[:length])
+		if err != nil {
+			return E.Cause(err, "read sequence offset ", offset)
+		}
+		if binary.BigEndian.Uint64(block) != offset || !bytes.Equal(block[8:length], pattern[8:length]) {
+			return E.New("sequence data mismatch at ", offset)
+		}
+		offset += length
+	}
+	_, err := receiver.Read(block[:1])
+	if err != io.EOF {
+		return E.New("sequence stream end: ", err)
+	}
+	return <-completed
+}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-tun/gtcpip/header"
+	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/logger"
 	"github.com/stretchr/testify/require"
 )
@@ -92,7 +93,7 @@ func TestGoEngineDefersRoutingAndHandsAcceptedVerdictBack(t *testing.T) {
 	engine := newGoEngine(stack, new(pendingGoIO), 1)
 	t.Cleanup(engine.releaseInjected)
 	raw := pendingPacket(50000, []byte("retained"))
-	engine.processFrame(&goFrame{data: raw})
+	engine.processFrame(&goFrame{buffer: buf.As(raw)})
 	pendingReceive(t, entered)
 	clear(raw)
 	close(unblock)

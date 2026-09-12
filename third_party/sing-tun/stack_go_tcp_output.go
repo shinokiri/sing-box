@@ -165,7 +165,7 @@ func (c *GoConn) WriterMTU() int {
 func (c *GoConn) publishBuffered(tail uint64) {
 	c.bufferedTail.Store(tail)
 	if c.transmitterActive.Load() != 0 {
-		c.signalTransmitter()
+		c.transmitSignal.notify()
 		return
 	}
 	c.transmitInline()
@@ -174,7 +174,7 @@ func (c *GoConn) publishBuffered(tail uint64) {
 func (c *GoConn) transmitInline() {
 	for {
 		if !c.transmitOwner.CompareAndSwap(0, 1) {
-			c.signalTransmitter()
+			c.transmitSignal.notify()
 			return
 		}
 		_, blocked := c.transmitLoop(false, 0)
@@ -195,7 +195,7 @@ func (c *GoConn) transmitOnEngine() bool {
 		return false
 	}
 	if !c.transmitOwner.CompareAndSwap(0, 1) {
-		c.signalTransmitter()
+		c.transmitSignal.notify()
 		return true
 	}
 	written, blocked := c.transmitLoop(false, budget)
@@ -212,14 +212,7 @@ func (c *GoConn) wakeTransmitterGoroutine() {
 		go c.runTransmitter()
 		return
 	}
-	c.signalTransmitter()
-}
-
-func (c *GoConn) signalTransmitter() {
-	select {
-	case c.transmitSignal <- struct{}{}:
-	default:
-	}
+	c.transmitSignal.notify()
 }
 
 func (c *GoConn) hasDataWaiting() bool {
@@ -298,10 +291,7 @@ func (c *GoConn) writeReady(required int) bool {
 func (c *GoConn) parkWriter(required int) error {
 	c.writerNeeds.Store(int32(required))
 	c.writerParked.Store(true)
-	select {
-	case <-c.writeSignal:
-	default:
-	}
+	c.writeSignal.drain()
 	if c.writeReady(required) {
 		c.writerParked.Store(false)
 		return nil
@@ -347,9 +337,6 @@ func (c *GoConn) parkTransmitBlocked() error {
 func (c *GoConn) transmitLoop(transmitter bool, budget int) (int, bool) {
 	if transmitter {
 		defer c.engine.platformIO.flush()
-	}
-	if c.descriptors.entries == nil {
-		c.descriptors.entries = c.engine.descriptorPool.acquire()
 	}
 	sentAny := false
 	written := 0
@@ -741,13 +728,8 @@ func (c *GoConn) writeReset() error {
 	var scratch [header.IPv6MinimumSize + header.TCPMinimumSize + goTimestampOptionLength]byte
 	var frame [1][]byte
 	segment := goSegment{offset: 0, flags: header.TCPFlagRst | header.TCPFlagAck}
-	frame[0] = c.buildResetPacket(scratch[:], &segment)
-	return goIgnoreDropped(c.engine.platformIO.writeFrame(frame[:], ForwardFrameMeta{}))
-}
-
-func (c *GoConn) buildResetPacket(scratch []byte, segment *goSegment) []byte {
-	frame, _ := c.buildFrame(scratch, nil, segment, &c.transmitStore, false)
-	return frame[0]
+	segments, _ := c.buildFrame(scratch[:], frame[:0], &segment, &c.transmitStore, false)
+	return goIgnoreDropped(c.engine.platformIO.writeFrame(segments, ForwardFrameMeta{}))
 }
 
 var errGoTransmitBlocked = E.New("go: transmit blocked")

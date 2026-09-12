@@ -11,7 +11,9 @@ import (
 
 	"github.com/sagernet/sing-tun/gtcpip/header"
 	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
+	N "github.com/sagernet/sing/common/network"
 
 	"golang.org/x/sys/unix"
 )
@@ -25,20 +27,22 @@ type goLinuxDevice struct {
 	vnetHeader          bool
 	offloadProbePending atomic.Bool
 	transmitOffload     atomic.Bool
+	udpTransmitDisabled atomic.Bool
 	droppedEngineFrames goDropCounter
 	droppedDataFrames   goDropCounter
 	closing             atomic.Bool
 }
 
 type goLinuxIO struct {
-	device  *goLinuxDevice
-	tun     *NativeTun
-	tunFd   int
-	ownsFd  bool
-	epollFd int
-	eventFd int
-	scratch []byte
-	events  [goSocketEventBatch + 2]unix.EpollEvent
+	device          *goLinuxDevice
+	tun             *NativeTun
+	tunFd           int
+	ownsFd          bool
+	epollFd         int
+	eventFd         int
+	receiveBuffers  []*buf.Buffer
+	readWaitOptions N.ReadWaitOptions
+	events          [goSocketEventBatch + 2]unix.EpollEvent
 }
 
 func newGoPlatformQueues(stack *Go) ([]goPlatformIO, error) {
@@ -58,7 +62,10 @@ func newGoPlatformQueues(stack *Go) ([]goPlatformIO, error) {
 	}
 	device.vnetHeader = vnetHeader
 	if vnetHeader {
-		offloadErr := setTCPOffload(nativeTun.rawFileDescriptor())
+		offloadErr := setUDPOffload(nativeTun.rawFileDescriptor())
+		if offloadErr != nil {
+			offloadErr = setTCPOffload(nativeTun.rawFileDescriptor())
+		}
 		if offloadErr != nil {
 			stack.logger.Warn(E.Cause(offloadErr, "go: set TSO offload"))
 		} else {
@@ -89,9 +96,6 @@ func (o *goLinuxIO) start() error {
 		o.tunFd = queueFd
 		o.ownsFd = true
 	}
-	// Linux hands pre-segmentation TSO aggregates to the TUN fd even with IFF_VNET_HDR off
-	// (observed on 6.x kernels).
-	o.scratch = make([]byte, virtioNetHdrLen+gsoMaxSize)
 	err := o.startPoller()
 	if err != nil && o.ownsFd {
 		err = E.Errors(err, unix.Close(o.tunFd))
@@ -175,7 +179,18 @@ func (o *goLinuxIO) wait(timeout time.Duration, events []goSocketEvent) (bool, i
 	if timeout >= 0 {
 		milliseconds = int((timeout + time.Millisecond - 1) / time.Millisecond)
 	}
-	eventCount, err := unix.EpollWait(o.epollFd, o.events[:], milliseconds)
+	var eventCount int
+	var err error
+	if timeout == 0 {
+		//nolint:staticcheck
+		count, _, errno := unix.RawSyscall6(unix.SYS_EPOLL_PWAIT, uintptr(o.epollFd), uintptr(unsafe.Pointer(&o.events[0])), uintptr(len(o.events)), 0, 0, 0)
+		eventCount = int(count)
+		if errno != 0 {
+			err = errno
+		}
+	} else {
+		eventCount, err = unix.EpollWait(o.epollFd, o.events[:], milliseconds)
+	}
 	if err != nil {
 		if err == unix.EINTR {
 			return false, 0, nil
@@ -254,13 +269,32 @@ func goEpollEvents(interest uint8) uint32 {
 	return events
 }
 
-func (o *goLinuxIO) readBurst(frames []goFrame) (int, bool, error) {
-	for {
+func (o *goLinuxIO) readBurst(frames []goFrame, options N.ReadWaitOptions) (int, bool, error) {
+	if o.receiveBuffers == nil || o.readWaitOptions != options {
+		o.releaseReadBuffers()
+		if o.receiveBuffers == nil {
+			o.receiveBuffers = make([]*buf.Buffer, goPacketBatchSize)
+		}
+		o.readWaitOptions = options
+	}
+	count := 0
+	for count < min(len(frames), len(o.receiveBuffers)) {
+		buffer := o.receiveBuffers[count]
+		if buffer == nil {
+			// Linux hands pre-segmentation TSO aggregates to the TUN fd even with IFF_VNET_HDR off
+			// (observed on 6.x kernels).
+			buffer = options.NewBufferSize(virtioNetHdrLen + gsoMaxSize)
+			o.receiveBuffers[count] = buffer
+		}
+		buffer.Reset()
+		buffer.Resize(options.FrontHeadroom, 0)
+		buffer.Reserve(options.RearHeadroom)
+		scratch := buffer.FreeBytes()
 		//nolint:staticcheck
-		n, _, errno := unix.RawSyscall(unix.SYS_READ, uintptr(o.tunFd), uintptr(unsafe.Pointer(&o.scratch[0])), uintptr(len(o.scratch)))
+		n, _, errno := unix.RawSyscall(unix.SYS_READ, uintptr(o.tunFd), uintptr(unsafe.Pointer(&scratch[0])), uintptr(len(scratch)))
 		if errno != 0 {
 			if errno == unix.EAGAIN {
-				return 0, true, nil
+				return count, true, nil
 			}
 			if errno == unix.EINTR {
 				continue
@@ -279,33 +313,45 @@ func (o *goLinuxIO) readBurst(frames []goFrame) (int, bool, error) {
 				o.device.transmitOffload.Store(true)
 			}
 		}
-		packet := o.scratch[:n]
+		packet := scratch[:n]
 		if !o.device.vnetHeader {
-			frames[0] = goFrame{data: packet}
-			return 1, false, nil
+			buffer.Truncate(int(n))
+			options.PostReturn(buffer)
+			frames[count] = goFrame{buffer: buffer}
+			count++
+			continue
 		}
-		payload, options, parseErr := parseVirtioRead(packet)
+		payload, virtioOptions, parseErr := parseVirtioRead(packet)
 		if parseErr != nil {
 			continue
 		}
 		var meta ForwardFrameMeta
-		switch options.GSOType {
+		switch virtioOptions.GSOType {
 		case GSONone:
 		case GSOTCPv4:
 			meta.gsoType = unix.VIRTIO_NET_HDR_GSO_TCPV4
-			meta.gsoSize = options.GSOSize
+			meta.gsoSize = virtioOptions.GSOSize
 		case GSOTCPv6:
 			meta.gsoType = unix.VIRTIO_NET_HDR_GSO_TCPV6
-			meta.gsoSize = options.GSOSize
+			meta.gsoSize = virtioOptions.GSOSize
 		case GSOUDPL4:
-			continue
+			meta.gsoType = goUDPGSOType
+			meta.gsoSize = virtioOptions.GSOSize
 		}
-		meta.needsChecksum = options.NeedsCsum
-		meta.checksumStart = options.CsumStart
-		meta.checksumOffset = options.CsumOffset
-		frames[0] = goFrame{data: payload, meta: meta}
-		return 1, false, nil
+		meta.needsChecksum = virtioOptions.NeedsCsum
+		meta.checksumStart = virtioOptions.CsumStart
+		meta.checksumOffset = virtioOptions.CsumOffset
+		buffer.Resize(options.FrontHeadroom+len(packet)-len(payload), len(payload))
+		options.PostReturn(buffer)
+		frames[count] = goFrame{buffer: buffer, meta: meta}
+		count++
 	}
+	return count, false, nil
+}
+
+func (o *goLinuxIO) releaseReadBuffers() {
+	buf.ReleaseMulti(o.receiveBuffers)
+	clear(o.receiveBuffers)
 }
 
 func (o *goLinuxIO) writeFrame(frame [][]byte, meta ForwardFrameMeta) error {
@@ -363,7 +409,7 @@ func (o *goLinuxIO) writeData(frame [][]byte, meta ForwardFrameMeta) error {
 
 func (o *goLinuxIO) transmitFrame(frame [][]byte, meta ForwardFrameMeta) unix.Errno {
 	var headerStorage [virtioNetHdrLen]byte
-	var iovecStorage [8]unix.Iovec
+	var iovecStorage [goPacketBatchSize + 2]unix.Iovec
 	iovecs := iovecStorage[:0]
 	if o.device.vnetHeader {
 		prefix := goEmptyVirtioHeader[:]
@@ -374,7 +420,9 @@ func (o *goLinuxIO) transmitFrame(frame [][]byte, meta ForwardFrameMeta) unix.Er
 				virtioHeader.csumStart = meta.checksumStart
 				virtioHeader.csumOffset = meta.checksumOffset
 			}
-			if meta.gsoType != unix.VIRTIO_NET_HDR_GSO_NONE {
+			if meta.gsoType == goUDPGSOType {
+				virtioHeader.hdrLen = meta.checksumStart + header.UDPMinimumSize
+			} else if meta.gsoType != unix.VIRTIO_NET_HDR_GSO_NONE {
 				virtioHeader.hdrLen = meta.checksumStart + uint16(header.TCP(frame[0][meta.checksumStart:]).DataOffset())
 			}
 			common.Must(virtioHeader.encode(headerStorage[:]))
@@ -426,9 +474,6 @@ func (o *goLinuxIO) wake() {
 	_, _ = unix.Write(o.eventFd, value[:])
 }
 
-func (o *goLinuxIO) drainWake() {
-}
-
 func (o *goLinuxIO) close() error {
 	o.device.closing.Store(true)
 	err := E.Errors(unix.Close(o.epollFd), unix.Close(o.eventFd))
@@ -439,4 +484,85 @@ func (o *goLinuxIO) close() error {
 }
 
 func (o *goLinuxIO) flush() {
+}
+
+func (o *goLinuxIO) writePacketBatch(frames []goUDPFrame) error {
+	var writeError error
+	var segments [goPacketBatchSize + 1][]byte
+	for index := 0; index < len(frames); {
+		frame := &frames[index]
+		end := index + 1
+		payloadLength := len(frame.payload)
+		if o.device.vnetHeader && !o.device.udpTransmitDisabled.Load() && payloadLength > 0 {
+			for end < len(frames) {
+				next := &frames[end]
+				if next.length != frame.length || len(next.payload) == 0 || len(next.payload) > len(frame.payload) || frame.length+payloadLength+len(next.payload) > 65535 {
+					break
+				}
+				udpOffset := frame.length - header.UDPMinimumSize
+				if binary.BigEndian.Uint32(next.header[udpOffset:]) != binary.BigEndian.Uint32(frame.header[udpOffset:]) {
+					break
+				}
+				if frame.length == header.IPv4MinimumSize+header.UDPMinimumSize {
+					if [8]byte(next.header[12:20]) != [8]byte(frame.header[12:20]) {
+						break
+					}
+				} else if [32]byte(next.header[8:40]) != [32]byte(frame.header[8:40]) {
+					break
+				}
+				payloadLength += len(next.payload)
+				end++
+				if len(next.payload) < len(frame.payload) {
+					break
+				}
+			}
+		}
+		packetHeader := frame.header
+		meta := frame.meta
+		if end-index > 1 {
+			udpLength := uint16(header.UDPMinimumSize + payloadLength)
+			var sourceAddress, destinationAddress []byte
+			if frame.length == header.IPv4MinimumSize+header.UDPMinimumSize {
+				ipHdr := header.IPv4(packetHeader[:header.IPv4MinimumSize])
+				ipHdr.SetTotalLength(uint16(frame.length + payloadLength))
+				ipHdr.SetChecksum(0)
+				ipHdr.SetChecksum(^ipHdr.CalculateChecksum())
+				sourceAddress = ipHdr.SourceAddressSlice()
+				destinationAddress = ipHdr.DestinationAddressSlice()
+			} else {
+				ipHdr := header.IPv6(packetHeader[:header.IPv6MinimumSize])
+				ipHdr.SetPayloadLength(udpLength)
+				sourceAddress = ipHdr.SourceAddressSlice()
+				destinationAddress = ipHdr.DestinationAddressSlice()
+			}
+			udpHdr := header.UDP(packetHeader[frame.length-header.UDPMinimumSize : frame.length])
+			udpHdr.SetLength(udpLength)
+			udpHdr.SetChecksum(header.PseudoHeaderChecksum(header.UDPProtocolNumber, sourceAddress, destinationAddress, udpLength))
+			meta.gsoType = goUDPGSOType
+			meta.gsoSize = uint16(len(frame.payload))
+		}
+		segments[0] = packetHeader[:frame.length]
+		for packetIndex := index; packetIndex < end; packetIndex++ {
+			segments[packetIndex-index+1] = frames[packetIndex].payload
+		}
+		errno := o.transmitFrame(segments[:end-index+1], meta)
+		if errno == unix.EINTR {
+			continue
+		}
+		if errno != 0 && end-index > 1 {
+			switch errno {
+			case unix.EINVAL, unix.EIO, unix.EOPNOTSUPP:
+				o.device.udpTransmitDisabled.Store(true)
+				continue
+			}
+		}
+		if errno == unix.EAGAIN {
+			o.device.droppedEngineFrames.record(o.device.stack.logger, "UDP frames")
+			writeError = E.Errors(writeError, errGoFrameDropped)
+		} else if errno != 0 {
+			writeError = E.Errors(writeError, E.Cause(errno, "go: write UDP batch"))
+		}
+		index = end
+	}
+	return writeError
 }

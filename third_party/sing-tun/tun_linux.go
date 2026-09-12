@@ -241,8 +241,6 @@ func (t *NativeTun) enableGSO() error {
 		return E.Cause(err, "enable offload: IFF_VNET_HDR not enabled")
 	}
 	t.vnetHdr = true
-	t.writeBuffer = make([]byte, virtioNetHdrLen+gsoMaxSize)
-	t.pendingBuffer = make([]byte, virtioNetHdrLen+gsoMaxSize)
 	t.tcpGROTable = newTCPGROTable()
 	t.udpGROTable = newUDPGROTable()
 	err = setTCPOffload(t.tunFd)
@@ -445,6 +443,9 @@ func (t *NativeTun) Close() error {
 
 func (t *NativeTun) Read(p []byte) (n int, err error) {
 	if t.vnetHdr {
+		if t.writeBuffer == nil {
+			t.writeBuffer = make([]byte, virtioNetHdrLen+gsoMaxSize)
+		}
 		n, err = t.tunFile.Read(t.writeBuffer)
 		if err != nil {
 			if errors.Is(err, syscall.EBADFD) {
@@ -567,6 +568,9 @@ func (t *NativeTun) BatchRead(buffers [][]byte, offset int, readN []int) (int, e
 		used = count
 	}
 	for used < len(buffers) {
+		if t.writeBuffer == nil {
+			t.writeBuffer = make([]byte, virtioNetHdrLen+gsoMaxSize)
+		}
 		var (
 			readLength int
 			err        error

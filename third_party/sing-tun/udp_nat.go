@@ -316,7 +316,7 @@ func (s *UDPNat) unregisterClass(conn *UDPNatConn) {
 }
 
 func (s *UDPNat) NewPacket(bufferSlices [][]byte, source M.Socksaddr, destination M.Socksaddr, userData any) {
-	conn, ok := s.getOrCreateConn(source, destination, userData)
+	conn, ok := s.getOrCreate(s.sessionKey(source, destination), source, destination, userData)
 	if !ok {
 		return
 	}
@@ -348,10 +348,6 @@ func (s *UDPNat) sessionKey(source M.Socksaddr, destination M.Socksaddr) udpNatS
 		key.destinationPort = destination.Port
 	}
 	return key
-}
-
-func (s *UDPNat) getOrCreateConn(source M.Socksaddr, destination M.Socksaddr, userData any) (*UDPNatConn, bool) {
-	return s.getOrCreate(s.sessionKey(source, destination), source, destination, userData)
 }
 
 func (s *UDPNat) getOrCreate(key udpNatSessionKey, source M.Socksaddr, destination M.Socksaddr, userData any) (*UDPNatConn, bool) {
@@ -453,7 +449,7 @@ func (s *UDPNat) NewPacketBatch(buffers []*buf.Buffer, sources []M.Socksaddr, de
 		return
 	}
 	for index, buffer := range buffers {
-		conn, ok := s.getOrCreateConn(sources[index], destination, userData)
+		conn, ok := s.getOrCreate(s.sessionKey(sources[index], destination), sources[index], destination, userData)
 		if !ok {
 			buffer.Release()
 			continue
@@ -666,6 +662,11 @@ func (c *UDPNatConn) CreatePacketBatchReadWaiter() (N.PacketBatchReadWaiter, boo
 }
 
 func (c *UDPNatConn) WaitReadPackets() (buffers []*buf.Buffer, destinations []M.Socksaddr, err error) {
+	batch := c.readBatch
+	if batch != nil {
+		clear(batch.buffers)
+		clear(batch.destinations)
+	}
 	options := c.loadReadWaitOptions()
 	buffer, destination, err := c.waitReadPacket(options)
 	if err != nil {
@@ -675,13 +676,9 @@ func (c *UDPNatConn) WaitReadPackets() (buffers []*buf.Buffer, destinations []M.
 	if batchSize <= 0 {
 		batchSize = 1
 	}
-	batch := c.readBatch
 	if batch == nil {
 		batch = new(udpNatReadBatch)
 		c.readBatch = batch
-	} else {
-		clear(batch.buffers)
-		clear(batch.destinations)
 	}
 	buffers = batch.buffers[:0]
 	destinations = batch.destinations[:0]

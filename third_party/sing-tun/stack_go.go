@@ -30,6 +30,7 @@ type Go struct {
 	udpIdentification    atomic.Uint32
 	dispatcher           *ForwardDispatcher
 	directory            goFlowDirectory
+	access               sync.Mutex
 	engines              []*goEngine
 	closed               atomic.Bool
 }
@@ -59,6 +60,11 @@ func NewGo(options StackOptions) *Go {
 }
 
 func (s *Go) Start() error {
+	s.access.Lock()
+	defer s.access.Unlock()
+	if s.closed.Load() {
+		return E.New("stack is closed")
+	}
 	queues, err := newGoPlatformQueues(s)
 	if err != nil {
 		return err
@@ -134,23 +140,6 @@ func goCloseQueues(queues []goPlatformIO) error {
 	return err
 }
 
-type goWriteback struct {
-	platformIO goPlatformIO
-}
-
-func (w *goWriteback) ReturnHeadroom() int {
-	return w.platformIO.transmitPrefix()
-}
-
-func (w *goWriteback) WriteReturnPackets(packets [][]byte) error {
-	prefix := w.platformIO.transmitPrefix()
-	var writeErr error
-	for _, packet := range packets {
-		writeErr = E.Errors(writeErr, goIgnoreDropped(w.platformIO.writeFrame([][]byte{packet[prefix:]}, ForwardFrameMeta{})))
-	}
-	return writeErr
-}
-
 type goFlowDirectory struct {
 	access   sync.RWMutex
 	flows    map[flowKey]*GoConn
@@ -188,6 +177,11 @@ func (d *goFlowDirectory) lookup(key flowKey) *GoConn {
 }
 
 func (s *Go) ResetNetwork() {
+	s.access.Lock()
+	defer s.access.Unlock()
+	if s.closed.Load() {
+		return
+	}
 	for _, udpNat := range s.udpNats {
 		udpNat.Purge()
 	}
@@ -197,7 +191,9 @@ func (s *Go) ResetNetwork() {
 }
 
 func (s *Go) Close() error {
+	s.access.Lock()
 	if !s.closed.CompareAndSwap(false, true) {
+		s.access.Unlock()
 		return nil
 	}
 	for _, engine := range s.engines {
@@ -207,10 +203,13 @@ func (s *Go) Close() error {
 	for _, engine := range s.engines {
 		engine.postMessage(&engine.closeMessage)
 	}
+	s.access.Unlock()
 	for _, engine := range s.engines {
 		<-engine.exitSignal
 	}
-	s.dispatcher.Close()
+	if s.dispatcher != nil {
+		s.dispatcher.Close()
+	}
 	for _, udpNat := range s.udpNats {
 		udpNat.Close()
 	}

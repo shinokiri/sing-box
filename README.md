@@ -4,8 +4,8 @@ The universal proxy platform.
 
 This is the **udpflow testing branch**. Download its signed **Android 16+ ARM64** APK
 from [Releases](https://github.com/shinokiri/sing-box/releases).
-The current development snapshot is `1.15.0-alpha.2-udpflow.1`, based on upstream
-`testing` commit `f6ce1d5be042436d2b498d216cef718ea87a1ca8`, with Android client
+The current development snapshot is `1.15.0-alpha.2-udpflow.2`, based on upstream
+`testing` commit `b84b42bc72dd7fad73ee1b3b65bfddf864eacf1b`, with Android client
 `ec05af8afa066b87025784355590a802168a0e07`. Exact pins are recorded in
 `release/udpflow.json`; testing snapshots are published as prereleases.
 Install the first udpflow release manually; subsequent releases are checked

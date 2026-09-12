@@ -21,7 +21,7 @@ require (
 	github.com/sagernet/sing-quic v0.7.0-beta.2
 	github.com/sagernet/sing-shadowsocks v0.2.8
 	github.com/sagernet/sing-shadowsocks2 v0.2.1
-	github.com/sagernet/sing-tun v0.9.4-0.20260910071410-6655bc286d05
+	github.com/sagernet/sing-tun v0.9.4-0.20260912075549-869f0a4d76af
 	github.com/spyzhov/ajson v0.9.4
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/goleak v1.3.0

@@ -15,15 +15,15 @@ import (
 )
 
 const (
-	goSocketEventBatch  = 64
-	goSplicePacketBurst = 16
-	goSpliceTokenShift  = 8
-	goSpliceReadChunk   = 2 * goSlabSize
+	goSocketEventBatch = 64
+	goSpliceTokenShift = 8
+	goSpliceReadChunk  = 2 * goSlabSize
 )
 
 type SpliceSocket interface {
 	syscall.Conn
-	Attach(closer io.Closer) bool
+	io.Closer
+	Attach(closer io.Closer) (io.Closer, bool)
 	Detach()
 }
 
@@ -42,9 +42,12 @@ type PacketNAT struct {
 
 type SplicePacketOptions struct {
 	SpliceOptions
-	Timeout time.Duration
-	NAT     PacketNAT
-	Cached  []*N.PacketBuffer
+	Timeout       time.Duration
+	NAT           PacketNAT
+	Cached        []*N.PacketBuffer
+	Offload       N.PacketOffload
+	FrontHeadroom int
+	RearHeadroom  int
 }
 
 type goSpliceSlot struct {
@@ -98,8 +101,8 @@ func (e *goEngine) dispatchSocketEvents(count int) {
 		}
 		if slot.stream != nil {
 			e.handleStreamEvent(slot.stream, event)
-		} else if slot.packet != nil {
-			e.handlePacketEvent(slot.packet, event)
+		} else if slot.packet != nil && event.readable && slot.packet.splice != nil {
+			e.packetSpliceRead(slot.packet)
 		}
 	}
 }
@@ -113,6 +116,7 @@ func goCount(counters []N.CountFunc, n int) {
 type goSpliceStream struct {
 	conn           *GoConn
 	owner          SpliceSocket
+	original       io.Closer
 	socket         goSocket
 	token          uint32
 	interest       uint8
@@ -129,16 +133,21 @@ func (c *GoConn) Splice(owner SpliceSocket, options SpliceOptions) bool {
 	if c.connState.Load() != goConnStateEstablished {
 		return false
 	}
+	splice := &goSpliceStream{conn: c, owner: owner, options: options}
+	original, attached := owner.Attach(splice)
+	if !attached {
+		return false
+	}
+	splice.original = original
 	socket, err := goSpliceSocket(owner)
 	if err != nil {
+		owner.Detach()
 		c.engine.stack.logger.Debug(E.Cause(err, "go: splice ", c.destination))
 		return false
 	}
-	splice := &goSpliceStream{conn: c, owner: owner, socket: socket, options: options}
-	if !owner.Attach(splice) {
-		return false
-	}
+	splice.socket = socket
 	if !c.splicePending.CompareAndSwap(nil, splice) {
+		socket.close()
 		owner.Detach()
 		return false
 	}
@@ -167,7 +176,13 @@ func (e *goEngine) handleSpliceEngage(conn *GoConn) {
 		return
 	}
 	splice.token = e.allocateSpliceToken(conn, nil)
-	err := e.platformIO.registerSocket(&splice.socket, splice.token, goInterestRead)
+	var err error
+	if goSpliceDuplicatesSocket {
+		err = splice.original.Close()
+	}
+	if err == nil {
+		err = e.platformIO.registerSocket(&splice.socket, splice.token, goInterestRead)
+	}
 	if err != nil {
 		conn.splicePending.Store(nil)
 		e.releaseSpliceToken(splice.token)
@@ -180,14 +195,12 @@ func (e *goEngine) handleSpliceEngage(conn *GoConn) {
 	conn.spliced.Store(true)
 	conn.splicePending.Store(nil)
 	e.spliceFlushUpload(conn)
-	if conn.splice == nil {
-		return
-	}
-	e.spliceReadPeer(conn)
 }
 
 func (e *goEngine) spliceRelease(splice *goSpliceStream, err error) {
+	splice.socket.close()
 	splice.owner.Detach()
+	splice.owner.Close()
 	if splice.options.OnClose != nil {
 		splice.options.OnClose(err)
 	}
@@ -322,6 +335,11 @@ func (e *goEngine) spliceFlushUpload(conn *GoConn) {
 			return
 		}
 	}
+	consumed := conn.consumedTail.Load()
+	conn.receiveChain.releaseBelow(consumed)
+	if consumed == conn.receiveAvailable.Load() && (conn.oooRanges == nil || conn.oooRanges.count == 0) {
+		conn.receiveChain.releaseDrained(consumed)
+	}
 	interest := splice.interest &^ goInterestWrite
 	if splice.blocked {
 		interest |= goInterestWrite
@@ -355,6 +373,9 @@ func (e *goEngine) spliceAfterInput(conn *GoConn) {
 }
 
 func (e *goEngine) spliceReadPeer(conn *GoConn) {
+	// Empty speculative reads must not keep the partial tail slab while the
+	// socket is waiting. Unacknowledged and out-of-order data remain retained.
+	defer conn.releaseDrainedSlabs()
 	splice := conn.splice
 	for !splice.downloadClosed {
 		budget := conn.writeBudget(0)
@@ -426,9 +447,6 @@ func (e *goEngine) spliceResume(conn *GoConn) {
 	}
 	splice.readStalled = false
 	e.spliceSetInterest(conn, splice.interest|goInterestRead)
-	if conn.splice != nil {
-		e.spliceReadPeer(conn)
-	}
 }
 
 func (e *goEngine) spliceRetryBlocked(conn *GoConn) {
@@ -470,9 +488,23 @@ func (e *goEngine) spliceMaybeFinish(conn *GoConn) {
 	e.spliceDetach(conn, nil)
 }
 
+type goPacketMessage struct {
+	data          []byte
+	destination   netip.AddrPort
+	segmentSize   int
+	truncated     bool
+	payloadLength int
+}
+
+type goPacketUpload struct {
+	message goPacketMessage
+	next    int
+}
+
 type goSplicePacket struct {
 	writer      *GoPacketConn
 	owner       SpliceSocket
+	original    io.Closer
 	socket      goSocket
 	token       uint32
 	family      uint8
@@ -480,10 +512,13 @@ type goSplicePacket struct {
 	rewritePort bool
 	finished    bool
 	peer        netip.AddrPort
-	origin      netip.AddrPort
-	destination netip.AddrPort
+	origin      M.Socksaddr
+	destination M.Socksaddr
 	direct      map[netip.Addr]struct{}
 	options     SplicePacketOptions
+	uploadHead  int
+	uploadTail  int
+	nextDirty   *goSplicePacket
 }
 
 func (c *UDPNatConn) Splice(owner SpliceSocket, options SplicePacketOptions) bool {
@@ -495,29 +530,42 @@ func (c *UDPNatConn) Splice(owner SpliceSocket, options SplicePacketOptions) boo
 }
 
 func (w *GoPacketConn) spliceTo(owner SpliceSocket, options SplicePacketOptions) bool {
-	if options.NAT.Origin.IsValid() && (!options.NAT.Origin.IsIP() || !options.NAT.Destination.IsIP()) {
+	if options.NAT.Origin.IsValid() && (!options.NAT.Origin.IsIP() || !options.NAT.Destination.IsIP() && options.Offload == nil) {
 		return false
 	}
+	splice := &goSplicePacket{writer: w, owner: owner, options: options, uploadHead: -1, uploadTail: -1}
+	original, attached := owner.Attach(splice)
+	if !attached {
+		return false
+	}
+	splice.original = original
 	socket, err := goSpliceSocket(owner)
 	if err != nil {
+		owner.Detach()
 		w.engine.stack.logger.Debug(E.Cause(err, "go: splice packet connection"))
 		return false
 	}
 	family, err := socket.family()
 	if err != nil {
+		socket.close()
+		owner.Detach()
 		return false
 	}
-	splice := &goSplicePacket{writer: w, owner: owner, socket: socket, family: family, options: options}
+	splice.socket = socket
+	splice.family = family
 	splice.peer, splice.connected = socket.peerAddress()
-	if options.NAT.Origin.IsValid() {
-		splice.origin = options.NAT.Origin.AddrPort()
-		splice.destination = options.NAT.Destination.AddrPort()
-		splice.rewritePort = splice.origin.Port() != splice.destination.Port()
-	}
-	if !owner.Attach(splice) {
+	if options.Offload != nil && !splice.connected {
+		socket.close()
+		owner.Detach()
 		return false
+	}
+	if options.NAT.Origin.IsValid() {
+		splice.origin = options.NAT.Origin
+		splice.destination = options.NAT.Destination
+		splice.rewritePort = splice.origin.Port != splice.destination.Port
 	}
 	if !w.splicePending.CompareAndSwap(nil, splice) {
+		socket.close()
 		owner.Detach()
 		return false
 	}
@@ -527,26 +575,6 @@ func (w *GoPacketConn) spliceTo(owner SpliceSocket, options SplicePacketOptions)
 
 func (s *goSplicePacket) Close() error {
 	s.writer.closeSplice(net.ErrClosed)
-	return nil
-}
-
-func (w *GoPacketConn) closeSplice(err error) {
-	w.spliceCloseError.CompareAndSwap(nil, &goConnError{err: err})
-	w.engine.postMessage(&w.closeMessage)
-}
-
-func (w *GoPacketConn) Close() error {
-	directory := &w.engine.stack.directory
-	if directory.udpFlows != nil {
-		directory.access.Lock()
-		if directory.udpFlows[w.key] == w {
-			delete(directory.udpFlows, w.key)
-		}
-		directory.access.Unlock()
-	}
-	if w.splicePending.Load() != nil || w.spliceActive.Load() {
-		w.closeSplice(io.ErrClosedPipe)
-	}
 	return nil
 }
 
@@ -566,6 +594,13 @@ func (e *goEngine) handlePacketSpliceEngage(w *GoPacketConn) {
 		e.packetSpliceRelease(splice, io.ErrClosedPipe)
 		return
 	}
+	closeError := w.spliceCloseError.Load()
+	if closeError != nil {
+		w.splicePending.Store(nil)
+		e.packetSpliceRelease(splice, closeError.err)
+		natConn.Close()
+		return
+	}
 	if splice.options.Timeout > 0 {
 		current := natConn.Timeout()
 		if !(current > 0 && splice.options.Timeout >= current) && !natConn.SetTimeout(splice.options.Timeout) {
@@ -575,7 +610,13 @@ func (e *goEngine) handlePacketSpliceEngage(w *GoPacketConn) {
 		}
 	}
 	splice.token = e.allocateSpliceToken(nil, w)
-	err := e.platformIO.registerSocket(&splice.socket, splice.token, goInterestRead)
+	var err error
+	if goSpliceDuplicatesSocket {
+		err = splice.original.Close()
+	}
+	if err == nil {
+		err = e.platformIO.registerSocket(&splice.socket, splice.token, goInterestRead)
+	}
 	if err != nil {
 		w.splicePending.Store(nil)
 		e.releaseSpliceToken(splice.token)
@@ -584,13 +625,21 @@ func (e *goEngine) handlePacketSpliceEngage(w *GoPacketConn) {
 		return
 	}
 	w.splice = splice
+	splice.socket.enablePacketOffload()
 	w.spliceActive.Store(true)
 	w.splicePending.Store(nil)
+	readOptions := N.ReadWaitOptions{
+		FrontHeadroom: splice.options.FrontHeadroom,
+		RearHeadroom:  splice.options.RearHeadroom,
+	}
+	e.updatePacketHeadroom(readOptions)
 	cached := splice.options.Cached
 	splice.options.Cached = nil
 	for _, packet := range cached {
 		if w.splice != nil {
-			e.packetSpliceUpload(w, packet.Buffer.Bytes(), packet.Destination)
+			packet.Buffer = readOptions.Copy(packet.Buffer)
+			e.packetSpliceUpload(w, packet.Buffer, packet.Destination)
+			e.flushPacketUploads()
 		}
 		packet.Buffer.Release()
 		N.PutPacketBuffer(packet)
@@ -598,7 +647,9 @@ func (e *goEngine) handlePacketSpliceEngage(w *GoPacketConn) {
 	for w.splice != nil {
 		select {
 		case packet := <-natConn.packetChan:
-			e.packetSpliceUpload(w, packet.Buffer.Bytes(), packet.Destination)
+			packet.Buffer = readOptions.Copy(packet.Buffer)
+			e.packetSpliceUpload(w, packet.Buffer, packet.Destination)
+			e.flushPacketUploads()
 			packet.Buffer.Release()
 			N.PutPacketBuffer(packet)
 		default:
@@ -612,7 +663,9 @@ func (e *goEngine) packetSpliceRelease(splice *goSplicePacket, err error) {
 	splice.finished = true
 	N.ReleaseMultiPacketBuffer(splice.options.Cached)
 	splice.options.Cached = nil
+	splice.socket.close()
 	splice.owner.Detach()
+	splice.owner.Close()
 	if splice.options.OnClose != nil {
 		splice.options.OnClose(err)
 	}
@@ -673,114 +726,240 @@ func (e *goEngine) closeAllPacketSplices() {
 	}
 }
 
-func (s *goSplicePacket) mapUpload(destination netip.AddrPort) netip.AddrPort {
-	if s.origin.IsValid() && destination.Addr() == s.origin.Addr() {
+func (s *goSplicePacket) mapUpload(destination M.Socksaddr) M.Socksaddr {
+	if s.origin.IsValid() && destination.Addr == s.origin.Addr {
 		if !s.rewritePort {
-			return netip.AddrPortFrom(s.destination.Addr(), destination.Port())
+			return M.Socksaddr{Addr: s.destination.Addr, Fqdn: s.destination.Fqdn, Port: destination.Port}
 		}
-		if destination.Port() == s.origin.Port() {
+		if destination.Port == s.origin.Port {
 			return s.destination
 		}
 	}
-	if s.options.NAT.FakeIP && destination.Addr().IsValid() {
+	if s.options.NAT.FakeIP && destination.IsIP() {
 		if s.direct == nil {
 			s.direct = make(map[netip.Addr]struct{})
 		}
-		s.direct[destination.Addr()] = struct{}{}
+		s.direct[destination.Addr] = struct{}{}
 	}
 	return destination
 }
 
-func (s *goSplicePacket) mapDownload(source netip.AddrPort) netip.AddrPort {
+func (s *goSplicePacket) mapDownload(source M.Socksaddr) M.Socksaddr {
 	if s.options.NAT.Unidirectional {
 		return source
 	}
-	if s.origin.IsValid() && source.Addr() == s.destination.Addr() {
+	if s.origin.IsValid() && source.Addr == s.destination.Addr && (s.destination.IsIP() || source.Fqdn == s.destination.Fqdn) {
 		if !s.rewritePort {
-			return netip.AddrPortFrom(s.origin.Addr(), source.Port())
+			return M.Socksaddr{Addr: s.origin.Addr, Port: source.Port}
 		}
-		if source.Port() == s.destination.Port() {
+		if source.Port == s.destination.Port {
 			return s.origin
 		}
 	}
 	if s.options.NAT.FakeIP {
-		_, direct := s.direct[source.Addr()]
+		_, direct := s.direct[source.Addr]
 		if !direct {
-			return netip.AddrPortFrom(s.origin.Addr(), source.Port())
+			return M.Socksaddr{Addr: s.origin.Addr, Port: source.Port}
 		}
 	}
 	return source
 }
 
-func (e *goEngine) packetSpliceUpload(w *GoPacketConn, payload []byte, destination M.Socksaddr) {
+func (e *goEngine) packetSpliceUpload(w *GoPacketConn, buffer *buf.Buffer, destination M.Socksaddr) {
 	splice := w.splice
-	target := splice.mapUpload(destination.AddrPort())
-	var errno syscall.Errno
-	if splice.connected {
-		_, errno = splice.socket.write(payload)
-	} else {
-		errno = splice.socket.sendTo(payload, target, splice.family)
-	}
-	if errno != 0 {
-		if goSocketWouldBlock(errno) || goSocketDropped(errno) {
+	target := splice.mapUpload(destination)
+	payloadLength := buffer.Len()
+	if splice.options.Offload != nil {
+		err := splice.options.Offload.EncodePacket(buffer, target)
+		if err != nil {
+			e.packetSpliceClose(w, E.Cause(err, "go: encode packet"))
 			return
 		}
-		e.packetSpliceClose(w, E.Cause(errno, "go: send peer"))
+	}
+	e.queuePacketUpload(splice, buffer.Bytes(), target.AddrPort(), payloadLength)
+}
+
+func (e *goEngine) updatePacketHeadroom(options N.ReadWaitOptions) {
+	previous := *e.packetReadOptions.Load()
+	options.FrontHeadroom = max(previous.FrontHeadroom, options.FrontHeadroom-header.IPv4MinimumSize-header.UDPMinimumSize)
+	options.RearHeadroom = max(previous.RearHeadroom, options.RearHeadroom)
+	if options == previous {
 		return
 	}
-	goCount(splice.options.ReadCounters, len(payload))
-}
-
-func (e *goEngine) handlePacketEvent(w *GoPacketConn, event goSocketEvent) {
-	if event.readable && w.splice != nil {
-		e.packetSpliceRead(w)
+	e.flushPacketUploads()
+	for index := range e.reassemblyEntries {
+		entry := &e.reassemblyEntries[index]
+		if !entry.active {
+			continue
+		}
+		buffer := buf.NewSize(options.FrontHeadroom + goReassemblyCapacity + options.RearHeadroom)
+		copy(buffer.FreeBytes()[options.FrontHeadroom:], entry.buffer.Range(entry.headroom-goReassemblyHeadroom, entry.headroom+65535))
+		entry.buffer.Release()
+		entry.buffer = buffer
+		entry.headroom = options.FrontHeadroom + goReassemblyHeadroom
 	}
-}
-
-func (e *goEngine) packetReceiveBuffer() *buf.Buffer {
-	if e.packetReceive == nil {
-		headroom := e.platformIO.transmitPrefix() + header.IPv6MinimumSize + header.UDPMinimumSize
-		e.packetReceive = buf.With(make([]byte, headroom+0xffff))
-	}
-	return e.packetReceive
+	clear(e.frames)
+	e.udpUserData.packet = nil
+	e.packetReadOptions.Store(&options)
 }
 
 func (e *goEngine) packetSpliceRead(w *GoPacketConn) {
 	splice := w.splice
 	natConn := w.conn.Load()
-	buffer := e.packetReceiveBuffer()
-	headroom := e.platformIO.transmitPrefix() + header.IPv6MinimumSize + header.UDPMinimumSize
-	for range goSplicePacketBurst {
-		buffer.Resize(headroom, 0)
-		n, source, errno := splice.socket.receiveFrom(buffer.FreeBytes())
-		if errno != 0 {
-			if goSocketWouldBlock(errno) {
-				return
-			}
-			e.packetSpliceClose(w, E.Cause(errno, "go: receive peer"))
-			return
+	batchSize := e.packetReceiveBatch
+	for index := range batchSize {
+		buffer := e.packetReceiveBuffers[index]
+		if buffer == nil {
+			buffer = buf.NewSize(65535)
+			e.packetReceiveBuffers[index] = buffer
 		}
-		buffer.Truncate(n)
-		if !source.IsValid() {
-			source = splice.peer
+		buffer.Reset()
+		e.packetMessages[index] = goPacketMessage{data: buffer.FreeBytes()}
+	}
+	count, errno := e.packetIO.receive(&splice.socket, e.packetMessages[:batchSize], splice.connected)
+	if count == batchSize {
+		e.packetReceiveBatch = min(batchSize*2, goPacketBatchSize)
+	} else if count*2 < batchSize {
+		e.packetReceiveBatch = max(batchSize/2, goReceiveBatchMin)
+	}
+	defer func() {
+		e.flushPacketFrames()
+		clear(e.packetMessages[:])
+		if errno != 0 && !goSocketWouldBlock(errno) && w.splice != nil {
+			e.packetSpliceClose(w, E.Cause(errno, "go: receive peer batch"))
 		}
-		destination := M.SocksaddrFromNetIP(splice.mapDownload(source))
-		if !natConn.allowPeer(destination) {
+	}()
+	for index := range count {
+		message := e.packetMessages[index]
+		if message.truncated {
 			continue
 		}
-		goCount(splice.options.WriteCounters, n)
-		err := w.transmit(buffer, destination)
-		if err != nil {
-			e.stack.logger.Trace(E.Cause(err, "go: write spliced packet"))
+		buffer := e.packetReceiveBuffers[index]
+		offset := 0
+		for {
+			length := len(message.data) - offset
+			if message.segmentSize > 0 {
+				length = min(length, message.segmentSize)
+			}
+			buffer.Resize(offset, length)
+			var destination M.Socksaddr
+			if splice.options.Offload != nil {
+				packetSource, err := splice.options.Offload.DecodePacket(buffer)
+				if err != nil {
+					e.packetSpliceClose(w, E.Cause(err, "go: decode packet"))
+					return
+				}
+				destination = splice.mapDownload(packetSource.Unwrap())
+			} else {
+				source := message.destination
+				if !source.IsValid() {
+					source = splice.peer
+				}
+				destination = splice.mapDownload(M.SocksaddrFromNetIP(source))
+			}
+			if destination.IsIP() && natConn.allowPeer(destination) {
+				goCount(splice.options.WriteCounters, buffer.Len())
+				e.packetSpliceDownload(w, buffer.Bytes(), destination)
+			}
+			offset += length
+			if offset == len(message.data) {
+				break
+			}
 		}
 	}
 }
 
-func (e *goEngine) reclaimPacketReceive() {
-	for index := range e.spliceSlots {
-		if e.spliceSlots[index].packet != nil {
+func (e *goEngine) flushPacketUploads() {
+	for e.packetDirtyList != nil {
+		splice := e.packetDirtyList
+		e.packetDirtyList = splice.nextDirty
+		splice.nextDirty = nil
+		count := 0
+		for index := splice.uploadHead; index >= 0; index = e.packetUploads[index].next {
+			upload := &e.packetUploads[index]
+			e.packetMessages[count] = upload.message
+			count++
+		}
+		splice.uploadHead = -1
+		splice.uploadTail = -1
+		if !splice.finished {
+			sent, errno := e.packetIO.send(&splice.socket, e.packetMessages[:count], splice.connected, splice.family)
+			length := 0
+			for index := range sent {
+				length += e.packetMessages[index].payloadLength
+			}
+			goCount(splice.options.ReadCounters, length)
+			if errno != 0 && !goSocketWouldBlock(errno) && !goSocketDropped(errno) {
+				e.packetSpliceClose(splice.writer, E.Cause(errno, "go: send peer batch"))
+			}
+		}
+		clear(e.packetMessages[:count])
+	}
+	clear(e.packetUploads[:e.packetUploadCount])
+	e.packetUploadCount = 0
+}
+
+func (e *goEngine) queuePacketUpload(splice *goSplicePacket, data []byte, destination netip.AddrPort, length int) {
+	if e.packetUploadCount == len(e.packetUploads) {
+		e.flushPacketUploads()
+		if splice.finished {
 			return
 		}
 	}
-	e.packetReceive = nil
+	index := e.packetUploadCount
+	e.packetUploadCount++
+	e.packetUploads[index] = goPacketUpload{
+		message: goPacketMessage{data: data, destination: destination, payloadLength: length},
+		next:    -1,
+	}
+	if splice.uploadHead < 0 {
+		splice.uploadHead = index
+		splice.nextDirty = e.packetDirtyList
+		e.packetDirtyList = splice
+	} else {
+		e.packetUploads[splice.uploadTail].next = index
+	}
+	splice.uploadTail = index
+}
+
+func (e *goEngine) flushPacketFrames() {
+	if e.packetFrameCount == 0 {
+		return
+	}
+	err := e.platformIO.writePacketBatch(e.packetFrames[:e.packetFrameCount])
+	if err != nil && err != errGoFrameDropped {
+		e.stack.logger.Trace(E.Cause(err, "go: write packet batch"))
+	}
+	clear(e.packetFrames[:e.packetFrameCount])
+	e.packetFrameCount = 0
+}
+
+func (e *goEngine) packetSpliceDownload(w *GoPacketConn, data []byte, destination M.Socksaddr) {
+	if len(data)+w.templateLength > w.mtu {
+		e.flushPacketFrames()
+		buffer := buf.NewSize(w.FrontHeadroom() + len(data))
+		buffer.Resize(w.FrontHeadroom(), 0)
+		copy(buffer.Extend(len(data)), data)
+		err := w.transmit(buffer, destination)
+		buffer.Release()
+		if err != nil {
+			e.stack.logger.Trace(E.Cause(err, "go: write fragmented packet"))
+		}
+		return
+	}
+	frame := &e.packetFrames[e.packetFrameCount]
+	meta, err := w.preparePacketHeader(frame.header[:], data, destination, w.checksumOffload)
+	if err != nil {
+		if err != errGoFrameDropped {
+			e.stack.logger.Trace(err)
+		}
+		return
+	}
+	frame.length = w.templateLength
+	frame.payload = data
+	frame.meta = meta
+	e.packetFrameCount++
+	if e.packetFrameCount == len(e.packetFrames) {
+		e.flushPacketFrames()
+	}
 }

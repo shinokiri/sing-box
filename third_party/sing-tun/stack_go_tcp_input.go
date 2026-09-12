@@ -346,7 +346,7 @@ func (c *GoConn) recordDuplicate(start int64, end int64) {
 	case uint64(end) <= c.receiveNext:
 	case uint64(start) < c.receiveNext:
 		end = int64(c.receiveNext)
-	case c.oooRanges.covers(uint64(start), uint64(end)):
+	case c.oooRanges != nil && c.oooRanges.covers(uint64(start), uint64(end)):
 	default:
 		return
 	}
@@ -376,7 +376,7 @@ func (c *GoConn) segmentAcceptable(segOffset int64, segmentLength int64) bool {
 }
 
 func (e *goEngine) processAck(conn *GoConn, tcpHdr header.TCP, segOffset int64, payloadLength int, flags header.TCPFlags, timestampEcho uint32, hasTimestamp bool) bool {
-	e.syncScoreboard(conn)
+	conn.scoreboard.drain(&conn.descriptors, conn.sendUnacked.Load())
 	ackOffset := conn.sendOffset(tcpHdr.AckNumber())
 	limit := int64(conn.sentTail.Load())
 	if conn.finSent {
@@ -444,15 +444,9 @@ func (e *goEngine) processAck(conn *GoConn, tcpHdr header.TCP, segOffset int64, 
 		}
 	}
 	e.updatePersist(conn)
+	conn.releaseIdleDescriptors()
 	conn.publishPermit(uint64(ackOffset))
 	return true
-}
-
-func (e *goEngine) syncScoreboard(conn *GoConn) {
-	if conn.scoreboard.entries == nil {
-		conn.scoreboard.entries = e.descriptorPool.acquire()[:0]
-	}
-	conn.scoreboard.drain(&conn.descriptors, conn.sendUnacked.Load())
 }
 
 func (e *goEngine) establishConn(conn *GoConn) {
@@ -918,12 +912,30 @@ func (c *GoConn) releaseTransmitted(unacked uint64) {
 		return
 	}
 	c.transmitStore.releaseBelow(edge)
+	if edge == c.bufferedTail.Load() {
+		c.transmitStore.releaseDrained(edge)
+	}
 	c.sendReleased.Store(edge)
+}
+
+func (c *GoConn) releaseIdleDescriptors() {
+	if len(c.scoreboard.entries) != 0 || !c.transmitOwner.CompareAndSwap(0, 1) {
+		return
+	}
+	if c.sendUnacked.Load() == c.sentTail.Load() && !c.blockedValid {
+		c.descriptors.release()
+	}
+	c.transmitOwner.Store(0)
+	// A writer can publish data while we own the transmitter. Resume it if its
+	// attempt to transmit raced with this cleanup.
+	if c.nextTransmitLength() != 0 {
+		c.wakeTransmitter()
+	}
 }
 
 func (c *GoConn) releaseDrainedSlabs() {
 	consumed := c.consumedTail.Load()
-	if consumed == c.receiveAvailable.Load() && c.oooRanges.count == 0 {
+	if consumed == c.receiveAvailable.Load() && (c.oooRanges == nil || c.oooRanges.count == 0) {
 		c.receiveChain.releaseDrained(consumed)
 	}
 	buffered := c.bufferedTail.Load()
@@ -958,18 +970,14 @@ func (c *GoConn) wakeWriter() {
 }
 
 func (c *GoConn) signalWriter() {
-	select {
-	case c.writeSignal <- struct{}{}:
+	if c.writeSignal.notify() {
 		c.engine.wokeHandlerThisBurst = true
-	default:
 	}
 }
 
 func (c *GoConn) signalReader() {
-	select {
-	case c.readSignal <- struct{}{}:
+	if c.readSignal.notify() {
 		c.engine.wokeHandlerThisBurst = true
-	default:
 	}
 }
 
@@ -1005,6 +1013,9 @@ func (e *goEngine) deliverSegment(conn *GoConn, segOffset int64, payload []byte,
 	if conn.discardReceive {
 		e.markAck(conn, true)
 		return
+	}
+	if conn.oooRanges == nil {
+		conn.oooRanges = new(goRangeSet)
 	}
 	if conn.oooRanges.bytes()+uint64(len(data)) > conn.receiveCapacity {
 		e.markAck(conn, true)
@@ -1057,6 +1068,9 @@ func (e *goEngine) deliverInOrder(conn *GoConn, data []byte) {
 }
 
 func (e *goEngine) mergeOutOfOrder(conn *GoConn) {
+	if conn.oooRanges == nil {
+		return
+	}
 	for {
 		front, ok := conn.oooRanges.first()
 		if !ok || front.start > conn.receiveNext {
@@ -1219,10 +1233,6 @@ func (e *goEngine) markAck(conn *GoConn, forced bool) {
 	e.ackList = conn
 }
 
-func (e *goEngine) flushAcks() {
-	e.drainAckList(e.now(), true)
-}
-
 func (e *goEngine) expireDelayedAckTick(now int64) {
 	e.drainAckList(now, false)
 }
@@ -1258,13 +1268,15 @@ func (e *goEngine) sendAck(conn *GoConn) bool {
 	conn.publishReceiveWindow()
 
 	segment := goSegment{offset: conn.sendNext(), flags: header.TCPFlagAck}
-	if conn.sackPermitted && (conn.dsackEnd != 0 || conn.oooRanges.count > 0) {
+	if conn.sackPermitted && (conn.dsackEnd != 0 || conn.oooRanges != nil && conn.oooRanges.count > 0) {
 		count := 0
 		if conn.dsackEnd != 0 {
 			e.sackScratch[0] = goSackBlock{start: conn.dsackStart, end: conn.dsackEnd}
 			count = 1
 		}
-		count = conn.oooRanges.blocks(&e.sackScratch, count)
+		if conn.oooRanges != nil {
+			count = conn.oooRanges.blocks(&e.sackScratch, count)
+		}
 		segment.sackBlocks = e.sackScratch[:count]
 	}
 	if !e.writeConnControl(conn, &segment) {
@@ -1347,7 +1359,7 @@ func (e *goEngine) handleReadShut(conn *GoConn) {
 		return
 	}
 	conn.discardReceive = true
-	conn.oooRanges.reset()
+	conn.oooRanges = nil
 	if conn.readAccess.TryLock() {
 		conn.consumedTail.Store(conn.receiveAvailable.Load())
 		conn.readAccess.Unlock()
@@ -1381,7 +1393,7 @@ func (e *goEngine) handleDroppedFrames(conn *GoConn) {
 	if conn.connState.Load() >= goConnStateAborted {
 		return
 	}
-	e.syncScoreboard(conn)
+	conn.scoreboard.drain(&conn.descriptors, conn.sendUnacked.Load())
 	unacked := conn.sendUnacked.Load()
 	start := unacked
 	for index := range conn.scoreboard.entries {
@@ -1399,7 +1411,7 @@ func (e *goEngine) handleDroppedFrames(conn *GoConn) {
 
 func (e *goEngine) handleTransmitBlocked(conn *GoConn) {
 	if conn.connState.Load() >= goConnStateAborted {
-		conn.signalTransmitter()
+		conn.transmitSignal.notify()
 		return
 	}
 	if !conn.onBlockedList {
@@ -1426,7 +1438,7 @@ func (e *goEngine) releaseBlockedWriters() {
 		if conn.splice != nil {
 			e.spliceRetryBlocked(conn)
 		} else {
-			conn.signalTransmitter()
+			conn.transmitSignal.notify()
 			e.wokeHandlerThisBurst = true
 		}
 		conn = next
@@ -1594,7 +1606,7 @@ func (e *goEngine) expireProbe(conn *GoConn, now int64) {
 		return
 	}
 	conn.probeAttempts++
-	e.syncScoreboard(conn)
+	conn.scoreboard.drain(&conn.descriptors, conn.sendUnacked.Load())
 	switch {
 	case sent > unacked:
 		offset := unacked
@@ -1631,7 +1643,7 @@ func (e *goEngine) expireRetransmit(conn *GoConn, now int64) {
 		e.detachConn(conn, E.Cause(syscall.ETIMEDOUT, "go: retransmit limit"), goDeathImmediate)
 		return
 	}
-	e.syncScoreboard(conn)
+	conn.scoreboard.drain(&conn.descriptors, conn.sendUnacked.Load())
 	unacked := conn.sendUnacked.Load()
 	sent := conn.sentTail.Load()
 	recovering := conn.inRecovery || (conn.retransmitPoint > unacked && conn.frtoState != goFRTOAwaitFirstAck)
@@ -1827,7 +1839,7 @@ func (e *goEngine) detachConn(conn *GoConn, err error, class uint8) {
 		e.dyingList = conn
 	}
 	if conn.onBlockedList {
-		conn.signalTransmitter()
+		conn.transmitSignal.notify()
 	}
 	conn.wakeUser()
 	e.wokeHandlerThisBurst = true
@@ -1864,7 +1876,7 @@ func (e *goEngine) reapDying() {
 		next := conn.dyingNext
 		conn.dyingNext = nil
 		if conn.reclaimable() {
-			conn.releaseResources(e)
+			conn.releaseResources()
 			conn.onDyingList = false
 		} else {
 			if now-conn.dyingSince > int64(goDyingLeakTimeout) {
@@ -1894,18 +1906,12 @@ func (c *GoConn) reclaimable() bool {
 	return true
 }
 
-func (c *GoConn) releaseResources(engine *goEngine) {
+func (c *GoConn) releaseResources() {
 	c.receiveChain.releaseAll()
 	c.transmitStore.releaseAll()
-	c.oooRanges.reset()
-	if c.descriptors.entries != nil {
-		engine.descriptorPool.release(c.descriptors.entries)
-		c.descriptors.entries = nil
-	}
-	if c.scoreboard.entries != nil {
-		engine.descriptorPool.release(c.scoreboard.entries[:cap(c.scoreboard.entries)])
-		c.scoreboard.entries = nil
-	}
+	c.oooRanges = nil
+	c.descriptors.release()
+	c.scoreboard.reset()
 	if c.receiveTarget.buffer != nil {
 		c.receiveTarget.buffer.Release()
 		c.receiveTarget.buffer = nil
@@ -1938,6 +1944,7 @@ func (e *goEngine) expireSweepTick(now int64) {
 		conn.receiveChain.releaseBelow(conn.consumedTail.Load())
 		conn.releaseTransmitted(conn.sendUnacked.Load())
 		conn.releaseDrainedSlabs()
+		conn.releaseIdleDescriptors()
 		conn.wakeWriter()
 		e.maybeSendFin(conn)
 		e.updatePersist(conn)
@@ -1985,10 +1992,10 @@ func (e *goEngine) expireReclaimTick(now int64) {
 func (e *goEngine) reclaim() {
 	e.slabPool.trim()
 	e.descriptorPool.trim()
-	e.reclaimPacketReceive()
 	for index := range e.reassemblyEntries {
 		entry := &e.reassemblyEntries[index]
 		if !entry.active {
+			entry.buffer.Release()
 			entry.buffer = nil
 		}
 	}

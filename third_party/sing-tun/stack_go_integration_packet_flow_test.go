@@ -47,7 +47,11 @@ func TestGoKernelPacketFragments(t *testing.T) {
 									return
 								}
 								client.SetReadDeadline(time.Now().Add(time.Second))
-								err := conn.WritePacket(buf.As(payload), destination)
+								options := N.NewReadWaitOptions(nil, conn)
+								buffer := options.NewBufferSize(len(payload))
+								_, _ = buffer.Write(payload)
+								options.PostReturn(buffer)
+								err := conn.WritePacket(buffer, destination)
 								if err != nil {
 									test.Error(err)
 									return
@@ -144,6 +148,7 @@ func TestGoKernelPacketRead(t *testing.T) {
 						test.Fatal("queued datagrams were never read as a batch")
 					}
 				}
+				options := N.NewReadWaitOptions(nil, conn)
 				writer := bufio.NewPacketBatchWriter(conn)
 				var buffers []*buf.Buffer
 				var destinations []M.Socksaddr
@@ -151,7 +156,10 @@ func TestGoKernelPacketRead(t *testing.T) {
 				for index, size := range []int{0, 1, 1453, 8193} {
 					payload := kernelPayload(size, uint32(211+index))
 					expected[string(payload)] = true
-					buffers = append(buffers, buf.As(payload))
+					buffer := options.NewBufferSize(len(payload))
+					_, _ = buffer.Write(payload)
+					options.PostReturn(buffer)
+					buffers = append(buffers, buffer)
 					destinations = append(destinations, destination)
 				}
 				err := writer.WritePacketBatch(buffers, destinations)
@@ -252,7 +260,11 @@ func TestGoKernelPacketMapping(t *testing.T) {
 									allowed = true
 								}
 								payload := []byte{byte(index + 31)}
-								err = first.WritePacket(buf.As(payload), peer)
+								options := N.NewReadWaitOptions(nil, first)
+								buffer := options.NewBufferSize(len(payload))
+								_, _ = buffer.Write(payload)
+								options.PostReturn(buffer)
+								err = first.WritePacket(buffer, peer)
 								if err != nil {
 									test.Fatal(err)
 								}
