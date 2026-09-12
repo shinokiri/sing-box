@@ -98,6 +98,7 @@ def publish():
     notes.write_text(
         f"基于上游 [testing `{state['upstream_commit'][:7]}`](https://github.com/{UPSTREAM}/commit/{state['upstream_commit']}) 的开发快照，包含现有 UDP flow 修复。\n\n"
         "Android 16+（API 36）ARM64 签名 APK，沿用本仓库签名；versionCode 递增，可覆盖安装。此 Release 标记为预发布，客户端可选择测试更新通道。\n\n"
+        "修复 FakeIP 元数据缺失时的缓存重置、跨写缓冲层的正反向映射错配，以及地址重分配时误删已迁移域名的问题。真正的存储重置错误会阻止启动，避免继续使用不一致映射。\n\n"
         "已迁移本地 sing-tun / sing-mux 补丁，并适配上游新增的默认 Go TUN 栈。发布流程执行核心测试、两套竞态检查、转发基准、客户端更新测试，以及 APK 签名、ABI、版本、最低 API 和 16 KB 对齐检查。\n\n"
         f"Core: `{state['commit']}`\n\nAndroid client: `{state['android_client_commit']}`（含本仓库更新补丁）\n\n"
         "这是上游 testing 开发版本。Android 真机切网、长期运行、RTT 和耗电尚未实测。\n"

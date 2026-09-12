@@ -71,17 +71,20 @@ jobs:
       - name: Vet all core packages
         # The daemon/libbox debug crash hooks intentionally dereference zero.
         run: go vet -unsafeptr=false -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" ./...
+      - name: Race tests for FakeIP recovery and buffered writes
+        run: go test -race -count=3 ./experimental/cachefile ./dns/transport/fakeip
       - name: Test the Go TUN stack against the Linux kernel
         run: go test -exec sudo -tags with_gvisor github.com/sagernet/sing-tun
       - name: Race tests with the Android gRPC implementation
         run: go test -race -exec sudo -skip '^TestGoKernel' -tags with_gvisor,with_quic -count=1 ./route ./common/udpflow ./protocol/group ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux github.com/sagernet/sing-tun
       - name: Race tests with full gRPC
         run: go test -race -exec sudo -skip '^TestGoKernel' -tags with_gvisor,with_grpc,with_quic -count=1 ./route ./common/udpflow ./protocol/group ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-tun
-      - name: Measure UDP forwarding allocations, throughput and dispatcher latency
+      - name: Measure UDP forwarding and FakeIP cache lookups
         run: |
           set -o pipefail
           go test -tags with_gvisor -run '^$' -bench '^Benchmark(Port|Dispatcher)Forward$' -benchmem ./common/udpflow | tee "$RUNNER_TEMP/udpflow-bench.txt"
           go test -run '^$' -bench '^BenchmarkUDPMappingHistory$' -benchmem github.com/sagernet/sing-tun | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
+          go test -run '^$' -bench '^BenchmarkFakeIPLoadDomain$' -benchmem ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           {
             echo '```text'
             cat "$RUNNER_TEMP/udpflow-bench.txt"
