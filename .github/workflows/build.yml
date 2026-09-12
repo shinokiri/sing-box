@@ -85,6 +85,7 @@ jobs:
           go test -tags with_gvisor -run '^$' -bench '^Benchmark(Port|Dispatcher)Forward$' -benchmem ./common/udpflow | tee "$RUNNER_TEMP/udpflow-bench.txt"
           go test -run '^$' -bench '^BenchmarkUDPMappingHistory$' -benchmem github.com/sagernet/sing-tun | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           go test -run '^$' -bench '^BenchmarkFakeIPLoadDomain$' -benchmem ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
+          go test -run '^$' -bench '^BenchmarkFakeIPMixed$' -benchmem -cpu=4 ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           {
             echo '```text'
             cat "$RUNNER_TEMP/udpflow-bench.txt"

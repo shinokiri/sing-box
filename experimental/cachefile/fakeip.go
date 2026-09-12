@@ -155,33 +155,61 @@ func (p *pendingWrites) fakeIPAddress(domain string, isIPv6 bool) (netip.Addr, b
 
 func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bool) {
 	c.pendingAccess.RLock()
-	address, cached := c.pending.fakeIPAddress(domain, isIPv6)
-	if !cached && c.writing != nil {
-		address, cached = c.writing.fakeIPAddress(domain, isIPv6)
+	if address, cached := c.pending.fakeIPAddress(domain, isIPv6); cached {
+		c.pendingAccess.RUnlock()
+		return address, true
 	}
+	if c.writing != nil {
+		if address, cached := c.writing.fakeIPAddress(domain, isIPv6); cached {
+			currentDomain, overridden := c.pending.fakeIPDomain[address]
+			c.pendingAccess.RUnlock()
+			if overridden && currentDomain != domain {
+				return netip.Addr{}, false
+			}
+			return address, true
+		}
+	}
+	// Retain the batch identities, but do not hold the pending lock while
+	// waiting for the database. This keeps unrelated buffered writes moving.
+	pending, writing := c.pending, c.writing
 	c.pendingAccess.RUnlock()
-	if !cached {
-		_ = c.view(func(tx *bbolt.Tx) error {
-			var bucket *bbolt.Bucket
-			if isIPv6 {
-				bucket = tx.Bucket(bucketFakeIPDomain6)
-			} else {
-				bucket = tx.Bucket(bucketFakeIPDomain4)
-			}
-			if bucket == nil {
-				return nil
-			}
-			address = M.AddrFromIP(bucket.Get([]byte(domain)))
+	var address netip.Addr
+	err := c.view(func(tx *bbolt.Tx) error {
+		var bucket *bbolt.Bucket
+		if isIPv6 {
+			bucket = tx.Bucket(bucketFakeIPDomain6)
+		} else {
+			bucket = tx.Bucket(bucketFakeIPDomain4)
+		}
+		if bucket == nil {
 			return nil
-		})
-	}
-	if !address.IsValid() {
+		}
+		address = M.AddrFromIP(bucket.Get([]byte(domain)))
+		return nil
+	})
+	if err != nil || !address.IsValid() {
 		return netip.Addr{}, false
 	}
-	// A newer buffered mapping may have reassigned an address whose older
-	// forward mapping still exists in the writing batch or on disk.
-	if currentDomain, loaded := c.FakeIPLoad(address); !loaded || currentDomain != domain {
-		return netip.Addr{}, false
+	c.pendingAccess.RLock()
+	currentDomain, overridden := c.pending.fakeIPDomain[address]
+	if !overridden && c.writing != nil {
+		currentDomain, overridden = c.writing.fakeIPDomain[address]
+	}
+	stable := pending == c.pending && writing == c.writing
+	c.pendingAccess.RUnlock()
+	if overridden {
+		if currentDomain != domain {
+			return netip.Addr{}, false
+		}
+		return address, true
+	}
+	if !stable {
+		// A completed flush may have retired an overriding batch while the
+		// read transaction still saw old data. Validate against the current
+		// reverse mapping only in that case; ordinary disk hits use one read.
+		if currentDomain, loaded := c.FakeIPLoad(address); !loaded || currentDomain != domain {
+			return netip.Addr{}, false
+		}
 	}
 	return address, true
 }

@@ -109,9 +109,11 @@ func BenchmarkFakeIPLoadDomain(b *testing.B) {
 			b.Run(fmt.Sprintf("%s/%d", layer, count), func(b *testing.B) {
 				cache := newFakeIPTestCache(b)
 				domains := make([]string, count)
+				addresses := make([]netip.Addr, count)
 				address := netip.MustParseAddr("198.18.0.2")
 				for index := range domains {
 					domains[index] = fmt.Sprintf("host-%d.example", index)
+					addresses[index] = address
 					cache.FakeIPStoreAsync(address, domains[index], logger.NOP())
 					address = address.Next()
 				}
@@ -124,14 +126,17 @@ func BenchmarkFakeIPLoadDomain(b *testing.B) {
 				case "disk":
 					cache.Flush()
 				}
+				transactions := cache.DB.Stats().TxN
 				b.ReportAllocs()
 				index := 0
 				for b.Loop() {
-					if _, found := cache.FakeIPLoadDomain(domains[index&(count-1)], false); !found {
-						b.Fatal("valid mapping was not found")
+					entry := index & (count - 1)
+					if got, found := cache.FakeIPLoadDomain(domains[entry], false); !found || got != addresses[entry] {
+						b.Fatalf("lookup %q = %v, %v; want %v", domains[entry], got, found, addresses[entry])
 					}
 					index++
 				}
+				b.ReportMetric(float64(cache.DB.Stats().TxN-transactions)/float64(b.N), "read-tx/op")
 			})
 		}
 	}
