@@ -91,6 +91,8 @@ jobs:
           go test -run '^$' -bench '^BenchmarkFakeIPAdmin$' -benchtime=20x -benchmem ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           go test -run '^$' -bench '^BenchmarkFakeIPMiss$' -benchmem ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           go test -run '^$' -bench '^BenchmarkFakeIPCreateBeforeFirstFlush$' -benchtime=4096x -benchmem -cpu=1 ./dns/transport/fakeip | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
+          go test -run '^$' -bench '^BenchmarkFakeIPWriteTransaction$' -benchtime=250ms -benchmem -cpu=1 ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
+          go test -run '^$' -bench '^BenchmarkFakeIPFlush(Fresh)?$' -benchtime=15x -benchmem -cpu=1 ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           {
             echo '```text'
             cat "$RUNNER_TEMP/udpflow-bench.txt"

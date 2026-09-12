@@ -95,8 +95,16 @@ func (c *CacheFile) queueFakeIP(address netip.Addr, domain string) {
 	c.enqueueLocked(!loaded, len(domain)-len(oldDomain))
 }
 
+// Reuse the write transaction's bucket cache before the create path clones name.
+func fakeIPBucket(tx *bbolt.Tx, name []byte) (*bbolt.Bucket, error) {
+	if bucket := tx.Bucket(name); bucket != nil {
+		return bucket, nil
+	}
+	return tx.CreateBucketIfNotExists(name)
+}
+
 func putFakeIP(tx *bbolt.Tx, address netip.Addr, domain string) error {
-	bucket, err := tx.CreateBucketIfNotExists(bucketFakeIP)
+	bucket, err := fakeIPBucket(tx, bucketFakeIP)
 	if err != nil {
 		return err
 	}
@@ -107,9 +115,9 @@ func putFakeIP(tx *bbolt.Tx, address netip.Addr, domain string) error {
 		return err
 	}
 	if address.Is4() {
-		bucket, err = tx.CreateBucketIfNotExists(bucketFakeIPDomain4)
+		bucket, err = fakeIPBucket(tx, bucketFakeIPDomain4)
 	} else {
-		bucket, err = tx.CreateBucketIfNotExists(bucketFakeIPDomain6)
+		bucket, err = fakeIPBucket(tx, bucketFakeIPDomain6)
 	}
 	if err != nil {
 		return err
