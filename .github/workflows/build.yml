@@ -73,6 +73,8 @@ jobs:
         run: go vet -unsafeptr=false -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" ./...
       - name: Race tests for FakeIP recovery and buffered writes
         run: go test -race -count=3 ./experimental/cachefile ./dns/transport/fakeip
+      - name: Race tests for FakeIP reset interleavings
+        run: python3 .github/check_fakeip_interleavings.py --race --count=3
       - name: Test the Go TUN stack against the Linux kernel
         run: go test -exec sudo -tags with_gvisor github.com/sagernet/sing-tun
       - name: Race tests with the Android gRPC implementation

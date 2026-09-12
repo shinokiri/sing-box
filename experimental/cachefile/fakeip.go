@@ -218,6 +218,23 @@ func (c *CacheFile) FakeIPReset() error {
 	c.flushAccess.Lock()
 	defer c.flushAccess.Unlock()
 	c.pendingAccess.Lock()
+	defer c.pendingAccess.Unlock()
+	// Keep reset atomic with respect to buffered readers and writers, and
+	// preserve pending entries if clearing the database fails.
+	err := c.batch(func(tx *bbolt.Tx) error {
+		for _, name := range [][]byte{bucketFakeIP, bucketFakeIPDomain4, bucketFakeIPDomain6} {
+			if tx.Bucket(name) == nil {
+				continue
+			}
+			if err := tx.DeleteBucket(name); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
 	for _, domain := range c.pending.fakeIPDomain {
 		c.pending.count--
 		c.pending.size -= len(domain)
@@ -229,16 +246,9 @@ func (c *CacheFile) FakeIPReset() error {
 		c.pending.fakeIPMetadata = nil
 		c.pending.count--
 	}
-	c.pendingAccess.Unlock()
-	return c.batch(func(tx *bbolt.Tx) error {
-		for _, name := range [][]byte{bucketFakeIP, bucketFakeIPDomain4, bucketFakeIPDomain6} {
-			if tx.Bucket(name) == nil {
-				continue
-			}
-			if err := tx.DeleteBucket(name); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	// Readers may have released pendingAccess before consulting the database.
+	// Rotate the batch identity so those readers detect this reset as well.
+	pending := *c.pending
+	c.pending = &pending
+	return nil
 }
