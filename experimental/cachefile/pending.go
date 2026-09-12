@@ -70,6 +70,10 @@ func (c *CacheFile) Flush() {
 		return
 	}
 	writing := c.pending
+	if len(writing.fakeIPDomain) != 0 {
+		// Resume disk lookups before any mapping in this batch can be committed.
+		c.fakeIPKnownEmpty = false
+	}
 	c.writing = writing
 	c.pending = newPendingWrites()
 	c.pendingAccess.Unlock()

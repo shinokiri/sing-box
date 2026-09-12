@@ -88,6 +88,9 @@ jobs:
           go test -run '^$' -bench '^BenchmarkUDPMappingHistory$' -benchmem github.com/sagernet/sing-tun | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           go test -run '^$' -bench '^BenchmarkFakeIPLoadDomain$' -benchmem ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           go test -run '^$' -bench '^BenchmarkFakeIPMixed$' -benchmem -cpu=4 ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
+          go test -run '^$' -bench '^BenchmarkFakeIPAdmin$' -benchtime=20x -benchmem ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
+          go test -run '^$' -bench '^BenchmarkFakeIPMiss$' -benchmem ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
+          go test -run '^$' -bench '^BenchmarkFakeIPCreateBeforeFirstFlush$' -benchtime=4096x -benchmem -cpu=1 ./dns/transport/fakeip | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           {
             echo '```text'
             cat "$RUNNER_TEMP/udpflow-bench.txt"

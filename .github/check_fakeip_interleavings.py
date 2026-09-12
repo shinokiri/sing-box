@@ -40,6 +40,11 @@ def main():
         c.testBeforeBatch()
     }
     err = db.Batch(fn)""")
+    # A synchronous reset can use Update directly; keep the same pause point.
+    source = replace_once(source, "return db.Update(fn)", """if c.testBeforeBatch != nil {
+        c.testBeforeBatch()
+    }
+    return db.Update(fn)""")
     # Do not replace fakeip.go: every run exercises the current checkout.
     # The after-view hook runs after the read transaction has closed.
     with tempfile.TemporaryDirectory(prefix="fakeip-interleavings-") as directory:

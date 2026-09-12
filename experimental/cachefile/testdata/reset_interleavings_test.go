@@ -224,3 +224,37 @@ func TestFakeIPInterleavingResetBeforeDatabase(t *testing.T) {
 		})
 	}
 }
+
+func TestFakeIPInterleavingFirstMappingFlush(t *testing.T) {
+	for _, text := range []string{"198.18.0.21", "fc00::21"} {
+		t.Run(text, func(t *testing.T) {
+			cache := newFakeIPTestCache(t)
+			address := netip.MustParseAddr(text)
+			if err := cache.FakeIPReset(); err != nil {
+				t.Fatal(err)
+			}
+			cache.FakeIPStoreAsync(address, "present.example", logger.NOP())
+			pause, entered, release := resetPause(t)
+			cache.testBeforeBatch = pause
+			finished := make(chan struct{})
+			go func() { cache.Flush(); close(finished) }()
+			resetWaitPause(t, entered)
+			for _, phase := range []string{"writing", "disk"} {
+				if phase == "disk" {
+					release()
+					select {
+					case <-finished:
+					case <-time.After(5 * time.Second):
+						t.Fatal("first mapping flush did not complete")
+					}
+				}
+				if got, found := cache.FakeIPLoadDomain("present.example", address.Is6()); !found || got != address {
+					t.Fatalf("%s forward lookup lost first mapping: %v %v", phase, got, found)
+				}
+				if owner, found := cache.FakeIPLoad(address); !found || owner != "present.example" {
+					t.Fatalf("%s reverse lookup lost first mapping: %q %v", phase, owner, found)
+				}
+			}
+		})
+	}
+}

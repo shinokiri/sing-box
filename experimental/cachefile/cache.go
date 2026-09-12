@@ -60,6 +60,7 @@ type CacheFile struct {
 	flushInterval     time.Duration
 	DB                *bbolt.DB
 	dbAccess          sync.RWMutex
+	fakeIPKnownEmpty  bool // guarded by pendingAccess
 	pendingAccess     sync.RWMutex
 	pending           *pendingWrites
 	writing           *pendingWrites

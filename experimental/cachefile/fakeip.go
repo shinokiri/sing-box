@@ -22,7 +22,7 @@ var (
 
 func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
 	var metadata adapter.FakeIPMetadata
-	err := c.batch(func(tx *bbolt.Tx) error {
+	err := c.update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket(bucketFakeIP)
 		if bucket == nil {
 			return os.ErrNotExist
@@ -129,9 +129,13 @@ func (c *CacheFile) FakeIPLoad(address netip.Addr) (string, bool) {
 	if !cached && c.writing != nil {
 		domain, cached = c.writing.fakeIPDomain[address]
 	}
+	knownEmpty := c.fakeIPKnownEmpty
 	c.pendingAccess.RUnlock()
 	if cached {
 		return domain, true
+	}
+	if knownEmpty {
+		return "", false
 	}
 	_ = c.view(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket(bucketFakeIP)
@@ -168,6 +172,10 @@ func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bo
 			}
 			return address, true
 		}
+	}
+	if c.fakeIPKnownEmpty {
+		c.pendingAccess.RUnlock()
+		return netip.Addr{}, false
 	}
 	// Retain the batch identities, but do not hold the pending lock while
 	// waiting for the database. This keeps unrelated buffered writes moving.
@@ -221,7 +229,7 @@ func (c *CacheFile) FakeIPReset() error {
 	defer c.pendingAccess.Unlock()
 	// Keep reset atomic with respect to buffered readers and writers, and
 	// preserve pending entries if clearing the database fails.
-	err := c.batch(func(tx *bbolt.Tx) error {
+	err := c.update(func(tx *bbolt.Tx) error {
 		for _, name := range [][]byte{bucketFakeIP, bucketFakeIPDomain4, bucketFakeIPDomain6} {
 			if tx.Bucket(name) == nil {
 				continue
@@ -250,5 +258,6 @@ func (c *CacheFile) FakeIPReset() error {
 	// Rotate the batch identity so those readers detect this reset as well.
 	pending := *c.pending
 	c.pending = &pending
+	c.fakeIPKnownEmpty = true
 	return nil
 }
