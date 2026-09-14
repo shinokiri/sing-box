@@ -29,6 +29,11 @@ def snapshot():
 
 def plan():
     source, version = snapshot()
+    if os.environ.get("BUILD_PREVIEW_APK") == "true":
+        if os.environ["GITHUB_EVENT_NAME"] != "workflow_dispatch":
+            raise ValueError("Preview APK requires explicit workflow dispatch")
+        output(build=True, publish=False)
+        return
     if os.environ["GITHUB_EVENT_NAME"] == "pull_request":
         output(build=True, publish=False)
         return

@@ -40,6 +40,7 @@ icon: material/new-box
   "reuse_addr": false,
   "netns": "",
   "connect_timeout": "",
+  "tcp_user_timeout": "",
   "tcp_fast_open": false,
   "tcp_multi_path": false,
   "disable_tcp_keep_alive": false,
@@ -128,6 +129,22 @@ icon: material/new-box
 
 持续时间字符串是一个可能有符号的序列十进制数，每个都有可选的分数和单位后缀， 例如 "300ms"、"-1.5h" 或 "2h45m"。
 有效时间单位为 "ns"、"us"（或 "µs"）、"ms"、"s"、"m"、"h"。
+
+#### tcp_user_timeout
+
+Android 上的 Snell 出站在设置 `disable_tcp_keep_alive: true` 且省略此字段时，默认采用 60 秒发送失败等待上限。显式设置 `"0s"` 可禁用此默认值。其他出站和平台保留系统默认行为。它不会定期发包，也不限制应用层回答正文的等待时间。
+
+仅支持 Linux 和 Android。可选时长，限制已发送 TCP 数据等待确认的时间，
+以及因对端通告零窗口而无法发送的积压数据等待时间；超过限制后由内核报告连接失败。
+
+显式设置为 `"0s"` 保留系统默认值。除上述 Android Snell 默认策略外，省略此字段也保留系统默认值。
+正数向上取整到毫秒，最大 `2147483647ms`。
+仅作用于本拨号器创建的 TCP 连接，不影响 UDP socket。
+
+它不是应用层回复时限，也不会开启保活。该值是失败等待上限，不是重传间隔。健康空闲连接，
+以及数据已得到 TCP 确认但应用仍在计算的请求，可以保持超过该时长。
+若开启 TCP 保活，Linux 也会使用该值判断连续失败的保活探测何时关闭连接。
+所选值应容纳正常切网、丢包恢复和对端读取缓慢的情况。该选项不会重放失败请求。
 
 #### tcp_fast_open
 

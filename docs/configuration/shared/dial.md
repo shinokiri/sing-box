@@ -40,6 +40,7 @@ icon: material/new-box
   "reuse_addr": false,
   "netns": "",
   "connect_timeout": "",
+  "tcp_user_timeout": "",
   "tcp_fast_open": false,
   "tcp_multi_path": false,
   "disable_tcp_keep_alive": false,
@@ -130,6 +131,27 @@ A duration string is a possibly signed sequence of
 decimal numbers, each with optional fraction and a unit suffix,
 such as "300ms", "-1.5h" or "2h45m".
 Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
+
+#### tcp_user_timeout
+
+On Android, a Snell outbound that sets `disable_tcp_keep_alive: true` uses a 60-second user timeout when this field is omitted. Explicit `"0s"` disables that default. Other outbounds and platforms preserve the system default. This does not send periodic packets or set an application response deadline.
+
+Linux and Android only. Optional duration limiting how long transmitted TCP data
+may remain unacknowledged, or buffered data remain unsent because the peer has
+advertised a zero window, before the kernel reports a connection failure.
+
+Explicit `"0s"` preserves the system default. Omitting the field also preserves the
+system default, except for the Android Snell policy above. Positive values are rounded up to
+milliseconds, with a maximum of `2147483647ms`. This option applies to TCP
+connections created by this dialer; UDP sockets are unaffected.
+
+This is not an application response deadline and does not enable keepalive.
+The value is a failure limit, not a retransmission interval. A healthy idle connection, or a request
+that TCP has acknowledged while its application is still computing, may remain
+open longer than this timeout. When TCP keepalive is enabled, Linux also uses
+this value in deciding when unsuccessful keepalive probes close the connection.
+Choose a value that tolerates expected network handovers, packet loss, and peer
+backpressure. The option does not replay failed requests.
 
 #### tcp_fast_open
 

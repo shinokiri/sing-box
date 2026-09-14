@@ -46,6 +46,20 @@ class TestingReleaseTest(unittest.TestCase):
                 release.plan()
             api.assert_not_called()
 
+    def test_preview_dispatch_never_publishes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            with patch.object(release, "snapshot", return_value=(self.source, "version")), patch.object(release, "api") as api, patch.dict(os.environ, GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_REF="refs/heads/fix/mobile-standby", BUILD_PREVIEW_APK="true", GITHUB_OUTPUT=str(output)):
+                release.plan()
+            self.assertEqual(release.properties(output), {"build": "true", "publish": "false"})
+            api.assert_not_called()
+
+    def test_preview_requires_dispatch(self):
+        for event in ("push", "pull_request"):
+            with self.subTest(event=event), patch.object(release, "snapshot", return_value=(self.source, "version")), patch.dict(os.environ, GITHUB_EVENT_NAME=event, BUILD_PREVIEW_APK="true"):
+                with self.assertRaisesRegex(ValueError, "explicit workflow dispatch"):
+                    release.plan()
+
     def test_pull_request_only_builds(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "output"
