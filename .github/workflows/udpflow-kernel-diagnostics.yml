@@ -9,14 +9,18 @@ permissions:
   contents: read
 
 jobs:
-  compare:
-    name: Kernel regressions (${{ matrix.source }})
+  diagnose:
+    name: Kernel regression (${{ matrix.case }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        source: [fork, upstream]
+        include:
+          - case: half-close
+            selector: '^TestGoKernelZeroWindowHalfClose$'
+          - case: flow-control
+            selector: '^TestGoKernelFlowControl$/^mtu=65535/'
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
@@ -25,12 +29,5 @@ jobs:
         with:
           go-version: 1.26.8
           cache: true
-      - name: Select unmodified pinned upstream TUN for the control
-        if: matrix.source == 'upstream'
-        run: go mod edit -dropreplace=github.com/sagernet/sing-tun
-      - name: Record source and kernel
-        run: |
-          go list -m -json github.com/sagernet/sing-tun
-          uname -a
-      - name: Repeat the failing kernel cases
-        run: go test -v -count=5 -timeout=12m -exec sudo -tags with_gvisor -run '^(TestGoKernelZeroWindowHalfClose|TestGoKernelFlowControl)$' github.com/sagernet/sing-tun
+      - name: Repeat the kernel cases with diagnostics
+        run: go test -v -count=20 -timeout=12m -exec sudo -tags with_gvisor -run '${{ matrix.selector }}' github.com/sagernet/sing-tun

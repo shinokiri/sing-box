@@ -220,15 +220,26 @@ func TestGoKernelZeroWindowHalfClose(t *testing.T) {
 			}}
 			fixture, traffic := newKernelTCPFixture(test, config, kernelTCPConfig{})
 			client, server := fixture.pair(test, ipv6)
-			payload := kernelPayload(int(server.sendPermit.Load()-1), 139)
-			_, err := server.Write(payload)
-			if err != nil {
-				test.Fatal(err)
-			}
+			// Fill the window one frame at a time: Linux may account for IPv6
+			// packet storage before consuming its entire advertised byte window.
+			var payload []byte
+			var err error
 			deadline := time.Now().Add(time.Second)
 			for time.Now().Before(deadline) {
-				if server.sendUnacked.Load() == uint64(len(payload)+1) && server.sendPermit.Load() == server.sendUnacked.Load() {
-					break
+				unacked := server.sendUnacked.Load()
+				permit := server.sendPermit.Load()
+				if unacked == uint64(len(payload)+1) {
+					if permit == unacked && len(payload) > 0 {
+						break
+					}
+					if permit > unacked {
+						data := kernelPayload(int((permit-unacked+1)/2), 139)
+						_, err = server.Write(data)
+						if err != nil {
+							test.Fatal(err)
+						}
+						payload = append(payload, data...)
+					}
 				}
 				time.Sleep(time.Millisecond)
 			}

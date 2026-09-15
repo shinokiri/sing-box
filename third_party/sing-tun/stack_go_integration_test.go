@@ -482,6 +482,7 @@ func kernelBackpressure(t *testing.T, fixture *kernelStackFixture, ipv6 bool, mo
 		t.Fatal(err)
 	}
 	t.Logf("flow %s -> %s", client.LocalAddr(), client.RemoteAddr())
+	defer kernelDiagnoseFlow(t, client, server)()
 	deadline := time.Now().Add(10 * time.Second)
 	client.SetDeadline(deadline)
 	server.SetDeadline(deadline)
