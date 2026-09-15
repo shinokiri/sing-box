@@ -1,7 +1,7 @@
 # Local sing-tun patches
 
-Upstream source: v0.9.4-0.20260912075549-869f0a4d76af, as required by the
-sing-box v1.15.0-alpha.3 (93fff5954390367dd456cad3cbd79be54f8b941f).
+Upstream source: v0.9.4-0.20260914145202-3a0d3878577a, as required by the
+sing-box v1.15.0-alpha.4 (4566ef0890e0cde8448000e8aa3223fb286daa94).
 
 The fork retains bounded asynchronous first-flow routing, fixed DNS failure
 retry deadlines, writeback outside the flow-table lock, selector cancellation,

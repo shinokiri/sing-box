@@ -87,7 +87,8 @@ func TestGoEngineDefersRoutingAndHandsAcceptedVerdictBack(t *testing.T) {
 		}
 		return FlowVerdict{Action: ActionAccept, UDPTimeout: 37 * time.Second}
 	}}
-	stack := NewGo(StackOptions{Context: t.Context(), Handler: handler, Logger: logger.NOP()})
+	stack, err := NewGo(StackOptions{Context: t.Context(), Handler: handler, Logger: logger.NOP()})
+	require.NoError(t, err)
 	stack.dispatcher = NewForwardDispatcher(handler, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
 	t.Cleanup(stack.dispatcher.Close)
 	engine := newGoEngine(stack, new(pendingGoIO), 1)
