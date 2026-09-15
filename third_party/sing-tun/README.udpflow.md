@@ -20,3 +20,10 @@ The fork exposes ForwardDispatcher's existing API for the protocol integration
 tests and callers, and adapts the upstream ForwardStage API around per-worker
 dispatchers. Kernel integration tests run with privileges in Android CI; memory
 and race tests cover stage isolation and asynchronous Go-engine handoff locally.
+
+The Go TCP stack also keeps pure ACK sequence numbers within a shrunken peer
+window. Using SND.NXT beyond that window can stall both directions when the
+receiver rejects the ACK. The Linux zero-window regression verifies that
+uploaded data is acknowledged while the download remains blocked. The
+half-close fixture fills the receive window one frame at a time to account
+for Linux IPv6 packet memory limits while retaining the FIN-loss checks.

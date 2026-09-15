@@ -847,7 +847,10 @@ func (e *goEngine) sendAck(conn *GoConn) bool {
 	conn.receiveChain.releaseBelow(conn.consumedTail.Load())
 	conn.publishReceiveWindow()
 
-	segment := goSegment{offset: conn.sendNext(), flags: header.TCPFlagAck}
+	// A shrinking peer window can leave SND.NXT outside the acceptable range.
+	// Keep ACKs within that window so the other direction can still progress.
+	windowEnd := uint64(max(conn.windowLeft2+int64(conn.peerWindow), 0))
+	segment := goSegment{offset: min(conn.sendNext(), windowEnd), flags: header.TCPFlagAck}
 	if conn.sackPermitted && (conn.dsackEnd != 0 || conn.oooRanges != nil && conn.oooRanges.count > 0) {
 		count := 0
 		if conn.dsackEnd != 0 {

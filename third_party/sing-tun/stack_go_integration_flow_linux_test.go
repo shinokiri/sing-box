@@ -220,19 +220,30 @@ func TestGoKernelZeroWindowHalfClose(t *testing.T) {
 			}}
 			fixture, traffic := newKernelTCPFixture(test, config, kernelTCPConfig{})
 			client, server := fixture.pair(test, ipv6)
-			payload := kernelPayload(int(server.sendPermit.Load()-1), 139)
-			_, err := server.Write(payload)
-			if err != nil {
-				test.Fatal(err)
-			}
+			// Fill the window one frame at a time: Linux may account for IPv6
+			// packet storage before consuming its entire advertised byte window.
+			var payload []byte
+			var err error
 			deadline := time.Now().Add(time.Second)
 			for time.Now().Before(deadline) {
-				if server.sendUnacked.Load() == uint64(len(payload)+1) && server.sendPermit.Load() == server.sendUnacked.Load() {
-					break
+				unacked := server.sendUnacked.Load()
+				permit := server.sendPermit.Load()
+				if unacked == uint64(len(payload)+1) {
+					if permit == unacked && len(payload) > 0 {
+						break
+					}
+					if permit > unacked {
+						data := kernelPayload(int((permit-unacked+1)/2), 139)
+						_, err = server.Write(data)
+						if err != nil {
+							test.Fatal(err)
+						}
+						payload = append(payload, data...)
+					}
 				}
 				time.Sleep(time.Millisecond)
 			}
-			if server.sendUnacked.Load() != uint64(len(payload)+1) || server.sendPermit.Load() != server.sendUnacked.Load() {
+			if len(payload) == 0 || server.sendUnacked.Load() != uint64(len(payload)+1) || server.sendPermit.Load() != server.sendUnacked.Load() {
 				test.Fatalf("window did not close after acknowledging all data: length=%d unacked=%d permit=%d", len(payload), server.sendUnacked.Load(), server.sendPermit.Load())
 			}
 			finAcknowledgement := func(event kernelTCPEvent) bool {
@@ -411,6 +422,42 @@ func TestGoKernelZeroWindow(t *testing.T) {
 			unacked := server.sendUnacked.Load()
 			if server.sendPermit.Load() != unacked || server.sentTail.Load() != uint64(len(payload)+1) || unacked <= 1 || unacked >= server.sentTail.Load() {
 				test.Fatalf("window did not close with only outstanding data: unacked=%d sent=%d buffered=%d permit=%d", unacked, server.sentTail.Load(), server.bufferedTail.Load(), server.sendPermit.Load())
+			}
+			// The blocked download must not prevent ACKs for the other direction.
+			// A pure ACK at SND.NXT is outside the kernel's shrunken window.
+			upload := kernelPayload(4096, 109)
+			client.SetWriteDeadline(time.Now().Add(time.Second))
+			_, err = client.Write(upload)
+			if err != nil {
+				test.Fatal(err)
+			}
+			server.SetReadDeadline(time.Now().Add(time.Second))
+			uploadData := make([]byte, len(upload))
+			_, err = io.ReadFull(server, uploadData)
+			if err != nil || !bytes.Equal(uploadData, upload) {
+				test.Fatalf("upload while download window is closed: %v", err)
+			}
+			rawConn, err := client.SyscallConn()
+			if err != nil {
+				test.Fatal(err)
+			}
+			var info *unix.TCPInfo
+			deadline = time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				var optionErr error
+				err = rawConn.Control(func(descriptor uintptr) {
+					info, optionErr = unix.GetsockoptTCPInfo(int(descriptor), unix.IPPROTO_TCP, unix.TCP_INFO)
+				})
+				if err != nil || optionErr != nil {
+					test.Fatal(E.Errors(err, optionErr))
+				}
+				if info.Bytes_acked >= uint64(len(upload)+1) {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if info.Bytes_acked < uint64(len(upload)+1) {
+				test.Fatalf("upload ACK rejected at closed download window: acknowledged=%d unacked=%d", info.Bytes_acked, info.Unacked)
 			}
 			windowUpdate := func(event kernelTCPEvent) bool {
 				return !event.outgoing && event.flags == header.TCPFlagAck && event.window > 0
