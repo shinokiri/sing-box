@@ -1,7 +1,7 @@
 # Local sing-tun patches
 
-Upstream source: v0.9.4-0.20260912075549-869f0a4d76af, as required by the
-sing-box v1.15.0-alpha.3 (93fff5954390367dd456cad3cbd79be54f8b941f).
+Upstream source: v0.9.4-0.20260914145202-3a0d3878577a, as required by the
+sing-box v1.15.0-alpha.4 (4566ef0890e0cde8448000e8aa3223fb286daa94).
 
 The fork retains bounded asynchronous first-flow routing, fixed DNS failure
 retry deadlines, writeback outside the flow-table lock, selector cancellation,
@@ -20,3 +20,10 @@ The fork exposes ForwardDispatcher's existing API for the protocol integration
 tests and callers, and adapts the upstream ForwardStage API around per-worker
 dispatchers. Kernel integration tests run with privileges in Android CI; memory
 and race tests cover stage isolation and asynchronous Go-engine handoff locally.
+
+The Go TCP stack also keeps pure ACK sequence numbers within a shrunken peer
+window. Using SND.NXT beyond that window can stall both directions when the
+receiver rejects the ACK. The Linux zero-window regression verifies that
+uploaded data is acknowledged while the download remains blocked. The
+half-close fixture fills the receive window one frame at a time to account
+for Linux IPv6 packet memory limits while retaining the FIN-loss checks.

@@ -60,6 +60,19 @@ class TestingReleaseTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "explicit workflow dispatch"):
                     release.plan()
 
+    def test_mobile_standby_push_builds_without_publishing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            with patch.object(release, "snapshot", return_value=(self.source, "version")), patch.object(release, "api") as api, patch.dict(os.environ, GITHUB_EVENT_NAME="push", GITHUB_REF=f"refs/heads/{release.PREVIEW_BRANCH}", BUILD_PREVIEW_APK="false", GITHUB_OUTPUT=str(output)):
+                release.plan()
+            self.assertEqual(release.properties(output), {"build": "true", "publish": "false"})
+            api.assert_not_called()
+
+    def test_publish_rejects_mobile_standby_branch(self):
+        with patch.dict(os.environ, GITHUB_REF=f"refs/heads/{release.PREVIEW_BRANCH}"):
+            with self.assertRaisesRegex(ValueError, "published from udpflow-testing"):
+                release.publish()
+
     def test_pull_request_only_builds(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "output"

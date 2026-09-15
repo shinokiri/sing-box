@@ -10,6 +10,7 @@ import sys
 from udpflow_release import CLIENT, MANIFEST, UPSTREAM, api, git, output, properties
 
 BRANCH = "udpflow-testing"
+PREVIEW_BRANCH = "fix/mobile-standby-20260913"
 
 
 def snapshot():
@@ -32,6 +33,9 @@ def plan():
     if os.environ.get("BUILD_PREVIEW_APK") == "true":
         if os.environ["GITHUB_EVENT_NAME"] != "workflow_dispatch":
             raise ValueError("Preview APK requires explicit workflow dispatch")
+        output(build=True, publish=False)
+        return
+    if os.environ["GITHUB_EVENT_NAME"] == "push" and os.environ["GITHUB_REF"] == f"refs/heads/{PREVIEW_BRANCH}":
         output(build=True, publish=False)
         return
     if os.environ["GITHUB_EVENT_NAME"] == "pull_request":

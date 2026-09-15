@@ -2,7 +2,7 @@ name: Android ARM64
 
 on:
   push:
-    branches: [udpflow-testing]
+    branches: [udpflow-testing, fix/mobile-standby-20260913]
   pull_request:
     branches: [udpflow-testing]
   workflow_dispatch:
@@ -46,7 +46,7 @@ jobs:
     permissions:
       contents: write
     env:
-      BUILD_ANDROID: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/udpflow-testing' || (github.event_name == 'workflow_dispatch' && inputs.preview_apk)) }}
+      BUILD_ANDROID: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/udpflow-testing' || (github.event_name == 'push' && github.ref == 'refs/heads/fix/mobile-standby-20260913') || (github.event_name == 'workflow_dispatch' && inputs.preview_apk)) }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
