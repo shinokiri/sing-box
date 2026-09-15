@@ -10,17 +10,13 @@ permissions:
 
 jobs:
   diagnose:
-    name: Kernel regression (${{ matrix.case }})
+    name: ACK regression (${{ matrix.source }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - case: half-close
-            selector: '^TestGoKernelZeroWindowHalfClose$'
-          - case: flow-control
-            selector: '^TestGoKernelFlowControl$/^mtu=65535/'
+        source: [before, after]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
@@ -29,5 +25,20 @@ jobs:
         with:
           go-version: 1.26.8
           cache: true
-      - name: Repeat the kernel cases with diagnostics
-        run: go test -v -count=20 -timeout=12m -exec sudo -tags with_gvisor -run '${{ matrix.selector }}' github.com/sagernet/sing-tun
+      - name: Apply candidate ACK window fix
+        if: matrix.source == 'after'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("third_party/sing-tun/stack_go_tcp_input.go")
+          s = p.read_text()
+          old = 'segment := goSegment{offset: conn.sendNext(), flags: header.TCPFlagAck}'
+          new = 'segment := goSegment{offset: min(conn.sendNext(), uint64(max(conn.windowLeft2+int64(conn.peerWindow), 0))), flags: header.TCPFlagAck}'
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new))
+          PY
+      - name: Reproduce duplex ACK loss at a closed window
+        run: go test -v -count=3 -timeout=2m -exec sudo -tags with_gvisor -run '^TestGoKernelZeroWindow$' github.com/sagernet/sing-tun
+      - name: Repeat high MTU flow control
+        if: always()
+        run: go test -v -count=50 -timeout=12m -exec sudo -tags with_gvisor -run '^TestGoKernelFlowControl$/^mtu=65535/' github.com/sagernet/sing-tun
