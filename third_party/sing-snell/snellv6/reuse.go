@@ -494,6 +494,25 @@ func (c *reuseConn) Close() error {
 			c.session.Release(false)
 			return
 		}
+		if c.session.urlTest != nil {
+			// crypto/tls.Close leaves the underlying write deadline expired
+			// after close_notify. The Snell EOF is a separate protocol write;
+			// give it its own bounded deadline before reusing this session.
+			if err := c.session.urlTest.ctx.Err(); err != nil {
+				c.closeErr = err
+				c.session.Release(false)
+				return
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			if contextDeadline, ok := c.session.urlTest.ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+				deadline = contextDeadline
+			}
+			if err := c.session.Conn.SetWriteDeadline(deadline); err != nil {
+				c.closeErr = err
+				c.session.Release(false)
+				return
+			}
+		}
 		c.closeErr = c.CloseWrite()
 		if c.closeErr != nil {
 			c.session.Release(false)

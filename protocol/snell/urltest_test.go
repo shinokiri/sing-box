@@ -350,3 +350,26 @@ func TestURLTestBoundsIndividualPreparation(t *testing.T) {
 		t.Fatal("individual node preparation has no deadline")
 	}
 }
+
+func TestURLTestWithoutReuseKeepsSingleRequest(t *testing.T) {
+	handler := &urlTestHandler{}
+	node, transport := newURLTestFixture(t, handler)
+	client, err := snellv6.NewClient(snellv6.ClientOptions{
+		PSK: []byte("urltest-fixture-key"), Mode: snellv6.ModeDefault, Reuse: false,
+		Dialer: transport, Server: M.ParseSocksaddr("127.0.0.1:12345"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	node.client = client
+	node.reuse = false
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := urltest.URLTest(ctx, "http://probe.test/generate_204", node); err != nil {
+		t.Fatal(err)
+	}
+	if transport.dials.Load() != 1 || handler.requests.Load() != 1 {
+		t.Fatalf("reuse=false changed behavior: dials=%d requests=%d", transport.dials.Load(), handler.requests.Load())
+	}
+}

@@ -7,3 +7,5 @@ URLTestDialer owns one physical Snell v6 session for exactly two logical request
 Ordinary clients retain the original pool behavior. TCP Fast Open and the configured underlying dialer remain active for the warmup. The measured request still establishes its own destination TCP/TLS connection and performs the original HEAD request; only the proxy-session handoff is made deterministic.
 
 Tests in the parent repository's protocol/snell package exercise the complete URLTest entry point with a Snell server and controlled EOF/connect delays. The existing common/dialer tests verify real Android-path TFO socket controls.
+
+HTTPS close also needs a separate bounded deadline for the Snell EOF: Go 1.26.8 crypto/tls.closeNotify expires the underlying write deadline before calling the logical connection's Close. Reserved probe sessions replace that deadline before sending their EOF; they still honor cancellation and the earlier of the test deadline or a five-second close limit. Ordinary business-session close behavior is unchanged.
