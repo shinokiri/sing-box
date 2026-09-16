@@ -68,8 +68,10 @@ jobs:
         run: sh .github/check_local_patches.sh
       - name: Test Snell URLTest session handoff
         run: |
-          gofmt -d adapter/outbound.go common/urltest/urltest.go protocol/snell/urltest.go protocol/snell/urltest_test.go third_party/sing-snell/snellv6/reuse.go third_party/sing-snell/snellv6/urltest.go
+          urltest_format_status=0
+          gofmt -d adapter/outbound.go common/urltest/urltest.go protocol/snell/urltest.go protocol/snell/urltest_test.go third_party/sing-snell/snellv6/reuse.go third_party/sing-snell/snellv6/urltest.go || urltest_format_status=$?
           go test -race -count=3 -run '^TestURLTest' -v ./protocol/snell
+          exit "$urltest_format_status"
       - name: Test Android platform TCP Fast Open
         run: |
           gofmt -d common/dialer/default.go common/dialer/default_tfo.go common/dialer/default_tfo_linux_test.go common/dialer/resolve.go common/dialer/tfo.go

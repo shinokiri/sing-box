@@ -16,15 +16,15 @@ import (
 // never silently redials after the warmup. Close releases the reservation.
 // The target TCP/TLS connection is still recreated for each logical request.
 type URLTestDialer struct {
-	client *Client
-	ctx context.Context
-	cancel context.CancelFunc
-	access sync.Mutex
-	session *reuseSession
-	dials int
-	ready chan struct{}
-	readyOnce sync.Once
-	stopDial func() bool
+	client     *Client
+	ctx        context.Context
+	cancel     context.CancelFunc
+	access     sync.Mutex
+	session    *reuseSession
+	dials      int
+	ready      chan struct{}
+	readyOnce  sync.Once
+	stopDial   func() bool
 	cancelDial context.CancelFunc
 }
 

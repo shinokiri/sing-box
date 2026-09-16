@@ -3,16 +3,20 @@ package snell
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
@@ -20,6 +24,7 @@ import (
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
 )
 
 // Delay the first server EOF after its HEAD response. The measured request
@@ -27,64 +32,82 @@ import (
 // into the first Write; real socket controls are tested in common/dialer.
 func TestURLTestReusesWarmSnellSession(t *testing.T) {
 	for _, mode := range []snellv6.Mode{snellv6.ModeDefault, snellv6.ModeUnshaped} {
-	for _, lazy := range []bool{false, true} {
-		t.Run(fmt.Sprintf("mode=%d/lazy=%v", mode, lazy), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			handler := &urlTestHandler{eofDelay: 200 * time.Millisecond}
-			service, err := snellv6.NewService(snellv6.ServerOptions{
-				PSK: []byte("urltest-fixture-key"), Mode: mode, Handler: handler,
+		for _, lazy := range []bool{false, true} {
+			t.Run(fmt.Sprintf("mode=%d/lazy=%v", mode, lazy), func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				handler := &urlTestHandler{eofDelay: 200 * time.Millisecond}
+				service, err := snellv6.NewService(snellv6.ServerOptions{
+					PSK: []byte("urltest-fixture-key"), Mode: mode, Handler: handler,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				transport := &urlTestTransport{service: service, lazy: lazy}
+				t.Cleanup(transport.Close)
+				client, err := snellv6.NewClient(snellv6.ClientOptions{
+					PSK: []byte("urltest-fixture-key"), Mode: mode, Reuse: true,
+					Dialer: transport, Server: M.ParseSocksaddr("127.0.0.1:12345"),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer client.Close()
+				client.SetKeepIdleConnections(false)
+				node := &Outbound{
+					Adapter: outbound.NewAdapter(C.TypeSnell, "fixture", []string{N.NetworkTCP}, nil),
+					logger:  logger.NOP(), client: client, dialer: transport, reuse: true,
+				}
+				delay, err := urltest.URLTest(ctx, "http://probe.test/generate_204", node)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("physical_connections=%d requests=%d reported_delay=%dms lazy=%v", transport.dials.Load(), handler.requests.Load(), delay, lazy)
+				if got := handler.requests.Load(); got != 2 {
+					t.Fatalf("HTTP requests = %d, want one warmup and one measured request", got)
+				}
+				if got := transport.dials.Load(); got != 1 {
+					t.Fatalf("physical connections = %d, want the same warm Snell session", got)
+				}
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			transport := &urlTestTransport{service: service, lazy: lazy}
-			t.Cleanup(transport.Close)
-			client, err := snellv6.NewClient(snellv6.ClientOptions{
-				PSK: []byte("urltest-fixture-key"), Mode: mode, Reuse: true,
-				Dialer: transport, Server: M.ParseSocksaddr("127.0.0.1:12345"),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer client.Close()
-			client.SetKeepIdleConnections(false)
-			node := &Outbound{
-				Adapter: outbound.NewAdapter(C.TypeSnell, "fixture", []string{N.NetworkTCP}, nil),
-				logger: logger.NOP(), client: client, dialer: transport, reuse: true,
-			}
-			delay, err := urltest.URLTest(ctx, "http://probe.test/generate_204", node)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Logf("physical_connections=%d requests=%d reported_delay=%dms lazy=%v", transport.dials.Load(), handler.requests.Load(), delay, lazy)
-			if got := handler.requests.Load(); got != 2 {
-				t.Fatalf("HTTP requests = %d, want one warmup and one measured request", got)
-			}
-			if got := transport.dials.Load(); got != 1 {
-				t.Fatalf("physical connections = %d, want the same warm Snell session", got)
-			}
-		})
+		}
 	}
-}
 }
 
 type urlTestHandler struct {
 	N.UDPConnectionHandlerEx
-	eofDelay time.Duration
-	requests atomic.Int32
-	afterWarmEOF func()
+	eofDelay      time.Duration
+	requests      atomic.Int32
+	afterWarmEOF  func()
+	tlsConfig     *tls.Config
+	responseDelay time.Duration
 }
 
 func (h *urlTestHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	go func() {
 		defer onClose(nil)
+		if h.tlsConfig != nil {
+			tlsConn := tls.Server(conn, h.tlsConfig)
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				return
+			}
+			conn = tlsConn
+		}
 		request, err := http.ReadRequest(bufio.NewReader(conn))
 		if err != nil {
 			return
 		}
 		request.Body.Close()
 		number := h.requests.Add(1)
+		if number == 2 && h.responseDelay != 0 {
+			timer := time.NewTimer(h.responseDelay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				return
+			}
+		}
 		if _, err = io.WriteString(conn, "HTTP/1.1 204 No Content\r\n\r\n"); err != nil {
 			return
 		}
@@ -104,15 +127,18 @@ func (h *urlTestHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 }
 
 type urlTestTransport struct {
-	service *snellv6.Service
-	lazy bool
-	dials atomic.Int32
-	access sync.Mutex
+	service     *snellv6.Service
+	lazy        bool
+	dials       atomic.Int32
+	hasDeadline atomic.Bool
+	access      sync.Mutex
 	connections []net.Conn
 }
 
 func (d *urlTestTransport) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	d.dials.Add(1)
+	_, bounded := ctx.Deadline()
+	d.hasDeadline.Store(bounded)
 	client, server := net.Pipe()
 	d.access.Lock()
 	d.connections = append(d.connections, client, server)
@@ -148,9 +174,9 @@ func (d *urlTestTransport) Close() {
 
 type urlTestLazyConn struct {
 	net.Conn
-	ctx context.Context
+	ctx  context.Context
 	once sync.Once
-	err error
+	err  error
 }
 
 func (c *urlTestLazyConn) Write(p []byte) (int, error) {
@@ -192,7 +218,7 @@ func newURLTestFixture(t *testing.T, handler *urlTestHandler) (*Outbound, *urlTe
 	t.Cleanup(func() { client.Close() })
 	return &Outbound{
 		Adapter: outbound.NewAdapter(C.TypeSnell, "fixture", []string{N.NetworkTCP}, nil),
-		logger: logger.NOP(), client: client, dialer: transport, reuse: true,
+		logger:  logger.NOP(), client: client, dialer: transport, reuse: true,
 	}, transport
 }
 
@@ -244,7 +270,7 @@ func TestURLTestCloseInterruptsInitialDial(t *testing.T) {
 	defer reserved.Close()
 	done := make(chan error, 1)
 	go func() {
-		_, dialErr := reserved.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort("probe.test", 80))
+		_, dialErr := reserved.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr("probe.test:80"))
 		done <- dialErr
 	}()
 	select {
@@ -274,4 +300,53 @@ func (d *urlTestBlockingDialer) DialContext(ctx context.Context, network string,
 	close(d.started)
 	<-ctx.Done()
 	return nil, ctx.Err()
+}
+
+func TestURLTestHTTPSPreservesWarmSession(t *testing.T) {
+	certificateServer := httptest.NewTLSServer(http.NotFoundHandler())
+	link := certificateServer.URL + "/generate_204"
+	pool := x509.NewCertPool()
+	pool.AddCert(certificateServer.Certificate())
+	config := &tls.Config{Certificates: certificateServer.TLS.Certificates}
+	certificateServer.Close()
+	handler := &urlTestHandler{
+		eofDelay: 200 * time.Millisecond, tlsConfig: config, responseDelay: 50 * time.Millisecond,
+	}
+	node, transport := newURLTestFixture(t, handler)
+	ctx := service.ContextWithDefaultRegistry(context.Background())
+	service.MustRegister[adapter.CertificateStore](ctx, &urlTestCertificateStore{pool: pool})
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	delay, err := urltest.URLTest(ctx, link, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := transport.dials.Load(); got != 1 {
+		t.Fatalf("physical connections = %d, want one for both HTTPS requests", got)
+	}
+	if got := handler.requests.Load(); got != 2 {
+		t.Fatalf("HTTPS requests = %d, want two separate website TLS handshakes and HEAD requests", got)
+	}
+	if delay < 50 {
+		t.Fatalf("reported %dms omitted the measured HTTP response wait", delay)
+	}
+	t.Logf("HTTPS physical_connections=1 requests=2 reported_delay=%dms (includes a 50ms HTTP response wait)", delay)
+}
+
+type urlTestCertificateStore struct {
+	adapter.CertificateStore
+	pool *x509.CertPool
+}
+
+func (s *urlTestCertificateStore) Pool() *x509.CertPool { return s.pool }
+
+func TestURLTestBoundsIndividualPreparation(t *testing.T) {
+	handler := &urlTestHandler{eofDelay: 10 * time.Millisecond}
+	node, transport := newURLTestFixture(t, handler)
+	if _, err := urltest.URLTest(context.Background(), "http://probe.test/generate_204", node); err != nil {
+		t.Fatal(err)
+	}
+	if !transport.hasDeadline.Load() {
+		t.Fatal("individual node preparation has no deadline")
+	}
 }
