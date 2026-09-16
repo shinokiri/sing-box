@@ -53,17 +53,17 @@ type PreMatchResult struct {
 	RejectTimeout time.Duration
 }
 
-func JudgeFlow(router Router, inbound string, inboundType string, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
-	return judgeFlow(router.PreMatch, inbound, inboundType, network, source, destination, firstPacket)
+func JudgeFlow(router Router, metadata InboundContext, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
+	return judgeFlow(router.PreMatch, metadata, network, source, destination, firstPacket)
 }
 
-func JudgeFlowContext(ctx context.Context, router Router, inbound string, inboundType string, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
+func JudgeFlowContext(ctx context.Context, router Router, metadata InboundContext, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
 	return judgeFlow(func(metadata InboundContext, firstPacket []byte) PreMatchResult {
 		return router.PreMatchContext(ctx, metadata, firstPacket)
-	}, inbound, inboundType, network, source, destination, firstPacket)
+	}, metadata, network, source, destination, firstPacket)
 }
 
-func judgeFlow(preMatch func(InboundContext, []byte) PreMatchResult, inbound string, inboundType string, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
+func judgeFlow(preMatch func(InboundContext, []byte) PreMatchResult, metadata InboundContext, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
 	var networkName string
 	switch network {
 	case uint8(header.TCPProtocolNumber):
@@ -75,13 +75,9 @@ func judgeFlow(preMatch func(InboundContext, []byte) PreMatchResult, inbound str
 	default:
 		return tun.FlowVerdict{Action: tun.ActionAccept}
 	}
-	metadata := InboundContext{
-		Inbound:     inbound,
-		InboundType: inboundType,
-		Network:     networkName,
-		Source:      M.SocksaddrFromNetIP(source),
-		Destination: M.SocksaddrFromNetIP(destination),
-	}
+	metadata.Network = networkName
+	metadata.Source = M.SocksaddrFromNetIP(source)
+	metadata.Destination = M.SocksaddrFromNetIP(destination)
 	if networkName == N.NetworkICMP {
 		metadata.Source.Port = 0
 		metadata.Destination.Port = 0
@@ -95,7 +91,7 @@ func judgeFlow(preMatch func(InboundContext, []byte) PreMatchResult, inbound str
 		}
 		if scoped, ok := result.Outbound.(InboundFlowOutbound); ok {
 			var err error
-			port, err = scoped.FlowPortForInbound(inbound)
+			port, err = scoped.FlowPortForInbound(metadata.Inbound)
 			if err != nil {
 				return tun.FlowVerdict{Action: tun.ActionReject}
 			}

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
@@ -20,6 +21,8 @@ import (
 type slowOpenConn struct {
 	dialer      *tfo.Dialer
 	ctx         context.Context
+	cancel      context.CancelFunc
+	netns       string
 	network     string
 	destination M.Socksaddr
 	conn        atomic.Pointer[net.TCPConn]
@@ -31,6 +34,10 @@ type slowOpenConn struct {
 }
 
 func DialSlowContext(dialer *tfo.Dialer, ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	return dialSlowContext(dialer, ctx, network, destination, "")
+}
+
+func dialSlowContext(dialer *tfo.Dialer, ctx context.Context, network string, destination M.Socksaddr, netns string) (net.Conn, error) {
 	if dialer.DisableTFO || N.NetworkName(network) != N.NetworkTCP {
 		switch N.NetworkName(network) {
 		case N.NetworkTCP, N.NetworkUDP:
@@ -39,9 +46,12 @@ func DialSlowContext(dialer *tfo.Dialer, ctx context.Context, network string, de
 			return dialer.Dialer.DialContext(ctx, network, destination.AddrString())
 		}
 	}
+	ctx, cancel := context.WithCancel(ctx)
 	return &slowOpenConn{
 		dialer:      dialer,
 		ctx:         ctx,
+		cancel:      cancel,
+		netns:       netns,
 		network:     network,
 		destination: destination,
 		create:      make(chan struct{}),
@@ -82,13 +92,22 @@ func (c *slowOpenConn) Write(b []byte) (n int, err error) {
 		return 0, os.ErrClosed
 	default:
 	}
-	conn, err := c.dialer.DialContext(c.ctx, c.network, c.destination.String(), b)
-	if err != nil {
-		c.err = err
-	} else {
+	// TFO opens the socket on the first write, so enter the namespace here.
+	conn, err := listener.ListenNetworkNamespace[net.Conn](c.ctx, c.netns, func() (net.Conn, error) {
+		return c.dialer.DialContext(c.ctx, c.network, c.destination.String(), b)
+	})
+	if err == nil {
 		c.conn.Store(conn.(*net.TCPConn))
+		// Close may run while the first write is creating the socket.
+		select {
+		case <-c.done:
+			conn.Close()
+			err = os.ErrClosed
+		default:
+			n = len(b)
+		}
 	}
-	n = len(b)
+	c.err = err
 	close(c.create)
 	return
 }
@@ -96,6 +115,7 @@ func (c *slowOpenConn) Write(b []byte) (n int, err error) {
 func (c *slowOpenConn) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.done)
+		c.cancel()
 		conn := c.conn.Load()
 		if conn != nil {
 			conn.Close()
@@ -169,7 +189,7 @@ func (c *slowOpenConn) WriteTo(w io.Writer) (n int64, err error) {
 				return 0, c.err
 			}
 		case <-c.done:
-			return 0, c.err
+			return 0, os.ErrClosed
 		}
 	}
 	return bufio.Copy(w, c.conn.Load())

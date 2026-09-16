@@ -66,6 +66,10 @@ jobs:
             android-arm64-api36-go-${{ steps.source.outputs.go_version }}-ndk-r29-
       - name: Check local patches against both module requirements
         run: sh .github/check_local_patches.sh
+      - name: Test Android platform TCP Fast Open
+        run: |
+          gofmt -d common/dialer/default.go common/dialer/default_tfo.go common/dialer/default_tfo_linux_test.go common/dialer/resolve.go common/dialer/tfo.go
+          go test -race -exec sudo -count=3 -run '^TestPlatform(TCPFastOpen|TFO)' ./common/dialer
       - name: Test all core packages with release features
         run: go test -exec sudo -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" -ldflags "$(cat release/LDFLAGS)" ./...
       - name: Vet all core packages

@@ -100,6 +100,30 @@ associations, while resetting or closing the outbound closes all of them.
 }
 ```
 
+## Android TCP Fast Open
+
+Set `tcp_fast_open: true` on the outbound which creates the TCP connection
+(for Snell, at the same level as `server` and `server_port`). Android
+`route.auto_detect_interface` can stay enabled: the platform socket protection
+callback is retained and the default network uses the TFO dialer for both
+IPv4 and IPv6. UDP continues through its existing interface-selection path.
+A `detour` delegates socket creation to another outbound; configure TFO on that
+actual TCP outbound.
+
+TFO still requires a single selected network. Explicit advanced
+`network_strategy` settings remain incompatible; inherited strategy/type
+constraints and per-dial overrides now report incompatibility instead of
+silently bypassing TFO. If the platform has not identified its default
+interface, one remaining interface can be used; multiple candidates produce
+a clear error until a default is available. Lazy TFO connections cannot be
+raced before their first write, and racing the writes could duplicate
+application data across sockets.
+
+CI checks real Linux `TCP_FASTOPEN_CONNECT` socket state, IPv4/IPv6 traffic,
+platform protection and error propagation. This confirms the client requested
+TFO; a new connection capture and server counters are still needed to verify
+SYN data/cookie use on a particular Android kernel and network path.
+
 ## VLESS/XUDP configuration
 
 ```json
@@ -269,7 +293,7 @@ proxy server, particularly when assessing public UDP mapping/filtering.
 
 ## GitHub Actions
 
-The dedicated `.github/workflows/build.yml` runs on `udpflow` pushes, pull
+The dedicated `.github/workflows/build.yml` runs on `udpflow-testing` pushes, pull
 requests, and manual dispatch. Its planning job tests the release scripts,
 including actual Git merges in temporary repositories. The build job runs all core-module tests and
 `go vet` with release feature tags (excluding the unsafe-pointer diagnostic for
@@ -296,7 +320,7 @@ not part of this core-module gate.
 
 After the checks pass, branch push/manual builds compile a signed ARM64 APK
 for Android 16 and later (minimum API 36), with the pinned client's Go version
-(currently 1.26.7), NDK r29, and JDK 17.
+(currently 1.26.8), NDK r29, and JDK 17.
 Pull requests run core checks only. The native
 library and APK are built on one runner, with one toolchain setup and cached
 Go native compilation. They use

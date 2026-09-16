@@ -1,7 +1,7 @@
 # Local sing-tun patches
 
-Upstream source: v0.9.4-0.20260914145202-3a0d3878577a, as required by the
-sing-box v1.15.0-alpha.4 (4566ef0890e0cde8448000e8aa3223fb286daa94).
+Upstream source: v0.9.4-0.20260916043548-e842d006fa65, as required by the
+sing-box v1.15.0-alpha.5 (37611b410481dfca1265873284c9bfd3f04f8fd6).
 
 The fork retains bounded asynchronous first-flow routing, fixed DNS failure
 retry deadlines, writeback outside the flow-table lock, selector cancellation,
@@ -27,3 +27,6 @@ receiver rejects the ACK. The Linux zero-window regression verifies that
 uploaded data is acknowledged while the download remains blocked. The
 half-close fixture fills the receive window one frame at a time to account
 for Linux IPv6 packet memory limits while retaining the FIN-loss checks.
+
+The alpha.5 update retains the window-edge ACK and incremental half-close
+regressions while masking the new goPermitWindowBit in window comparisons.

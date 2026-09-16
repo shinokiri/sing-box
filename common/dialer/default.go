@@ -123,6 +123,11 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 					networkStrategy = common.Ptr(C.NetworkStrategyDefault)
 					defaultNetworkStrategy = true
 				}
+				if options.TCPFastOpen {
+					if err := checkTFOInterfaceOptions(networkStrategy, networkType, fallbackNetworkType); err != nil {
+						return nil, err
+					}
+				}
 				bindFunc := networkManager.ProtectFunc()
 				dialer.Control = control.Append(dialer.Control, bindFunc)
 				listenConfig.Control = control.Append(listenConfig.Control, bindFunc)
@@ -284,9 +289,9 @@ func (d *DefaultDialer) DialContext(ctx context.Context, network string, address
 				}
 			}
 			if !address.IsIPv6() {
-				return DialSlowContext(&d.dialer4, ctx, network, address)
+				return dialSlowContext(&d.dialer4, ctx, network, address, d.netns)
 			} else {
-				return DialSlowContext(&d.dialer6, ctx, network, address)
+				return dialSlowContext(&d.dialer6, ctx, network, address, d.netns)
 			}
 		})
 		return d.trackConn(ctx, address, conn, err)
@@ -310,6 +315,10 @@ func (d *DefaultDialer) DialParallelInterface(ctx context.Context, network strin
 	}
 	if fallbackDelay == 0 {
 		fallbackDelay = d.networkFallbackDelay
+	}
+	if N.NetworkName(network) == N.NetworkTCP && !d.dialer4.DisableTFO {
+		conn, err := d.dialTFOInterface(ctx, network, address, strategy, interfaceType, fallbackInterfaceType)
+		return d.trackConn(ctx, address, conn, err)
 	}
 	var dialer net.Dialer
 	if N.NetworkName(network) == N.NetworkTCP {

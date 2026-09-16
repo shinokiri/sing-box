@@ -18,15 +18,14 @@ import (
 )
 
 const (
-	goConnStateJudged uint32 = iota
-	goConnStateEngaged
-	goConnStateEstablished
-	goConnStateAborted
-	goConnStateDead
+	goPhaseJudged uint8 = iota
+	goPhaseEngaged
+	goPhaseEstablished
 )
 
 const (
 	goTCPSynReceived uint8 = iota
+	goTCPSynSent
 	goTCPEstablished
 	goTCPFinWait1
 	goTCPFinWait2
@@ -34,12 +33,6 @@ const (
 	goTCPCloseWait
 	goTCPLastAck
 	goTCPClosed
-)
-
-const (
-	goCloseModeNone uint32 = iota
-	goCloseModeGraceful
-	goCloseModeAbort
 )
 
 const (
@@ -52,6 +45,7 @@ const (
 	goTimeUnit         = 4096
 	goTimestampShift   = 20
 	goLocalWindowShift = 7
+	goPermitWindowBit  = 1 << 63
 )
 
 var errGoReset = E.Cause(syscall.ECONNRESET, "go: connection reset by peer")
@@ -63,20 +57,21 @@ type goPostedReceive struct {
 	filled int
 }
 
-type goConnError struct {
-	err error
-}
+var (
+	goTargetTaken  goPostedReceive
+	goTargetFilled goPostedReceive
+)
 
 type GoConn struct {
 	engine                *goEngine
 	key                   flowKey
-	source                M.Socksaddr
-	destination           M.Socksaddr
+	peer                  M.Socksaddr
+	local                 M.Socksaddr
 	epoch                 int64
 	receiveNext           uint64
 	receiveCapacity       uint64
-	receiveCapacityMax    uint64
 	publishedEdge         uint64
+	sentEdge              uint64
 	receiveRoundTripMark  uint64
 	receiveRoundTripStamp int64
 	receiveSpaceConsumed  uint64
@@ -109,6 +104,7 @@ type GoConn struct {
 	persistDeadline       int64
 	lingerDeadline        int64
 	handshakeDeadline     int64
+	handshakeStamp        int64
 	idleDeadline          int64
 	pacingDeadline        int64
 	reorderDeadline       int64
@@ -172,17 +168,17 @@ type GoConn struct {
 	peerWindowShift         uint8
 	localWindowShift        uint8
 	peerMSS                 uint16
-	effectiveMSS            uint16
+	effectiveMSS            atomic.Uint32
 	lastPeerWindow          uint16
-	synAckLength            uint8
+	handshakeLength         uint8
 	keyed                   bool
+	socket                  bool
 	finPending              bool
 	sackPermitted           bool
 	timestampsEnabled       bool
 	discardReceive          bool
 	finSent                 bool
 	finAcked                bool
-	finReceived             bool
 	ackForced               bool
 	ackDirty                bool
 	onBlockedList           bool
@@ -194,107 +190,117 @@ type GoConn struct {
 	ackNext                 *GoConn
 	blockedNext             *GoConn
 	dyingNext               *GoConn
-	synAckImage             [96]byte
+	splice                  *goSpliceStream
+	listener                *GoListener
+	handshakeImage          [96]byte
 	_                       [64]byte
 
-	sendPermit               atomic.Uint64
-	sendPacketPermit         atomic.Uint32
-	packetCreditBase         atomic.Uint32
-	sendUnacked              atomic.Uint64
-	sendReleased             atomic.Uint64
-	receiveNextAck           atomic.Uint64
-	receiveEdge              atomic.Uint64
-	sentEdge                 atomic.Uint64
-	receiveAvailable         atomic.Uint64
-	receiveCapacityPublished atomic.Uint64
-	windowUpdateThreshold    atomic.Uint64
-	deliveryState            atomic.Uint64
-	pacingRate               atomic.Uint64
-	peakFlight               atomic.Uint64
-	pacingStamp              atomic.Int64
-	pacingRequest            atomic.Int64
-	firstSentStamp           atomic.Int32
-	appLimited               atomic.Uint32
-	frameLimit               atomic.Uint32
-	tsRecent                 atomic.Uint32
-	permitWindowBound        atomic.Bool
-	windowLimitedSince       atomic.Bool
-	ident                    atomic.Uint32
-	connState                atomic.Uint32
-	receiveShutdown          atomic.Bool
-	everEstablished          atomic.Bool
-	receiveDrainable         atomic.Bool
-	receiveReleased          atomic.Bool
-	_                        [64]byte
+	sendPermit       atomic.Uint64
+	sendPacketPermit atomic.Uint32
+	packetCreditBase atomic.Uint32
+	sendUnacked      atomic.Uint64
+	sendReleased     atomic.Uint64
+	receiveNextAck   atomic.Uint64
+	receiveEdge      atomic.Uint64
+	receiveAvailable atomic.Uint64
+	windowUpdateAt   atomic.Uint64
+	deliveryState    atomic.Uint64
+	pacingRate       atomic.Uint64
+	pacingStamp      atomic.Int64
+	queuedBytes      atomic.Int64
+	departedTail     atomic.Uint64
+	queueThrottled   atomic.Bool
+	firstSentStamp   atomic.Int32
+	appLimited       atomic.Uint32
+	frameLimit       atomic.Uint32
+	tsRecent         atomic.Uint32
+	_                [64]byte
 
-	sentTail          atomic.Uint64
-	transmittedTail   atomic.Uint64
-	bufferedTail      atomic.Uint64
-	writerParked      atomic.Bool
-	retransmitArmed   atomic.Bool
-	writerActive      atomic.Int32
-	flushActive       atomic.Int32
-	writerNeeds       atomic.Int32
-	transmitterActive atomic.Int32
-	transmitOwner     atomic.Int32
-	dataSegmentsOut   atomic.Uint32
-	_                 [64]byte
+	transmitAccess     sync.Mutex
+	sentTail           atomic.Uint64
+	transmittedTail    atomic.Uint64
+	dataSentEdge       atomic.Uint64
+	peakFlight         atomic.Uint64
+	pacingRequest      atomic.Int64
+	dataSegmentsOut    atomic.Uint32
+	ident              atomic.Uint32
+	windowLimitedSince atomic.Bool
+	transmitStore      goTransmitStore
+	descriptors        goDescriptorRing
+	transmitScratch    [goHeaderScratchSize]byte
+	transmitSegments   [][]byte
+	blockedSegment     goSegment
+	blockedFrame       [][]byte
+	blockedMeta        ForwardFrameMeta
+	blockedValid       bool
+	_                  [64]byte
 
-	consumedTail atomic.Uint64
-	readerParked atomic.Bool
-	readerActive atomic.Int32
-	postedTarget atomic.Pointer[goPostedReceive]
-	targetDone   atomic.Bool
-	_            [64]byte
+	writeAccess   sync.Mutex
+	bufferedTail  atomic.Uint64
+	writerWaiting atomic.Int32
+	writeDeadline pipe.Deadline
+	writeSignal   goSignal
+	_             [64]byte
 
-	transmitStore    goTransmitStore
-	slabHolder       goSlabHolder
-	transmitScratch  [goHeaderScratchSize]byte
-	transmitSegments [][]byte
-	descriptors      goDescriptorRing
-	blockedSegment   goSegment
-	blockedFrame     [][]byte
-	blockedMeta      ForwardFrameMeta
-	blockedValid     bool
-
+	readAccess      sync.Mutex
+	consumedTail    atomic.Uint64
+	readerParked    atomic.Bool
+	postedTarget    atomic.Pointer[goPostedReceive]
 	receiveTarget   goPostedReceive
 	readWaitOptions N.ReadWaitOptions
 	readDeadline    pipe.Deadline
-	writeDeadline   pipe.Deadline
+	readSignal      goSignal
+	_               [64]byte
 
-	writeAccess       sync.Mutex
-	readAccess        sync.Mutex
-	readSignal        goSignal
-	writeSignal       goSignal
-	transmitSignal    goSignal
-	establishedSignal chan struct{}
-	closeSignal       chan struct{}
-	connErr           atomic.Pointer[goConnError]
-	closeMode         atomic.Uint32
-	writeShut         atomic.Bool
-	readShut          atomic.Bool
-	userClosed        atomic.Bool
-	finRequested      atomic.Bool
-	engageMessage     goMessage
-	closeMessage      goMessage
-	readShutMessage   goMessage
-	retransmitMessage goMessage
-	windowMessage     goMessage
-	blockedMessage    goMessage
-	droppedMessage    goMessage
-	pacingMessage     goMessage
-	spliceMessage     goMessage
-	splicePending     atomic.Pointer[goSpliceStream]
-	spliced           atomic.Bool
-	splice            *goSpliceStream
+	access             sync.Mutex
+	phase              uint8
+	receiveCapacityMax uint64
+	transmitCapacity   uint64
+	keepaliveIdle      time.Duration
+	keepaliveInterval  time.Duration
+	keepaliveCount     uint8
+	keepaliveEnabled   bool
+	nagle              bool
+	linger             int
+	dead               bool
+	finReceived        bool
+	drainable          bool
+	released           bool
+	spliced            bool
+	userClosed         bool
+	writeShut          bool
+	readShut           bool
+	finRequested       bool
+	abort              bool
+	writing            bool
+	transmitterRunning bool
+	err                error
+	splicePending      *goSpliceStream
+	establishedSignal  chan struct{}
+	finAckedSignal     chan struct{}
+	closeSignal        chan struct{}
+	transmitSignal     goSignal
+	dialMessage        goMessage
+	engageMessage      goMessage
+	closeMessage       goMessage
+	readShutMessage    goMessage
+	retransmitMessage  goMessage
+	windowMessage      goMessage
+	transmitMessage    goMessage
+	blockedMessage     goMessage
+	droppedMessage     goMessage
+	pacingMessage      goMessage
+	throttleMessage    goMessage
+	spliceMessage      goMessage
+	slabHolder         goSlabHolder
 }
 
-func (c *GoConn) initialize(engine *goEngine, key flowKey, source M.Socksaddr, destination M.Socksaddr) {
+func (c *GoConn) initialize(engine *goEngine, key flowKey, peer M.Socksaddr, local M.Socksaddr) {
 	c.engine = engine
 	c.key = key
-	c.source = source
-	c.destination = destination
-	c.epoch = engine.now()
+	c.peer = peer
+	c.local = local
+	c.epoch = engine.coarseTime.Load()
 	c.lastSendStamp = -1
 	c.readDeadline = pipe.MakeDeadline()
 	c.writeDeadline = pipe.MakeDeadline()
@@ -302,20 +308,41 @@ func (c *GoConn) initialize(engine *goEngine, key flowKey, source M.Socksaddr, d
 	c.writeSignal = make(goSignal, 1)
 	c.transmitSignal = make(goSignal, 1)
 	c.establishedSignal = make(chan struct{})
+	c.finAckedSignal = make(chan struct{})
 	c.closeSignal = make(chan struct{})
+	c.receiveCapacityMax = goReceiveCapacityMax
+	c.transmitCapacity = goTransmitCapacityMax
+	c.keepaliveIdle = tcpEstablishedTimeout
+	c.keepaliveInterval = goKeepaliveInterval
+	c.keepaliveCount = goKeepaliveCount
+	c.keepaliveEnabled = true
+	c.linger = -1
 	c.receiveChain = goSlabChain{maxSlots: goReceiveCapacityMax/goSlabSize + 1, pool: engine.slabPool, holder: &c.slabHolder}
 	c.transmitStore.chain = goSlabChain{maxSlots: goTransmitCapacityMax/goSlabSize + 1, pool: engine.slabPool, holder: &c.slabHolder}
 	c.descriptors.pool = &engine.descriptorPool
-	c.timerNode.expire = c.expireTimer
+	c.timerNode.expire = func(now int64) { engine.fireConnTimer(c, now) }
 	c.engageMessage = goMessage{kind: goMessageConnEngage, conn: c}
 	c.closeMessage = goMessage{kind: goMessageConnClose, conn: c}
 	c.readShutMessage = goMessage{kind: goMessageConnReadShut, conn: c}
 	c.retransmitMessage = goMessage{kind: goMessageConnRetransmit, conn: c}
 	c.windowMessage = goMessage{kind: goMessageConnWindow, conn: c}
+	c.transmitMessage = goMessage{kind: goMessageConnTransmit, conn: c}
 	c.blockedMessage = goMessage{kind: goMessageConnBlocked, conn: c}
 	c.droppedMessage = goMessage{kind: goMessageConnDropped, conn: c}
 	c.pacingMessage = goMessage{kind: goMessageConnPacing, conn: c}
+	c.throttleMessage = goMessage{kind: goMessageConnThrottle, conn: c}
 	c.spliceMessage = goMessage{kind: goMessageConnSplice, conn: c}
+}
+
+func (c *GoConn) handshaking() bool {
+	return c.state == goTCPSynReceived || c.state == goTCPSynSent
+}
+
+func (c *GoConn) receiveWindowBound() uint64 {
+	c.access.Lock()
+	capacityMax := c.receiveCapacityMax
+	c.access.Unlock()
+	return min(capacityMax, uint64(0xffff)<<c.localWindowShift)
 }
 
 func (c *GoConn) sendNext() uint64 {
@@ -326,7 +353,7 @@ func (c *GoConn) sendNext() uint64 {
 }
 
 func (c *GoConn) ackThreshold() uint64 {
-	threshold := min(2*uint64(c.effectiveMSS), c.receiveCapacity/2)
+	threshold := min(2*uint64(c.effectiveMSS.Load()), c.receiveCapacity/2)
 	if c.engine.ackCoalescing {
 		threshold = min(max(threshold, min(c.receiveCapacity/4, goAckCoalesceBytes)), c.receiveCapacity/2)
 	}
@@ -337,81 +364,39 @@ func (c *GoConn) stamp(now int64) int32 {
 	return int32((now - c.epoch) / goTimeUnit)
 }
 
-func (c *GoConn) storeError(err error) {
-	c.connErr.CompareAndSwap(nil, &goConnError{err: err})
-}
-
-func (c *GoConn) loadError() error {
-	value := c.connErr.Load()
-	if value == nil {
-		return nil
-	}
-	return value.err
+func (c *GoConn) closed() bool {
+	c.access.Lock()
+	dead := c.dead
+	c.access.Unlock()
+	return dead
 }
 
 func (c *GoConn) closeError() error {
-	err := c.loadError()
+	c.access.Lock()
+	err := c.err
+	c.access.Unlock()
 	if err != nil {
 		return err
 	}
 	return net.ErrClosed
 }
 
-func (c *GoConn) enterWriter() bool {
-	c.writerActive.Add(1)
-	if c.connState.Load() >= goConnStateAborted {
-		c.writerActive.Add(-1)
-		c.engine.reapAfterExit()
-		return false
+func (c *GoConn) fail(err error) {
+	c.access.Lock()
+	if c.err == nil {
+		c.err = err
 	}
-	return true
-}
-
-func (c *GoConn) exitWriter() {
-	c.flushActive.Add(1)
-	c.writerActive.Add(-1)
-	if c.connState.Load() < goConnStateAborted {
-		sent := c.sentTail.Load()
-		if c.bufferedTail.Load() > sent {
-			c.transmitInline()
-		} else {
-			c.checkAppLimited(0, c.sendPermit.Load(), sent)
-		}
-	}
-	c.flushActive.Add(-1)
-	c.engine.reapAfterExit()
-	if c.finRequested.Load() {
-		c.engine.postMessage(&c.closeMessage)
-	}
-}
-
-func (c *GoConn) enterReader() bool {
-	c.readerActive.Add(1)
-	state := c.connState.Load()
-	if state < goConnStateAborted {
-		return true
-	}
-	if state == goConnStateDead && c.receiveDrainable.Load() && !c.receiveReleased.Load() {
-		return true
-	}
-	c.exitReader()
-	return false
-}
-
-func (c *GoConn) exitReader() {
-	c.readerActive.Add(-1)
-	c.engine.reapAfterExit()
-}
-
-func (c *GoConn) requestAbort(err error) {
-	c.storeError(err)
-	c.closeMode.Store(goCloseModeAbort)
+	c.abort = true
+	c.access.Unlock()
 	c.engine.postMessage(&c.closeMessage)
 }
 
 func (c *GoConn) awaitHandshake(ctx context.Context, deadlineSignal <-chan struct{}) error {
-	state := c.connState.Load()
-	if state >= goConnStateEstablished {
+	c.access.Lock()
+	phase := c.phase
+	dead := c.dead
+	c.access.Unlock()
+	if phase == goPhaseEstablished || dead {
 		return c.handshakeResult()
 	}
 	select {
@@ -419,12 +404,7 @@ func (c *GoConn) awaitHandshake(ctx context.Context, deadlineSignal <-chan struc
 		return os.ErrDeadlineExceeded
 	default:
 	}
-	if c.connState.CompareAndSwap(goConnStateJudged, goConnStateEngaged) {
-		err := c.writeSynAck()
-		if err != nil {
-			c.requestAbort(E.Cause(err, "go: send SYN-ACK"))
-			return err
-		}
+	if phase == goPhaseJudged {
 		c.engine.postMessage(&c.engageMessage)
 	}
 	select {
@@ -433,42 +413,42 @@ func (c *GoConn) awaitHandshake(ctx context.Context, deadlineSignal <-chan struc
 	case <-deadlineSignal:
 		return os.ErrDeadlineExceeded
 	case <-ctx.Done():
-		c.requestAbort(ctx.Err())
+		c.fail(ctx.Err())
 		return E.Cause(ctx.Err(), "go: handshake")
 	case <-c.engine.stack.ctx.Done():
 		cause := context.Cause(c.engine.stack.ctx)
-		c.requestAbort(cause)
+		c.fail(cause)
 		return E.Cause(cause, "go: handshake")
 	}
 }
 
 func (c *GoConn) handshakeResult() error {
-	err := c.loadError()
-	if err != nil {
-		return err
+	c.access.Lock()
+	defer c.access.Unlock()
+	if c.err != nil {
+		return c.err
 	}
-	if c.everEstablished.Load() {
-		return nil
-	}
-	if c.connState.Load() >= goConnStateAborted {
+	if c.dead && c.phase != goPhaseEstablished {
 		return net.ErrClosed
 	}
 	return nil
 }
 
 func (c *GoConn) HandshakeFailure(err error) error {
-	if c.connState.CompareAndSwap(goConnStateJudged, goConnStateAborted) {
-		c.storeError(err)
-		writeErr := c.writeReset()
-		c.closeMode.Store(goCloseModeAbort)
-		c.engine.postMessage(&c.closeMessage)
-		return writeErr
-	}
-	if c.connState.Load() >= goConnStateAborted {
+	c.access.Lock()
+	if c.dead {
+		c.access.Unlock()
 		return os.ErrInvalid
 	}
-	c.userClosed.Store(true)
-	c.requestAbort(err)
+	c.userClosed = true
+	c.writeShut = true
+	c.readShut = true
+	c.abort = true
+	if c.err == nil {
+		c.err = err
+	}
+	c.access.Unlock()
+	c.engine.postMessage(&c.closeMessage)
 	return nil
 }
 
@@ -477,11 +457,15 @@ func (c *GoConn) HandshakeSuccess() error {
 }
 
 func (c *GoConn) NeedHandshakeForRead() bool {
-	return c.connState.Load() < goConnStateEstablished
+	c.access.Lock()
+	defer c.access.Unlock()
+	return c.phase != goPhaseEstablished
 }
 
 func (c *GoConn) NeedHandshakeForWrite() bool {
-	return c.connState.Load() < goConnStateEstablished
+	c.access.Lock()
+	defer c.access.Unlock()
+	return c.phase != goPhaseEstablished
 }
 
 func (c *GoConn) InitializeReadWaiter(options N.ReadWaitOptions) bool {
@@ -495,11 +479,16 @@ func (c *GoConn) WaitReadBuffer() (*buf.Buffer, error) {
 		return nil, err
 	}
 	c.readAccess.Lock()
-	defer c.readAccess.Unlock()
-	if !c.enterReader() {
+	buffer, err := c.waitReadBufferLocked()
+	c.readAccess.Unlock()
+	c.engine.reapAfterExit()
+	return buffer, err
+}
+
+func (c *GoConn) waitReadBufferLocked() (*buf.Buffer, error) {
+	if !c.readable() {
 		return nil, c.receiveResult()
 	}
-	defer c.exitReader()
 	for {
 		select {
 		case <-c.readDeadline.Wait():
@@ -547,11 +536,16 @@ func (c *GoConn) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	c.readAccess.Lock()
-	defer c.readAccess.Unlock()
-	if !c.enterReader() {
+	n, err := c.readLocked(p)
+	c.readAccess.Unlock()
+	c.engine.reapAfterExit()
+	return n, err
+}
+
+func (c *GoConn) readLocked(p []byte) (int, error) {
+	if !c.readable() {
 		return 0, c.receiveResult()
 	}
-	defer c.exitReader()
 	for {
 		select {
 		case <-c.readDeadline.Wait():
@@ -584,18 +578,22 @@ func (c *GoConn) Read(p []byte) (int, error) {
 	}
 }
 
+func (c *GoConn) readable() bool {
+	c.access.Lock()
+	defer c.access.Unlock()
+	return !c.dead || (c.drainable && !c.released)
+}
+
 func (c *GoConn) receiveResult() error {
-	err := c.loadError()
-	if err != nil {
-		return err
+	c.access.Lock()
+	defer c.access.Unlock()
+	if c.err != nil {
+		return c.err
 	}
-	if c.userClosed.Load() {
+	if c.userClosed {
 		return net.ErrClosed
 	}
-	if c.readShut.Load() || c.receiveShutdown.Load() {
-		return io.EOF
-	}
-	if c.connState.Load() >= goConnStateAborted {
+	if c.readShut || c.finReceived || c.dead {
 		return io.EOF
 	}
 	return nil
@@ -613,26 +611,9 @@ func (c *GoConn) copyReceived(target []byte, consumed uint64, available uint64) 
 }
 
 func (c *GoConn) advanceConsumed(n int) {
-	if c.windowUpdateDue(c.consumedTail.Add(uint64(n))) {
+	if c.consumedTail.Add(uint64(n)) >= c.windowUpdateAt.Load() {
 		c.engine.postMessage(&c.windowMessage)
 	}
-}
-
-func (c *GoConn) windowUpdateDue(consumed uint64) bool {
-	edge := c.sentEdge.Load()
-	capacity := c.receiveCapacityPublished.Load()
-	free := consumed + capacity
-	if free <= edge || free-edge < c.windowUpdateThreshold.Load() {
-		return false
-	}
-	available := c.receiveAvailable.Load()
-	if available < edge {
-		window := edge - available
-		if 2*window > capacity || free-available < 2*window {
-			return false
-		}
-	}
-	return true
 }
 
 func (c *GoConn) parkReader() (bool, error) {
@@ -643,7 +624,6 @@ func (c *GoConn) parkReader() (bool, error) {
 	} else {
 		target.target = target.direct
 	}
-	c.targetDone.Store(false)
 	c.readSignal.drain()
 	c.postedTarget.Store(target)
 	c.readerParked.Store(true)
@@ -679,75 +659,91 @@ func (c *GoConn) claimTarget(target *goPostedReceive) bool {
 		target.target = nil
 		return false
 	}
-	for !c.targetDone.Load() {
+	for c.postedTarget.Load() != &goTargetFilled {
 		<-c.readSignal
 	}
+	c.postedTarget.Store(nil)
 	target.target = nil
 	return true
 }
 
 func (c *GoConn) Close() error {
-	if c.connState.CompareAndSwap(goConnStateJudged, goConnStateAborted) {
-		c.storeError(net.ErrClosed)
-		writeErr := c.writeReset()
-		c.closeMode.Store(goCloseModeAbort)
-		c.engine.postMessage(&c.closeMessage)
-		return writeErr
-	}
-	if !c.userClosed.CompareAndSwap(false, true) {
+	c.access.Lock()
+	if c.userClosed {
+		c.access.Unlock()
 		return nil
 	}
-	c.writeShut.Store(true)
-	c.readShut.Store(true)
-	if c.connState.Load() == goConnStateEngaged || c.splicePending.Load() != nil || c.spliced.Load() {
-		c.requestAbort(net.ErrClosed)
-		return nil
-	}
-	if c.connState.Load() >= goConnStateAborted {
-		c.engine.postMessage(&c.closeMessage)
-		c.wakeUser()
-		return nil
-	}
-	if c.receiveAvailable.Load() > c.consumedTail.Load() {
-		c.closeMode.CompareAndSwap(goCloseModeNone, goCloseModeAbort)
+	c.userClosed = true
+	c.writeShut = true
+	c.readShut = true
+	linger := c.linger
+	graceful := !c.dead && !c.abort && linger != 0 && c.phase == goPhaseEstablished && !c.spliced && c.splicePending == nil &&
+		c.receiveAvailable.Load() <= c.consumedTail.Load()
+	if graceful {
+		c.finRequested = true
 	} else {
-		c.closeMode.CompareAndSwap(goCloseModeNone, goCloseModeGraceful)
-		c.finRequested.Store(true)
+		c.abort = true
+		if c.err == nil {
+			c.err = net.ErrClosed
+		}
+	}
+	c.access.Unlock()
+	if graceful {
 		c.engine.postMessage(&c.readShutMessage)
 	}
 	c.engine.postMessage(&c.closeMessage)
 	c.wakeUser()
+	if graceful && linger > 0 {
+		timer := time.NewTimer(time.Duration(linger) * time.Second)
+		defer timer.Stop()
+		select {
+		case <-c.finAckedSignal:
+		case <-c.closeSignal:
+		case <-timer.C:
+		}
+	}
 	return nil
 }
 
 func (c *GoConn) CloseRead() error {
-	if c.connState.Load() >= goConnStateAborted {
+	c.access.Lock()
+	if c.dead {
+		c.access.Unlock()
 		return nil
 	}
-	c.readShut.Store(true)
+	c.readShut = true
+	c.access.Unlock()
 	c.engine.postMessage(&c.readShutMessage)
 	c.readSignal.notify()
 	return nil
 }
 
 func (c *GoConn) CloseWrite() error {
-	if c.connState.Load() >= goConnStateAborted {
+	c.access.Lock()
+	if c.dead {
+		c.access.Unlock()
 		return nil
 	}
-	c.writeShut.Store(true)
-	c.closeMode.CompareAndSwap(goCloseModeNone, goCloseModeGraceful)
-	c.finRequested.Store(true)
+	c.writeShut = true
+	c.finRequested = true
+	c.access.Unlock()
 	c.engine.postMessage(&c.closeMessage)
 	c.writeSignal.notify()
 	return nil
 }
 
 func (c *GoConn) LocalAddr() net.Addr {
-	return c.source.TCPAddr()
+	if c.socket {
+		return c.local.TCPAddr()
+	}
+	return c.peer.TCPAddr()
 }
 
 func (c *GoConn) RemoteAddr() net.Addr {
-	return c.destination.TCPAddr()
+	if c.socket {
+		return c.peer.TCPAddr()
+	}
+	return c.local.TCPAddr()
 }
 
 func (c *GoConn) SetDeadline(t time.Time) error {
@@ -785,7 +781,6 @@ func (s goSignal) drain() {
 }
 
 var (
-	_ net.Conn           = (*GoConn)(nil)
 	_ N.ReadWaiter       = (*GoConn)(nil)
 	_ N.ExtendedWriter   = (*GoConn)(nil)
 	_ N.FrontHeadroom    = (*GoConn)(nil)

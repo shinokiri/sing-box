@@ -145,7 +145,7 @@ func (d *resolveParallelNetworkDialer) DialParallelInterface(ctx context.Context
 		return nil, err
 	}
 	if !destination.IsDomain() {
-		return d.dialer.DialContext(ctx, network, destination)
+		return d.dialer.DialParallelInterface(ctx, network, destination, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
 	}
 	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
 	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
