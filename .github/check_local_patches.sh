@@ -2,7 +2,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-for module in sing-mux sing-tun; do
+for module in sing-mux sing-tun sing-snell; do
     base="$(cat "third_party/$module/UPSTREAM_VERSION")"
     for directory in . test; do
         required="$(go -C "$directory" list -m -f '{{.Version}}' "github.com/sagernet/$module")"

@@ -428,3 +428,12 @@ GitHub loads schedules only from the default branch. Manual dispatch with
 
 Prepared from the uploaded `sing-box-snell-udp-flow` snapshot whose archive
 comment identifies commit `a5defef983dd0e0584e6bc1e0173c055f76a3bd9`.
+
+
+## URLTest handoff with TCP Fast Open
+
+Snell v6 with `reuse: true` now reserves one physical proxy session for the existing warm HEAD and measured HEAD. The measured DialContext waits for the warmup server EOF, so it returns a reusable session before the existing URLTest timer reset. Background traffic cannot take the reserved session, and loss of the session produces an error rather than a fresh connection in the measured phase.
+
+The destination TCP/TLS connection, HEAD request, target URL, displayed metric and TFO settings are unchanged. The initial warmup still uses the configured underlying dialer and TFO. Preparation is bounded by the existing URLTest timeout, including individual node checks. The reservation is closed at the end of the test.
+
+The sing-snell module is pinned under `third_party/sing-snell`, alongside the existing local dependency patches. Both root and test modules must match its `UPSTREAM_VERSION`. Protocol/session tests run under the race detector; the original Android platform TFO socket tests remain required.

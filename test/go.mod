@@ -10,6 +10,8 @@ replace github.com/sagernet/sing-mux => ../third_party/sing-mux
 
 replace github.com/sagernet/sing-tun => ../third_party/sing-tun
 
+replace github.com/sagernet/sing-snell => ../third_party/sing-snell
+
 require (
 	github.com/docker/docker v27.3.1+incompatible
 	github.com/docker/go-connections v0.5.0

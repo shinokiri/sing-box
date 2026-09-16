@@ -3,5 +3,5 @@
   "upstream_version": "1.15.0-alpha.5",
   "upstream_commit": "37611b410481dfca1265873284c9bfd3f04f8fd6",
   "android_client_commit": "13e5e87425505232171aee0a1e530265cd2cefda",
-  "fork_revision": 1
+  "fork_revision": 2
 }
