@@ -38,22 +38,22 @@ type tfoInterfaceMonitor struct {
 }
 
 func (m tfoInterfaceMonitor) DefaultInterface() *control.Interface { return m.loopback }
-func (m tfoInterfaceMonitor) MyInterfaces() []string { return nil }
+func (m tfoInterfaceMonitor) MyInterfaces() []string               { return nil }
 
 type tfoNetworkManager struct {
 	adapter.NetworkManager
 	defaults adapter.NetworkOptions
-	protect control.Func
+	protect  control.Func
 	loopback *control.Interface
 }
 
 func (m *tfoNetworkManager) InterfaceFinder() control.InterfaceFinder {
 	return control.NewDefaultInterfaceFinder()
 }
-func (m *tfoNetworkManager) AutoDetectInterface() bool { return true }
-func (m *tfoNetworkManager) DefaultOptions() adapter.NetworkOptions { return m.defaults }
-func (m *tfoNetworkManager) ProtectFunc() control.Func { return m.protect }
-func (m *tfoNetworkManager) AutoDetectInterfaceFunc() control.Func { return m.protect }
+func (m *tfoNetworkManager) AutoDetectInterface() bool                { return true }
+func (m *tfoNetworkManager) DefaultOptions() adapter.NetworkOptions   { return m.defaults }
+func (m *tfoNetworkManager) ProtectFunc() control.Func                { return m.protect }
+func (m *tfoNetworkManager) AutoDetectInterfaceFunc() control.Func    { return m.protect }
 func (m *tfoNetworkManager) AutoRedirectOutputMarkFunc() control.Func { return nil }
 func (m *tfoNetworkManager) InterfaceMonitor() tun.DefaultInterfaceMonitor {
 	return tfoInterfaceMonitor{loopback: m.loopback}
@@ -71,7 +71,7 @@ func tfoContext(t *testing.T, defaults adapter.NetworkOptions, protect control.F
 	ctx := service.ExtendContext(context.Background())
 	service.MustRegister[adapter.NetworkManager](ctx, &tfoNetworkManager{
 		defaults: defaults,
-		protect: protect,
+		protect:  protect,
 		loopback: &control.Interface{Name: loopback.Name, Index: loopback.Index},
 	})
 	service.MustRegister[adapter.PlatformInterface](ctx, tfoPlatform{})
@@ -129,7 +129,7 @@ func TestPlatformTCPFastOpen(t *testing.T) {
 						protected.Add(1)
 						return nil
 					})
-					ctx, cancel := context.WithTimeout(ctx, 5 * time.Second)
+					ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 					defer cancel()
 					dialer, err := NewDefault(ctx, tfoOptions(t, fmt.Sprintf(`{"tcp_fast_open":%v}`, enabled)))
 					if err != nil {
@@ -182,7 +182,9 @@ func TestPlatformTCPFastOpen(t *testing.T) {
 					var socketErr error
 					if err = raw.Control(func(fd uintptr) {
 						socketValue, socketErr = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_FASTOPEN_CONNECT)
-					}); err != nil { t.Fatal(err) }
+					}); err != nil {
+						t.Fatal(err)
+					}
 					if socketErr != nil {
 						t.Fatal(socketErr)
 					}
@@ -216,9 +218,9 @@ func TestPlatformTFORejectsNetworkOverrides(t *testing.T) {
 	hybrid := C.NetworkStrategyHybrid
 	fallback := C.NetworkStrategyFallback
 	for _, test := range []struct {
-		name string
+		name     string
 		defaults adapter.NetworkOptions
-		options string
+		options  string
 	}{
 		{"inherited_hybrid", adapter.NetworkOptions{NetworkStrategy: &hybrid}, `{"tcp_fast_open":true}`},
 		{"inherited_fallback", adapter.NetworkOptions{NetworkStrategy: &fallback}, `{"tcp_fast_open":true}`},
