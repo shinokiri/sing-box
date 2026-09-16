@@ -63,7 +63,7 @@ func TestUDPFlowFakeIPRouting(t *testing.T) {
 				for index, domain := range []string{"a.test", "b.test"} {
 					fake, err := store.Create(domain, ipv6)
 					require.NoError(t, err)
-					verdict := adapter.JudgeFlow(instance.Router(), "tun", C.TypeTun, uint8(header.UDPProtocolNumber), source, netip.AddrPortFrom(fake, 443), nil)
+					verdict := adapter.JudgeFlow(instance.Router(), adapter.InboundContext{Inbound: "tun", InboundType: C.TypeTun}, uint8(header.UDPProtocolNumber), source, netip.AddrPortFrom(fake, 443), nil)
 					if !resolve {
 						require.Equal(t, tun.ActionReject, verdict.Action, "an unresolved Fake-IP must not enter the proxy association")
 						continue
@@ -79,7 +79,7 @@ func TestUDPFlowFakeIPRouting(t *testing.T) {
 					expectedPort, err := outbound.(adapter.InboundFlowOutbound).FlowPortForInbound("tun")
 					require.NoError(t, err)
 					require.Same(t, expectedPort, verdict.Port)
-					other := adapter.JudgeFlow(instance.Router(), "other-tun", C.TypeTun, uint8(header.UDPProtocolNumber), source, netip.AddrPortFrom(fake, 443), nil)
+					other := adapter.JudgeFlow(instance.Router(), adapter.InboundContext{Inbound: "other-tun", InboundType: C.TypeTun}, uint8(header.UDPProtocolNumber), source, netip.AddrPortFrom(fake, 443), nil)
 					require.Equal(t, tun.ActionFlow, other.Action)
 					require.NotSame(t, verdict.Port, other.Port)
 					require.Equal(t, verdict.Destination, other.Destination)

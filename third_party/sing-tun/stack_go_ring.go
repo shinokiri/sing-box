@@ -501,7 +501,7 @@ func (p *goDescriptorPool) trim() {
 }
 
 // release requires exclusive access to both sides of the ring. For a live
-// connection the engine holds transmitOwner and checks that all sent data is ACKed.
+// connection the engine holds transmitAccess and checks that all sent data is ACKed.
 func (r *goDescriptorRing) release() {
 	for index := range r.blocks {
 		if block := r.blocks[index].Swap(nil); block != nil {
@@ -647,10 +647,6 @@ func (s *goScoreboard) split(index int, offset uint64) {
 	s.append(goSentDescriptor{})
 	copy(s.entries[index+1:], s.entries[index:len(s.entries)-1])
 	s.entries[index].endOffset = offset
-}
-
-func (s *goScoreboard) reset() {
-	s.entries = nil
 }
 
 func (s *goScoreboard) trim() {

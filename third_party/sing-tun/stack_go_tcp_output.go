@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sagernet/sing-tun/gtcpip"
 	"github.com/sagernet/sing-tun/gtcpip/checksum"
 	"github.com/sagernet/sing-tun/gtcpip/header"
 	"github.com/sagernet/sing-tun/gtcpip/seqnum"
@@ -43,21 +44,78 @@ func (c *GoConn) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	c.writeAccess.Lock()
-	defer c.writeAccess.Unlock()
-	if !c.enterWriter() {
-		return 0, net.ErrClosed
+	var n int
+	if c.enterWriter() {
+		n, err = c.writeLocked(p)
+		c.exitWriter()
+	} else {
+		err = net.ErrClosed
 	}
-	defer c.exitWriter()
-	return c.writeLocked(p)
+	c.writeAccess.Unlock()
+	c.engine.reapAfterExit()
+	return n, err
+}
+
+func (c *GoConn) WriteBuffer(buffer *buf.Buffer) error {
+	err := c.awaitHandshake(context.Background(), c.writeDeadline.Wait())
+	if err != nil {
+		buffer.Release()
+		return err
+	}
+	c.writeAccess.Lock()
+	if c.enterWriter() {
+		err = c.writeBufferLocked(buffer)
+		c.exitWriter()
+	} else {
+		buffer.Release()
+		err = net.ErrClosed
+	}
+	c.writeAccess.Unlock()
+	c.engine.reapAfterExit()
+	return err
+}
+
+func (c *GoConn) enterWriter() bool {
+	c.access.Lock()
+	defer c.access.Unlock()
+	if c.dead || c.spliced || c.splicePending != nil {
+		return false
+	}
+	c.writing = true
+	return true
+}
+
+func (c *GoConn) exitWriter() {
+	c.access.Lock()
+	c.writing = false
+	dead := c.dead
+	finRequested := c.finRequested
+	c.access.Unlock()
+	if !dead {
+		sent := c.sentTail.Load()
+		if c.bufferedTail.Load() > sent {
+			c.transmitPublished()
+		} else {
+			c.checkAppLimited(0, c.sendPermit.Load()&^goPermitWindowBit, sent)
+		}
+	}
+	if finRequested {
+		c.engine.postMessage(&c.closeMessage)
+	}
 }
 
 func (c *GoConn) writeLocked(p []byte) (int, error) {
 	total := 0
 	for {
-		if c.connState.Load() >= goConnStateAborted {
+		c.access.Lock()
+		dead := c.dead
+		writeShut := c.writeShut
+		capacity := c.transmitCapacity
+		c.access.Unlock()
+		if dead {
 			return total, c.closeError()
 		}
-		if c.writeShut.Load() {
+		if writeShut {
 			return total, net.ErrClosed
 		}
 		select {
@@ -68,7 +126,7 @@ func (c *GoConn) writeLocked(p []byte) (int, error) {
 		if len(p) == 0 {
 			return total, nil
 		}
-		budget := c.writeBudget(len(p))
+		budget := c.writeBudget(len(p), capacity)
 		if budget <= 0 {
 			err := c.parkWriter(1)
 			if err != nil {
@@ -88,33 +146,26 @@ func (c *GoConn) writeLocked(p []byte) (int, error) {
 	}
 }
 
-func (c *GoConn) WriteBuffer(buffer *buf.Buffer) error {
-	err := c.awaitHandshake(context.Background(), c.writeDeadline.Wait())
-	if err != nil {
-		buffer.Release()
-		return err
-	}
-	c.writeAccess.Lock()
-	defer c.writeAccess.Unlock()
-	if !c.enterWriter() {
-		buffer.Release()
-		return net.ErrClosed
-	}
-	defer c.exitWriter()
+func (c *GoConn) writeBufferLocked(buffer *buf.Buffer) error {
 	length := buffer.Len()
-	if length > goTransmitCapacityMax {
-		defer buffer.Release()
-		_, err = c.writeLocked(buffer.Bytes())
-		return err
-	}
 	for {
-		if c.connState.Load() >= goConnStateAborted {
+		c.access.Lock()
+		dead := c.dead
+		writeShut := c.writeShut
+		capacity := c.transmitCapacity
+		c.access.Unlock()
+		if dead {
 			buffer.Release()
 			return c.closeError()
 		}
-		if c.writeShut.Load() {
+		if writeShut {
 			buffer.Release()
 			return net.ErrClosed
+		}
+		if uint64(length) > capacity {
+			defer buffer.Release()
+			_, err := c.writeLocked(buffer.Bytes())
+			return err
 		}
 		select {
 		case <-c.writeDeadline.Wait():
@@ -126,14 +177,14 @@ func (c *GoConn) WriteBuffer(buffer *buf.Buffer) error {
 			buffer.Release()
 			return nil
 		}
-		budget := c.writeBudget(length)
+		budget := c.writeBudget(length, capacity)
 		if budget < length {
 			if budget > 0 && c.storeEmpty() {
 				defer buffer.Release()
-				_, err = c.writeLocked(buffer.Bytes())
+				_, err := c.writeLocked(buffer.Bytes())
 				return err
 			}
-			err = c.parkWriter(length)
+			err := c.parkWriter(length)
 			if err != nil {
 				buffer.Release()
 				return err
@@ -143,7 +194,7 @@ func (c *GoConn) WriteBuffer(buffer *buf.Buffer) error {
 		buffered := c.bufferedTail.Load()
 		if !c.transmitStore.adopt(buffered, buffer) {
 			defer buffer.Release()
-			_, err = c.writeLocked(buffer.Bytes())
+			_, err := c.writeLocked(buffer.Bytes())
 			return err
 		}
 		c.publishBuffered(buffered + uint64(length))
@@ -156,62 +207,148 @@ func (c *GoConn) FrontHeadroom() int {
 }
 
 func (c *GoConn) WriterMTU() int {
-	return int(c.gsoMaxSize())
+	return int(c.gsoMaxSize(c.effectiveMSS.Load()))
 }
 
 func (c *GoConn) publishBuffered(tail uint64) {
 	c.bufferedTail.Store(tail)
-	if c.transmitterActive.Load() != 0 {
-		c.transmitSignal.notify()
-		return
-	}
-	c.transmitInline()
+	c.transmitPublished()
 }
 
-func (c *GoConn) transmitInline() {
+func (c *GoConn) transmitPublished() {
+	if goEngineTransmits {
+		c.engine.postMessage(&c.transmitMessage)
+		return
+	}
 	for {
-		if !c.transmitOwner.CompareAndSwap(0, 1) {
+		if !c.transmitAccess.TryLock() {
 			c.transmitSignal.notify()
 			return
 		}
-		_, result := c.transmitLoop(false, 0)
-		c.transmitOwner.Store(0)
+		_, result, armed := c.transmitLoop(false, 0)
+		c.transmitAccess.Unlock()
+		c.afterTransmit(armed)
 		switch result {
 		case goTransmitBlocked:
 			c.wakeTransmitterGoroutine()
 			return
-		case goTransmitPaced:
+		case goTransmitPaced, goTransmitThrottled:
 			return
 		}
-		if c.connState.Load() >= goConnStateAborted || c.nextTransmitLength() == 0 {
+		if c.closed() || c.nextTransmitLength(c.effectiveMSS.Load()) == 0 {
 			return
 		}
 	}
 }
 
-func (c *GoConn) transmitOnEngine() bool {
-	budget := c.engine.inlineTransmitBudget
-	if budget <= 0 {
-		return false
+func (c *GoConn) afterTransmit(armed bool) {
+	if armed {
+		c.engine.postMessage(&c.retransmitMessage)
 	}
-	if !c.transmitOwner.CompareAndSwap(0, 1) {
-		c.transmitSignal.notify()
-		return true
+	c.access.Lock()
+	finRequested := c.finRequested
+	c.access.Unlock()
+	if finRequested && c.sentTail.Load() == c.bufferedTail.Load() {
+		c.engine.postMessage(&c.closeMessage)
 	}
-	written, result := c.transmitLoop(false, budget)
-	c.transmitOwner.Store(0)
-	c.engine.inlineTransmitBudget = budget - written
+}
+
+func (e *goEngine) transmitOnEngine(conn *GoConn, budget int) {
+	if !conn.transmitAccess.TryLock() {
+		conn.transmitSignal.notify()
+		return
+	}
+	written, result, armed := conn.transmitLoop(false, budget)
+	conn.transmitAccess.Unlock()
+	if budget > 0 {
+		e.inlineTransmitBudget = budget - written
+	}
+	if conn.retransmitDeadline == 0 && (armed || conn.hasOutstanding()) {
+		e.rearmRetransmit(conn)
+	}
+	e.maybeSendFin(conn)
 	switch result {
 	case goTransmitBlocked:
-		return false
-	case goTransmitPaced:
-		return true
+		e.handleTransmitBlocked(conn)
+	case goTransmitDone:
+		if !conn.dead && conn.nextTransmitLength(conn.effectiveMSS.Load()) != 0 {
+			e.postMessage(&conn.transmitMessage)
+		}
 	}
-	return c.connState.Load() >= goConnStateAborted || c.nextTransmitLength() == 0
+}
+
+func (e *goEngine) handleTransmitRequest(conn *GoConn) {
+	if conn.dead {
+		return
+	}
+	if conn.splice != nil {
+		e.spliceResume(conn)
+		return
+	}
+	e.transmitOnEngine(conn, 0)
+}
+
+func (e *goEngine) retryBlockedOnEngine(conn *GoConn) {
+	if conn.dead {
+		return
+	}
+	if !conn.transmitAccess.TryLock() {
+		conn.transmitSignal.notify()
+		return
+	}
+	if !conn.blockedValid {
+		conn.transmitAccess.Unlock()
+		return
+	}
+	segment := conn.blockedSegment
+	end := segment.offset + uint64(segment.length)
+	err := conn.transmitFrame(&segment)
+	switch err {
+	case nil:
+	case errGoTransmitBlocked:
+		conn.amendDescriptors(segment.offset, segment.length, goDescriptorNoSample)
+		conn.transmitAccess.Unlock()
+		e.handleTransmitBlocked(conn)
+		return
+	case errGoFrameDropped:
+		conn.amendDescriptors(segment.offset, segment.length, goDescriptorDropped)
+		conn.blockedValid = false
+		conn.blockedFrame = nil
+		conn.transmittedTail.Store(end)
+		conn.transmitAccess.Unlock()
+		e.handleDroppedFrames(conn)
+		return
+	default:
+		conn.transmitAccess.Unlock()
+		e.abortConn(conn, E.Cause(err, "go: write tun"))
+		return
+	}
+	if conn.congestion.pacing {
+		conn.advancePacing(e.coarseTime.Load(), segment.length)
+	}
+	conn.blockedValid = false
+	conn.blockedFrame = nil
+	conn.transmittedTail.Store(end)
+	conn.transmitAccess.Unlock()
+	if conn.splice != nil {
+		e.spliceResume(conn)
+		if conn.splice != nil && conn.splice.downloadClosed {
+			e.maybeSendFin(conn)
+			e.spliceMaybeFinish(conn)
+		}
+		return
+	}
+	e.transmitOnEngine(conn, 0)
 }
 
 func (c *GoConn) wakeTransmitterGoroutine() {
-	if c.transmitterActive.CompareAndSwap(0, 1) {
+	c.access.Lock()
+	spawn := !c.transmitterRunning && !c.dead
+	if spawn {
+		c.transmitterRunning = true
+	}
+	c.access.Unlock()
+	if spawn {
 		go c.runTransmitter()
 		return
 	}
@@ -219,21 +356,24 @@ func (c *GoConn) wakeTransmitterGoroutine() {
 }
 
 func (c *GoConn) hasDataWaiting() bool {
-	return c.bufferedTail.Load() > c.sentTail.Load() || c.writerParked.Load()
+	return c.bufferedTail.Load() > c.sentTail.Load() || c.writerWaiting.Load() != 0
 }
 
 func (c *GoConn) runTransmitter() {
 	defer func() {
-		c.transmitterActive.Store(0)
+		c.access.Lock()
+		c.transmitterRunning = false
+		c.access.Unlock()
 		c.engine.reapAfterExit()
 	}()
 	for {
-		if c.connState.Load() >= goConnStateAborted {
+		if c.closed() {
 			return
 		}
-		if c.transmitOwner.CompareAndSwap(0, 1) {
-			c.transmitLoop(true, 0)
-			c.transmitOwner.Store(0)
+		if c.transmitAccess.TryLock() {
+			_, _, armed := c.transmitLoop(true, 0)
+			c.transmitAccess.Unlock()
+			c.afterTransmit(armed)
 		}
 		select {
 		case <-c.transmitSignal:
@@ -243,43 +383,49 @@ func (c *GoConn) runTransmitter() {
 	}
 }
 
-func (c *GoConn) nextTransmitLength() int {
+func (c *GoConn) nextTransmitLength(mss uint32) int {
 	sent := c.sentTail.Load()
 	pending := c.bufferedTail.Load() - sent
 	if pending == 0 {
 		return 0
 	}
 	permit := c.sendPermit.Load()
-	if permit <= sent {
-		if c.permitWindowBound.Load() {
+	if permit&^goPermitWindowBit <= sent {
+		if permit&goPermitWindowBit != 0 {
 			c.windowLimitedSince.Store(true)
 		}
 		return 0
 	}
+	permit &^= goPermitWindowBit
 	packets := int32(c.sendPacketPermit.Load() - c.dataSegmentsOut.Load())
 	if packets <= 0 {
 		c.windowLimitedSince.Store(true)
 		return 0
 	}
-	length := int(min(pending, permit-sent, uint64(packets)*uint64(c.effectiveMSS)))
-	if pending < uint64(c.effectiveMSS) && c.writerActive.Load() != 0 && sent > c.sendUnacked.Load() {
-		return 0
+	length := int(min(pending, permit-sent, uint64(packets)*uint64(mss)))
+	if pending < uint64(mss) && sent > c.sendUnacked.Load() {
+		c.access.Lock()
+		held := c.writing || c.nagle && !c.finRequested
+		c.access.Unlock()
+		if held {
+			return 0
+		}
 	}
 	// Windows delays the ACK of a lone segment by 40 ms and its receive window auto-tuning never
 	// grows while every window is drained by one segment, so a window narrower than two segments is
 	// always covered by two frames.
 	allowance := permit - c.sendUnacked.Load()
-	if allowance < 2*uint64(c.effectiveMSS) && packets > 1 {
+	if allowance < 2*uint64(mss) && packets > 1 {
 		length = min(length, int((allowance+1)/2))
 	}
-	return c.frameLength(length)
+	return c.frameLength(length, mss)
 }
 
-func (c *GoConn) writeBudget(pending int) int {
+func (c *GoConn) writeBudget(pending int, capacity uint64) int {
 	released := c.sendReleased.Load()
 	buffered := c.bufferedTail.Load()
 	stored := buffered - released
-	if stored >= goTransmitCapacityMax {
+	if stored >= capacity {
 		return 0
 	}
 	if stored >= goTransmitReadAhead {
@@ -289,8 +435,8 @@ func (c *GoConn) writeBudget(pending int) int {
 		}
 	}
 	unacked := c.sendUnacked.Load()
-	permit := max(c.sendPermit.Load(), unacked)
-	limit := min(permit+max(permit-unacked, goTransmitReadAhead), released+goTransmitCapacityMax)
+	permit := max(c.sendPermit.Load()&^goPermitWindowBit, unacked)
+	limit := min(permit+max(permit-unacked, goTransmitReadAhead), released+capacity)
 	budget := int64(limit) - int64(buffered)
 	if pending > 0 {
 		budget = min(budget, int64(pending))
@@ -305,39 +451,48 @@ func (c *GoConn) storeEmpty() bool {
 	return c.bufferedTail.Load() == c.sendReleased.Load()
 }
 
+func (c *GoConn) loadTransmitCapacity() uint64 {
+	c.access.Lock()
+	defer c.access.Unlock()
+	return c.transmitCapacity
+}
+
 func (c *GoConn) writeReady(required int) bool {
-	budget := c.writeBudget(required)
+	budget := c.writeBudget(required, c.loadTransmitCapacity())
 	return budget >= required || (budget > 0 && c.storeEmpty())
 }
 
 func (c *GoConn) parkWriter(required int) error {
-	c.writerNeeds.Store(int32(required))
-	c.writerParked.Store(true)
+	c.writerWaiting.Store(int32(required))
 	c.writeSignal.drain()
 	if c.writeReady(required) {
-		c.writerParked.Store(false)
+		c.writerWaiting.Store(0)
 		return nil
 	}
-	if c.connState.Load() >= goConnStateAborted {
-		c.writerParked.Store(false)
+	c.access.Lock()
+	dead := c.dead
+	writeShut := c.writeShut
+	c.access.Unlock()
+	if dead {
+		c.writerWaiting.Store(0)
 		return c.closeError()
 	}
-	if c.writeShut.Load() {
-		c.writerParked.Store(false)
+	if writeShut {
+		c.writerWaiting.Store(0)
 		return net.ErrClosed
 	}
 	deadlineSignal := c.writeDeadline.Wait()
 	select {
 	case <-c.writeSignal:
 	case <-deadlineSignal:
-		c.writerParked.Store(false)
+		c.writerWaiting.Store(0)
 		return os.ErrDeadlineExceeded
 	case <-c.closeSignal:
-		c.writerParked.Store(false)
+		c.writerWaiting.Store(0)
 		return c.closeError()
 	}
-	c.writerParked.Store(false)
-	if c.connState.Load() >= goConnStateAborted {
+	c.writerWaiting.Store(0)
+	if c.closed() {
 		return c.closeError()
 	}
 	return nil
@@ -350,7 +505,7 @@ func (c *GoConn) parkTransmitBlocked() error {
 	case <-c.closeSignal:
 		return c.closeError()
 	}
-	if c.connState.Load() >= goConnStateAborted {
+	if c.closed() {
 		return c.closeError()
 	}
 	return nil
@@ -362,73 +517,80 @@ const (
 	goTransmitDone goTransmitResult = iota
 	goTransmitBlocked
 	goTransmitPaced
+	goTransmitThrottled
 )
 
-func (c *GoConn) transmitLoop(transmitter bool, budget int) (int, goTransmitResult) {
+func (c *GoConn) transmitLoop(transmitter bool, budget int) (int, goTransmitResult, bool) {
 	if transmitter {
 		defer c.engine.platformIO.flush()
 	}
-	sentAny := false
 	written := 0
+	armed := false
 	if c.blockedValid {
 		if !transmitter {
-			return written, goTransmitBlocked
+			return written, goTransmitBlocked, armed
 		}
 		if !c.retryBlocked() {
-			return written, goTransmitDone
+			return written, goTransmitDone, armed
 		}
-		sentAny = true
 	}
 	paced := c.congestion.pacing
 	result := goTransmitDone
-	for c.connState.Load() < goConnStateAborted {
+	for !c.closed() {
 		if budget > 0 && written >= budget {
 			break
 		}
-		length := c.nextTransmitLength()
+		mss := c.effectiveMSS.Load()
+		length := c.nextTransmitLength(mss)
 		if length == 0 {
 			sent := c.sentTail.Load()
 			pending := c.bufferedTail.Load() - sent
-			c.checkAppLimited(pending, c.sendPermit.Load(), sent)
-			if pending > 0 && !c.permitWindowBound.Load() && sent == c.sendUnacked.Load() {
-				c.armRetransmitIfIdle()
+			permit := c.sendPermit.Load()
+			c.checkAppLimited(pending, permit&^goPermitWindowBit, sent)
+			if pending > 0 && permit&goPermitWindowBit == 0 && sent == c.sendUnacked.Load() {
+				armed = true
 			}
 			break
 		}
 		var now int64
 		if paced {
-			now = c.engine.readClock()
+			now = int64(time.Since(c.engine.epoch))
 			if stamp := c.pacingStamp.Load(); c.dataSegmentsOut.Load() >= goPacingUnpacedSegments && stamp > now+goWheelTick {
 				c.requestPacing(stamp - goWheelTick)
 				result = goTransmitPaced
 				break
 			}
 		}
+		if c.queueThrottle(length) {
+			result = goTransmitThrottled
+			break
+		}
 		written += length
 		sent := c.sentTail.Load()
 		segment := goSegment{offset: sent, length: length, flags: header.TCPFlagAck | header.TCPFlagPsh}
-		if length > int(c.effectiveMSS) {
-			segment.gsoSize = c.effectiveMSS
+		if length > int(mss) {
+			segment.gsoSize = uint16(mss)
 		}
 		var flags uint16
 		unacked := c.sendUnacked.Load()
 		flightEmpty := sent == unacked
 		if flightEmpty {
 			flags |= goDescriptorTxStart
+			armed = true
 		}
 		if !paced {
-			now = c.engine.readClock()
+			now = int64(time.Since(c.engine.epoch))
 		}
-		c.pushDescriptors(sent, length, c.stamp(now), flags, flightEmpty)
+		c.pushDescriptors(sent, length, mss, c.stamp(now), flags, flightEmpty)
 		c.sentTail.Store(sent + uint64(length))
 		creditBase := c.packetCreditBase.Load()
 		flight := uint64(c.dataSegmentsOut.Load() - creditBase)
 		if flight > c.peakFlight.Load() {
 			c.peakFlight.Store(flight)
 		}
-		sentAny = true
+		permit := c.sendPermit.Load()
 		if int32(c.sendPacketPermit.Load()-c.dataSegmentsOut.Load()) <= 0 ||
-			sent+uint64(length) >= c.sendPermit.Load() && c.permitWindowBound.Load() {
+			sent+uint64(length) >= permit&^goPermitWindowBit && permit&goPermitWindowBit != 0 {
 			c.windowLimitedSince.Store(true)
 		}
 		err := c.transmitFrame(&segment)
@@ -443,25 +605,23 @@ func (c *GoConn) transmitLoop(transmitter bool, budget int) (int, goTransmitResu
 			c.blockedSegment = segment
 			c.blockedValid = true
 			if !transmitter {
-				c.finishTransmit(sentAny)
-				return written, goTransmitBlocked
+				return written, goTransmitBlocked, armed
 			}
 			if !c.retryBlocked() {
-				return written, goTransmitDone
+				return written, goTransmitDone, armed
 			}
 		case errGoFrameDropped:
 			c.amendDescriptors(segment.offset, segment.length, goDescriptorDropped)
 			c.transmittedTail.Store(sent + uint64(length))
 			c.engine.postMessage(&c.droppedMessage)
 		default:
-			if c.connState.Load() < goConnStateAborted {
-				c.requestAbort(E.Cause(err, "go: write tun"))
+			if !c.closed() {
+				c.fail(E.Cause(err, "go: write tun"))
 			}
-			return written, goTransmitDone
+			return written, goTransmitDone, armed
 		}
 	}
-	c.finishTransmit(sentAny)
-	return written, result
+	return written, result, armed
 }
 
 func (c *GoConn) retryBlocked() bool {
@@ -480,13 +640,13 @@ func (c *GoConn) retryBlocked() bool {
 		case errGoFrameDropped:
 			c.amendDescriptors(c.blockedSegment.offset, c.blockedSegment.length, goDescriptorDropped)
 		default:
-			if c.connState.Load() < goConnStateAborted {
-				c.requestAbort(E.Cause(err, "go: write tun"))
+			if !c.closed() {
+				c.fail(E.Cause(err, "go: write tun"))
 			}
 			return false
 		}
 		if c.congestion.pacing {
-			c.advancePacing(c.engine.readClock(), c.blockedSegment.length)
+			c.advancePacing(int64(time.Since(c.engine.epoch)), c.blockedSegment.length)
 		}
 		c.blockedValid = false
 		c.transmittedTail.Store(end)
@@ -497,33 +657,17 @@ func (c *GoConn) retryBlocked() bool {
 	}
 }
 
-func (c *GoConn) finishTransmit(sentAny bool) {
-	if !sentAny {
-		return
-	}
-	if c.spliced.Load() {
-		if c.retransmitDeadline == 0 {
-			c.engine.rearmRetransmit(c)
-		}
-		return
-	}
-	c.armRetransmitIfIdle()
-	if c.finRequested.Load() && c.sentTail.Load() == c.bufferedTail.Load() {
-		c.engine.postMessage(&c.closeMessage)
-	}
-}
-
 func (c *GoConn) amendDescriptors(offset uint64, length int, flags uint16) {
 	c.descriptors.push(goSentDescriptor{endOffset: offset + uint64(length), sentAt: int32(length), flags: goDescriptorAmend | flags})
 }
 
-func (c *GoConn) pushDescriptors(offset uint64, length int, sentAt int32, flags uint16, flightEmpty bool) {
+func (c *GoConn) pushDescriptors(offset uint64, length int, mss uint32, sentAt int32, flags uint16, flightEmpty bool) {
 	delivered, deliveredStamp, firstSentStamp, appLimited := c.snapshotDelivery(sentAt, flightEmpty)
 	flags |= goDescriptorRated
 	if appLimited {
 		flags |= goDescriptorAppLimited
 	}
-	step := int(c.effectiveMSS)
+	step := int(mss)
 	for length > 0 {
 		span := min(length, step)
 		offset += uint64(span)
@@ -541,12 +685,12 @@ func (c *GoConn) pushDescriptors(offset uint64, length int, sentAt int32, flags 
 	}
 }
 
-func (c *GoConn) frameLength(pending int) int {
-	limit := int(c.effectiveMSS)
+func (c *GoConn) frameLength(pending int, mss uint32) int {
+	limit := int(mss)
 	if c.engine.platformIO.transmitSegmentOffload() {
-		limit = int(c.gsoMaxSize())
+		limit = int(c.gsoMaxSize(mss))
 		if frameLimit := int(c.frameLimit.Load()); frameLimit > 0 {
-			limit = min(limit, max(frameLimit, int(c.effectiveMSS)))
+			limit = min(limit, max(frameLimit, int(mss)))
 		}
 	}
 	return min(pending, limit)
@@ -570,6 +714,42 @@ func (c *GoConn) advancePacing(now int64, length int) {
 	}
 }
 
+const goQueueLimitShift = 8
+
+func (c *GoConn) queueThrottle(length int) bool {
+	limit := max(2*int64(length), int64(c.pacingRate.Load()>>goQueueLimitShift))
+	if c.queuedBytes.Load()+int64(length) <= limit || c.engine.platformIO.transmitBacklogBelowBatch() {
+		return false
+	}
+	if c.sentTail.Load() == c.sendUnacked.Load() {
+		return false
+	}
+	c.queueThrottled.Store(true)
+	if c.queuedBytes.Load()+int64(length) <= limit {
+		c.queueThrottled.Store(false)
+		return false
+	}
+	return true
+}
+
+func (c *GoConn) frameEnqueued(length int) {
+	c.queuedBytes.Add(int64(length))
+}
+
+func (c *GoConn) frameDequeued(length int, segmentEnd uint64) {
+	c.queuedBytes.Add(-int64(length))
+	if segmentEnd > c.departedTail.Load() {
+		c.departedTail.Store(segmentEnd)
+	}
+	if c.queueThrottled.Swap(false) {
+		c.engine.postMessage(&c.throttleMessage)
+	}
+}
+
+func (c *GoConn) flightHeadQueued() bool {
+	return c.queuedBytes.Load() > 0 && c.sendUnacked.Load() >= c.departedTail.Load()
+}
+
 func (c *GoConn) requestPacing(deadline int64) {
 	c.pacingRequest.Store(deadline)
 	c.engine.postMessage(&c.pacingMessage)
@@ -591,11 +771,11 @@ func (c *GoConn) transmitFrame(segment *goSegment) error {
 			c.transmitSegments = append(c.transmitSegments[:0], packet)
 			frame = c.transmitSegments
 		} else {
-			frame, meta = c.buildFrame(c.transmitScratch[:], c.transmitSegments[:0], segment, &c.transmitStore, offload)
+			frame, meta = c.buildFrame(c.transmitScratch[:], c.transmitSegments[:0], segment, &c.transmitStore, offload, false)
 			c.transmitSegments = frame
 		}
 	}
-	err := c.engine.platformIO.writeData(frame, meta)
+	err := c.engine.platformIO.writeData(frame, meta, c, segment.offset+uint64(segment.length))
 	switch err {
 	case nil, errGoFrameDropped:
 		c.blockedFrame = nil
@@ -605,12 +785,6 @@ func (c *GoConn) transmitFrame(segment *goSegment) error {
 		c.blockedMeta = meta
 	}
 	return err
-}
-
-func (c *GoConn) armRetransmitIfIdle() {
-	if c.retransmitArmed.CompareAndSwap(false, true) {
-		c.engine.postMessage(&c.retransmitMessage)
-	}
 }
 
 type goFrameLayout struct {
@@ -642,7 +816,7 @@ func (c *GoConn) frameLayout(segment *goSegment) goFrameLayout {
 	return layout
 }
 
-func (c *GoConn) encodeHeaders(packet []byte, layout *goFrameLayout, segment *goSegment) uint16 {
+func (c *GoConn) encodeHeaders(packet []byte, layout *goFrameLayout, segment *goSegment, control bool) uint16 {
 	tcpHdr := header.TCP(packet[layout.ipHeaderLength:])
 	receiveAck := c.receiveNextAck.Load()
 	edge := c.receiveEdge.Load()
@@ -650,15 +824,14 @@ func (c *GoConn) encodeHeaders(packet []byte, layout *goFrameLayout, segment *go
 	if edge > receiveAck {
 		window = uint16(min((edge-receiveAck)>>c.localWindowShift, 0xffff))
 	}
-	for {
-		sent := c.sentEdge.Load()
-		if edge <= sent || c.sentEdge.CompareAndSwap(sent, edge) {
-			break
-		}
+	if control {
+		c.sentEdge = max(c.sentEdge, edge)
+	} else if edge > c.dataSentEdge.Load() {
+		c.dataSentEdge.Store(edge)
 	}
 	tcpHdr.Encode(&header.TCPFields{
-		SrcPort:    c.destination.Port,
-		DstPort:    c.source.Port,
+		SrcPort:    c.local.Port,
+		DstPort:    c.peer.Port,
 		SeqNum:     uint32(uint64(c.sendISN) + segment.offset),
 		AckNum:     uint32(uint64(c.clientISN) + receiveAck),
 		DataOffset: uint8(layout.tcpHeaderLength),
@@ -667,12 +840,12 @@ func (c *GoConn) encodeHeaders(packet []byte, layout *goFrameLayout, segment *go
 	})
 	options := packet[layout.ipHeaderLength+header.TCPMinimumSize:]
 	if layout.timestampLength > 0 {
-		goEncodeTimestampOption(options, goTimestampAt(c.engine.readClock()), c.tsRecent.Load())
+		goEncodeTimestampOption(options, goTimestampAt(int64(time.Since(c.engine.epoch))), c.tsRecent.Load())
 	}
 	if len(layout.sackBlocks) > 0 {
 		goEncodeSackOption(options[layout.timestampLength:], layout.sackBlocks, c.clientISN)
 	}
-	return goEncodeNetworkHeader(packet, c.ipVersion, c.destination.Addr, c.source.Addr, layout.tcpHeaderLength+segment.length, uint16(c.ident.Add(1)))
+	return goEncodeNetworkHeader(packet, c.ipVersion, header.TCPProtocolNumber, c.local.Addr, c.peer.Addr, layout.tcpHeaderLength+segment.length, uint16(c.ident.Add(1)))
 }
 
 func goNetworkHeaderLength(ipVersion uint8) int {
@@ -682,29 +855,29 @@ func goNetworkHeaderLength(ipVersion uint8) int {
 	return header.IPv6MinimumSize
 }
 
-func goEncodeNetworkHeader(packet []byte, ipVersion uint8, source netip.Addr, destination netip.Addr, tcpLength int, ident uint16) uint16 {
+func goEncodeNetworkHeader(packet []byte, ipVersion uint8, protocol tcpip.TransportProtocolNumber, source netip.Addr, destination netip.Addr, transportLength int, ident uint16) uint16 {
 	if ipVersion == 4 {
 		ipHdr := header.IPv4(packet)
 		ipHdr.Encode(&header.IPv4Fields{
-			TotalLength: uint16(header.IPv4MinimumSize + tcpLength),
+			TotalLength: uint16(header.IPv4MinimumSize + transportLength),
 			ID:          ident,
 			TTL:         synthesizedTTL,
-			Protocol:    uint8(header.TCPProtocolNumber),
+			Protocol:    uint8(protocol),
 			SrcAddr:     source,
 			DstAddr:     destination,
 		})
 		ipHdr.SetChecksum(^ipHdr.CalculateChecksum())
-		return header.PseudoHeaderChecksum(header.TCPProtocolNumber, ipHdr.SourceAddressSlice(), ipHdr.DestinationAddressSlice(), uint16(tcpLength))
+		return header.PseudoHeaderChecksum(protocol, ipHdr.SourceAddressSlice(), ipHdr.DestinationAddressSlice(), uint16(transportLength))
 	}
 	ipHdr := header.IPv6(packet)
 	ipHdr.Encode(&header.IPv6Fields{
-		PayloadLength:     uint16(tcpLength),
-		TransportProtocol: header.TCPProtocolNumber,
+		PayloadLength:     uint16(transportLength),
+		TransportProtocol: protocol,
 		HopLimit:          synthesizedTTL,
 		SrcAddr:           source,
 		DstAddr:           destination,
 	})
-	return header.PseudoHeaderChecksum(header.TCPProtocolNumber, ipHdr.SourceAddressSlice(), ipHdr.DestinationAddressSlice(), uint16(tcpLength))
+	return header.PseudoHeaderChecksum(protocol, ipHdr.SourceAddressSlice(), ipHdr.DestinationAddressSlice(), uint16(transportLength))
 }
 
 func (c *GoConn) offloadMeta(tcpHdr header.TCP, pseudoSum uint16, layout *goFrameLayout, segment *goSegment) ForwardFrameMeta {
@@ -721,10 +894,10 @@ func (c *GoConn) offloadMeta(tcpHdr header.TCP, pseudoSum uint16, layout *goFram
 	return meta
 }
 
-func (c *GoConn) buildFrame(scratch []byte, segments [][]byte, segment *goSegment, store *goTransmitStore, offload bool) ([][]byte, ForwardFrameMeta) {
+func (c *GoConn) buildFrame(scratch []byte, segments [][]byte, segment *goSegment, store *goTransmitStore, offload bool, control bool) ([][]byte, ForwardFrameMeta) {
 	layout := c.frameLayout(segment)
 	packet := scratch[:layout.headerLength()]
-	pseudoSum := c.encodeHeaders(packet, &layout, segment)
+	pseudoSum := c.encodeHeaders(packet, &layout, segment, control)
 	segments = append(segments, packet)
 	if segment.length > 0 {
 		segments = store.appendRuns(segments, segment.offset, segment.length)
@@ -745,7 +918,7 @@ func (c *GoConn) buildContiguousFrame(buffer *buf.Buffer, payload []byte, segmen
 	headerLength := layout.headerLength()
 	packet := buffer.ExtendHeader(headerLength)
 	packet = packet[:headerLength+len(payload)]
-	pseudoSum := c.encodeHeaders(packet[:headerLength], &layout, segment)
+	pseudoSum := c.encodeHeaders(packet[:headerLength], &layout, segment, false)
 	tcpHdr := header.TCP(packet[layout.ipHeaderLength:])
 	if offload {
 		return packet, c.offloadMeta(tcpHdr, pseudoSum, &layout, segment)
@@ -795,48 +968,37 @@ func goEncodeSackOption(options []byte, blocks []goSackBlock, base uint32) {
 	header.AddTCPOptionPadding(options, optionsLength)
 }
 
-func (c *GoConn) buildSynAck(synOptions header.TCPSynOptions, localMSS uint16) {
+func (c *GoConn) buildHandshake(localMSS uint16, windowScale bool, sackPermitted bool, flags header.TCPFlags, ackNumber uint32) {
 	ipHeaderLength := goNetworkHeaderLength(c.ipVersion)
-	optionsStorage := c.synAckImage[ipHeaderLength+header.TCPMinimumSize:]
+	optionsStorage := c.handshakeImage[ipHeaderLength+header.TCPMinimumSize:]
 	optionsLength := header.EncodeMSSOption(uint32(localMSS), optionsStorage)
-	if synOptions.WS >= 0 {
+	if windowScale {
 		optionsLength += header.EncodeWSOption(int(c.localWindowShift), optionsStorage[optionsLength:])
 	}
-	if synOptions.SACKPermitted {
+	if sackPermitted {
 		optionsLength += header.EncodeSACKPermittedOption(optionsStorage[optionsLength:])
 	}
 	if c.timestampsEnabled {
-		optionsLength += header.EncodeTSOption(goTimestampAt(c.engine.readClock()), c.tsRecent.Load(), optionsStorage[optionsLength:])
+		optionsLength += header.EncodeTSOption(goTimestampAt(int64(time.Since(c.engine.epoch))), c.tsRecent.Load(), optionsStorage[optionsLength:])
 	}
 	optionsLength += header.AddTCPOptionPadding(optionsStorage, optionsLength)
 	tcpHeaderLength := header.TCPMinimumSize + optionsLength
 	totalLength := ipHeaderLength + tcpHeaderLength
-	c.synAckLength = uint8(totalLength)
-	packet := c.synAckImage[:totalLength]
+	c.handshakeLength = uint8(totalLength)
+	packet := c.handshakeImage[:totalLength]
 	tcpHdr := header.TCP(packet[ipHeaderLength:])
 	tcpHdr.Encode(&header.TCPFields{
-		SrcPort:    c.destination.Port,
-		DstPort:    c.source.Port,
+		SrcPort:    c.local.Port,
+		DstPort:    c.peer.Port,
 		SeqNum:     c.sendISN,
-		AckNum:     c.clientISN + 1,
+		AckNum:     ackNumber,
 		DataOffset: uint8(tcpHeaderLength),
-		Flags:      header.TCPFlagSyn | header.TCPFlagAck,
+		Flags:      flags,
 		WindowSize: uint16(min(c.receiveCapacity, 0xffff)),
 	})
-	pseudoSum := goEncodeNetworkHeader(packet, c.ipVersion, c.destination.Addr, c.source.Addr, tcpHeaderLength, uint16(c.ident.Add(1)))
+	pseudoSum := goEncodeNetworkHeader(packet, c.ipVersion, header.TCPProtocolNumber, c.local.Addr, c.peer.Addr, tcpHeaderLength, uint16(c.ident.Add(1)))
 	tcpHdr.SetChecksum(0)
 	tcpHdr.SetChecksum(^checksum.Checksum(tcpHdr, pseudoSum))
-}
-
-func (c *GoConn) writeSynAck() error {
-	return goIgnoreDropped(c.engine.platformIO.writePacket(c.synAckImage[:c.synAckLength], ForwardFrameMeta{}))
-}
-
-func (c *GoConn) writeReset() error {
-	var frame [1][]byte
-	segment := goSegment{offset: 0, flags: header.TCPFlagRst | header.TCPFlagAck}
-	segments, _ := c.buildFrame(c.transmitScratch[:], frame[:0], &segment, &c.transmitStore, false)
-	return goIgnoreDropped(c.engine.platformIO.writePacket(segments[0], ForwardFrameMeta{}))
 }
 
 var errGoTransmitBlocked = E.New("go: transmit blocked")

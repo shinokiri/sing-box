@@ -12,8 +12,6 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/stack"
 )
 
-var _ stack.LinkEndpoint = (*LinkEndpointFilter)(nil)
-
 type LinkEndpointFilter struct {
 	stack.LinkEndpoint
 	Context              context.Context
@@ -55,8 +53,6 @@ func (w *LinkEndpointFilter) Attach(dispatcher stack.NetworkDispatcher) {
 		inet6LoopbackAddress: w.Inet6LoopbackAddress,
 	})
 }
-
-var _ stack.NetworkDispatcher = (*networkDispatcherFilter)(nil)
 
 type networkDispatcherFilter struct {
 	stack.NetworkDispatcher

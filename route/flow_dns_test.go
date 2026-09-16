@@ -109,7 +109,7 @@ type routeFlowHandler struct {
 }
 
 func (h routeFlowHandler) JudgeFlowContext(ctx context.Context, network uint8, source, destination netip.AddrPort, payload []byte) tun.FlowVerdict {
-	return adapter.JudgeFlowContext(ctx, h.router, "tun", C.TypeTun, network, source, destination, payload)
+	return adapter.JudgeFlowContext(ctx, h.router, adapter.InboundContext{Inbound: "tun", InboundType: C.TypeTun}, network, source, destination, payload)
 }
 
 type flowWriteback struct{ tun.ForwardWriteback }

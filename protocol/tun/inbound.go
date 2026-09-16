@@ -594,7 +594,7 @@ func (t *Inbound) JudgeFlowContext(ctx context.Context, network uint8, source ne
 		}
 		return tun.FlowVerdict{Action: tun.ActionAccept}
 	}
-	return adapter.JudgeFlowContext(ctx, t.router, t.tag, C.TypeTun, network, source, destination, firstPacket)
+	return adapter.JudgeFlowContext(ctx, t.router, adapter.InboundContext{Inbound: t.tag, InboundType: C.TypeTun}, network, source, destination, firstPacket)
 }
 
 func (t *Inbound) isDNSHijackDestination(destination M.Socksaddr) bool {
