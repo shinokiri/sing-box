@@ -19,12 +19,16 @@ jobs:
           go-version: '~1.26'
           cache: true
       - name: Format fixture
-        run: gofmt -w dns/transport/snell_tfo_test.go
+        run: gofmt -w dns/transport/snell_tfo_test.go dns/transport/conn_pool_context_test.go dns/transport/conn_pool.go
       - name: Exercise UDP DNS over real Snell and lazy TFO
         shell: bash
         run: |
           set -o pipefail
-          go test -race -v -count=1 -timeout=45s ./dns/transport -run '^TestUDPOverSnellTFODialContext$' 2>&1 | tee dns-context-test.log
+          go test -race -v -count=10 -timeout=120s ./dns/transport -run '^Test(UDPOverSnellTFODialContext|ConnPoolDialContextRetirement|ConnPoolResetCancelsPendingDial)$' 2>&1 | tee dns-context-test.log
+      - name: DNS and dialer regression checks
+        run: |
+          go test -race -count=1 -timeout=180s ./dns/... ./common/dialer
+          go vet ./dns/transport
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -32,3 +36,5 @@ jobs:
           path: |
             dns-context-test.log
             dns/transport/snell_tfo_test.go
+            dns/transport/conn_pool_context_test.go
+            dns/transport/conn_pool.go

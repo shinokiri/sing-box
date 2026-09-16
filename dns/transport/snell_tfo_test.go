@@ -99,7 +99,7 @@ func TestUDPOverSnellTFODialContext(t *testing.T) {
 type snellDNSDialer struct {
 	client *snellv6.Client
 	server M.Socksaddr
-	tcp tfo.Dialer
+	tcp    tfo.Dialer
 }
 
 func (d *snellDNSDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -146,7 +146,7 @@ func (h *snellDNSHandler) NewPacketConnectionEx(_ context.Context, conn N.Packet
 			response.SetReply(message)
 			response.Answer = []mDNS.RR{&mDNS.A{
 				Hdr: mDNS.RR_Header{Name: message.Question[0].Name, Rrtype: mDNS.TypeA, Class: mDNS.ClassINET, Ttl: 60},
-				A: net.IPv4(203, 0, 113, 8),
+				A:   net.IPv4(203, 0, 113, 8),
 			}}
 			raw, packErr := response.Pack()
 			if packErr != nil {
