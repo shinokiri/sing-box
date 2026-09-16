@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"io"
 	"net/netip"
 
 	"github.com/sagernet/sing-box/log"
@@ -29,6 +30,12 @@ type OutboundWithPreferredRoutes interface {
 type OutboundWithMultiplex interface {
 	Outbound
 	MultiplexEnabled() bool
+}
+
+// URLTestPreparer isolates a protocol's warmup/measurement session when its
+// normal pool cannot guarantee that the warm session is ready for reuse.
+type URLTestPreparer interface {
+	NewURLTestDialer(ctx context.Context) (N.Dialer, io.Closer, error)
 }
 
 type FlowOutbound interface {
