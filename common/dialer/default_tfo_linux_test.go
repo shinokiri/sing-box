@@ -68,7 +68,7 @@ func tfoContext(t *testing.T, defaults adapter.NetworkOptions, protect control.F
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := service.ExtendContext(context.Background())
+	ctx := service.ContextWithDefaultRegistry(context.Background())
 	service.MustRegister[adapter.NetworkManager](ctx, &tfoNetworkManager{
 		defaults: defaults,
 		protect:  protect,
