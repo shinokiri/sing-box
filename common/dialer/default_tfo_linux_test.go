@@ -395,14 +395,20 @@ func TestPlatformTFOSoleInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 	var device string
+	var fastOpen int
 	var socketErr error
 	if err = raw.Control(func(fd uintptr) {
 		device, socketErr = unix.GetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE)
+		if socketErr == nil {
+			fastOpen, socketErr = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_FASTOPEN_CONNECT)
+		}
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if socketErr != nil || device != "lo" || protected.Load() != 1 {
-		t.Fatalf("bound device=%q, protect calls=%d, error=%v", device, protected.Load(), socketErr)
+	// control.BindToInterface deliberately skips virtual destinations such
+	// as loopback; selecting the sole interface must still retain TFO/protect.
+	if socketErr != nil || device != "" || fastOpen != 1 || protected.Load() != 1 {
+		t.Fatalf("device=%q, TFO=%d, protect calls=%d, error=%v", device, fastOpen, protected.Load(), socketErr)
 	}
 }
 
@@ -499,5 +505,31 @@ func TestPlatformTFOCloseDuringDial(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("close did not cancel the pending dial")
+	}
+}
+
+func TestPlatformTFOInterfaceBindingFailure(t *testing.T) {
+	var protected atomic.Int32
+	ctx := tfoContext(t, adapter.NetworkOptions{}, func(string, string, syscall.RawConn) error {
+		protected.Add(1)
+		return nil
+	})
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	manager := service.FromContext[adapter.NetworkManager](ctx).(*tfoNetworkManager)
+	manager.loopback = nil
+	manager.interfaces = []adapter.NetworkInterface{{Interface: control.Interface{Name: "missing-tfo0", Index: 1000000}}}
+	dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", M.ParseSocksaddr("192.0.2.1:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	n, err := conn.Write([]byte("ping"))
+	if n != 0 || !errors.Is(err, unix.ENODEV) || protected.Load() != 1 {
+		t.Fatalf("interface binding was ignored: n=%d, error=%v, protect calls=%d", n, err, protected.Load())
 	}
 }
