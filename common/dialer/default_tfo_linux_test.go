@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -42,9 +44,10 @@ func (m tfoInterfaceMonitor) MyInterfaces() []string               { return nil 
 
 type tfoNetworkManager struct {
 	adapter.NetworkManager
-	defaults adapter.NetworkOptions
-	protect  control.Func
-	loopback *control.Interface
+	defaults   adapter.NetworkOptions
+	protect    control.Func
+	loopback   *control.Interface
+	interfaces []adapter.NetworkInterface
 }
 
 func (m *tfoNetworkManager) InterfaceFinder() control.InterfaceFinder {
@@ -59,7 +62,7 @@ func (m *tfoNetworkManager) InterfaceMonitor() tun.DefaultInterfaceMonitor {
 	return tfoInterfaceMonitor{loopback: m.loopback}
 }
 func (m *tfoNetworkManager) NetworkInterfaces() []adapter.NetworkInterface {
-	return []adapter.NetworkInterface{{Interface: *m.loopback}}
+	return m.interfaces
 }
 
 func tfoContext(t *testing.T, defaults adapter.NetworkOptions, protect control.Func) context.Context {
@@ -70,9 +73,10 @@ func tfoContext(t *testing.T, defaults adapter.NetworkOptions, protect control.F
 	}
 	ctx := service.ContextWithDefaultRegistry(context.Background())
 	service.MustRegister[adapter.NetworkManager](ctx, &tfoNetworkManager{
-		defaults: defaults,
-		protect:  protect,
-		loopback: &control.Interface{Name: loopback.Name, Index: loopback.Index},
+		defaults:   defaults,
+		protect:    protect,
+		loopback:   &control.Interface{Name: loopback.Name, Index: loopback.Index},
+		interfaces: []adapter.NetworkInterface{{Interface: control.Interface{Name: loopback.Name, Index: loopback.Index}}},
 	})
 	service.MustRegister[adapter.PlatformInterface](ctx, tfoPlatform{})
 	return ctx
@@ -240,17 +244,260 @@ func TestPlatformTFORejectsNetworkOverrides(t *testing.T) {
 }
 
 func TestPlatformTFODynamicNetworkOverride(t *testing.T) {
-	ctx := tfoContext(t, adapter.NetworkOptions{}, nil)
+	for _, resolved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resolved=%v", resolved), func(t *testing.T) {
+			ctx := tfoContext(t, adapter.NetworkOptions{}, nil)
+			base, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var dialer ParallelInterfaceDialer = base
+			if resolved {
+				dialer = NewResolveDialer(ctx, base, false, "", adapter.DNSQueryOptions{}, 0).(ParallelInterfaceDialer)
+			}
+			strategy := C.NetworkStrategyHybrid
+			conn, err := dialer.DialParallelInterface(ctx, "tcp", M.ParseSocksaddr("127.0.0.1:1"), &strategy, nil, nil, 0)
+			if conn != nil {
+				conn.Close()
+			}
+			if err == nil || !strings.Contains(err.Error(), "tcp_fast_open") {
+				t.Fatalf("dynamic override did not report TFO incompatibility: %v", err)
+			}
+		})
+	}
+}
+
+func TestPlatformTFONetworkAvailability(t *testing.T) {
+	for _, count := range []int{0, 2} {
+		t.Run(fmt.Sprintf("interfaces=%d", count), func(t *testing.T) {
+			var protected atomic.Int32
+			ctx := tfoContext(t, adapter.NetworkOptions{}, func(string, string, syscall.RawConn) error {
+				protected.Add(1)
+				return nil
+			})
+			manager := service.FromContext[adapter.NetworkManager](ctx).(*tfoNetworkManager)
+			manager.loopback = nil
+			manager.interfaces = nil
+			for index := range count {
+				manager.interfaces = append(manager.interfaces, adapter.NetworkInterface{
+					Interface: control.Interface{Name: fmt.Sprintf("test%d", index), Index: index + 100},
+				})
+			}
+			dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn, err := dialer.DialContext(ctx, "tcp", M.ParseSocksaddr("127.0.0.1:1"))
+			if conn != nil {
+				conn.Close()
+			}
+			want := "no available network interface"
+			if count > 1 {
+				want = "requires a default network interface"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("network selection: %v, want %q", err, want)
+			}
+			if protected.Load() != 0 {
+				t.Fatal("opened a socket without selecting an interface")
+			}
+		})
+	}
+}
+
+func TestPlatformTFOUDP(t *testing.T) {
+	for _, network := range []string{"udp4", "udp6"} {
+		t.Run(network, func(t *testing.T) {
+			address := "127.0.0.1:0"
+			if network == "udp6" {
+				address = "[::1]:0"
+			}
+			server, err := net.ListenPacket(network, address)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+			server.SetDeadline(time.Now().Add(5 * time.Second))
+			var protected atomic.Int32
+			ctx := tfoContext(t, adapter.NetworkOptions{}, func(string, string, syscall.RawConn) error {
+				protected.Add(1)
+				return nil
+			})
+			dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn, err := dialer.DialContext(ctx, "udp", M.ParseSocksaddr(server.LocalAddr().String()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			conn.SetDeadline(time.Now().Add(5 * time.Second))
+			if _, err = conn.Write([]byte("udp")); err != nil {
+				t.Fatal(err)
+			}
+			payload := make([]byte, 16)
+			n, peer, err := server.ReadFrom(payload)
+			if err != nil || string(payload[:n]) != "udp" {
+				t.Fatalf("UDP request: %q, %v", payload[:n], err)
+			}
+			if _, err = server.WriteTo(payload[:n], peer); err != nil {
+				t.Fatal(err)
+			}
+			n, err = conn.Read(payload)
+			if err != nil || string(payload[:n]) != "udp" {
+				t.Fatalf("UDP response: %q, %v", payload[:n], err)
+			}
+			if protected.Load() != 1 {
+				t.Fatalf("protect calls: %d", protected.Load())
+			}
+		})
+	}
+}
+
+func TestPlatformTFOSoleInterface(t *testing.T) {
+	server, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	server.(*net.TCPListener).SetDeadline(time.Now().Add(5 * time.Second))
+	var protected atomic.Int32
+	ctx := tfoContext(t, adapter.NetworkOptions{}, func(string, string, syscall.RawConn) error {
+		protected.Add(1)
+		return nil
+	})
+	service.FromContext[adapter.NetworkManager](ctx).(*tfoNetworkManager).loopback = nil
 	dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	strategy := C.NetworkStrategyHybrid
-	conn, err := dialer.DialParallelInterface(ctx, "tcp", M.ParseSocksaddr("127.0.0.1:1"), &strategy, nil, nil, 0)
-	if conn != nil {
-		conn.Close()
+	conn, err := dialer.DialContext(ctx, "tcp", M.ParseSocksaddr(server.Addr().String()))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "tcp_fast_open") {
-		t.Fatalf("dynamic override did not report TFO incompatibility: %v", err)
+	defer conn.Close()
+	if _, err = conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	peer, err := server.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	peer.SetDeadline(time.Now().Add(5 * time.Second))
+	payload := make([]byte, 4)
+	if _, err = io.ReadFull(peer, payload); err != nil || string(payload) != "ping" {
+		t.Fatalf("bound-interface payload: %q, %v", payload, err)
+	}
+	raw, err := conn.(*slowOpenConn).conn.Load().SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var device string
+	var socketErr error
+	if err = raw.Control(func(fd uintptr) {
+		device, socketErr = unix.GetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if socketErr != nil || device != "lo" || protected.Load() != 1 {
+		t.Fatalf("bound device=%q, protect calls=%d, error=%v", device, protected.Load(), socketErr)
+	}
+}
+
+func TestPlatformTFONetworkNamespace(t *testing.T) {
+	var protected atomic.Int32
+	ctx := tfoContext(t, adapter.NetworkOptions{}, func(string, string, syscall.RawConn) error {
+		protected.Add(1)
+		return nil
+	})
+	options := tfoOptions(t, `{"tcp_fast_open":true}`)
+	options.NetNs = filepath.Join(t.TempDir(), "missing-netns")
+	dialer, err := NewDefault(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", M.ParseSocksaddr("127.0.0.1:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	n, err := conn.Write([]byte("ping"))
+	if !errors.Is(err, os.ErrNotExist) || n != 0 || protected.Load() != 0 {
+		t.Fatalf("namespace was ignored: n=%d, error=%v, protect calls=%d", n, err, protected.Load())
+	}
+}
+
+func TestPlatformTFOCloseBeforeWrite(t *testing.T) {
+	var protected atomic.Int32
+	ctx := tfoContext(t, adapter.NetworkOptions{}, func(string, string, syscall.RawConn) error {
+		protected.Add(1)
+		return nil
+	})
+	dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", M.ParseSocksaddr("127.0.0.1:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	n, err := conn.Write([]byte("ping"))
+	if n != 0 || !errors.Is(err, os.ErrClosed) || protected.Load() != 0 {
+		t.Fatalf("write after close: n=%d, error=%v, protect calls=%d", n, err, protected.Load())
+	}
+}
+
+func TestPlatformTFOCloseDuringDial(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	ctx := tfoContext(t, adapter.NetworkOptions{}, func(string, string, syscall.RawConn) error {
+		close(entered)
+		<-release
+		return nil
+	})
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", M.ParseSocksaddr("127.0.0.1:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	type result struct {
+		n   int
+		err error
+	}
+	completed := make(chan result, 1)
+	go func() {
+		n, err := conn.Write([]byte("ping"))
+		completed <- result{n, err}
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("first write did not open a socket")
+	}
+	conn.Close()
+	close(release)
+	select {
+	case r := <-completed:
+		if r.n != 0 || r.err == nil {
+			t.Fatalf("pending write survived close: n=%d, error=%v", r.n, r.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("close did not cancel the pending dial")
 	}
 }
