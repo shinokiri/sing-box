@@ -39,7 +39,9 @@ type connPoolState[T comparable] struct {
 	ctx    context.Context
 	cancel context.CancelCauseFunc
 
-	all map[T]struct{}
+	// A lazy connection may still need its dial context for the first write.
+	// Retain the context until the connection is retired.
+	all map[T]context.CancelCauseFunc
 
 	idle         list.List[T]
 	idleElements map[T]*list.Element[T]
@@ -76,7 +78,7 @@ func newConnPoolState[T comparable](mode ConnPoolMode) *connPoolState[T] {
 	state := &connPoolState[T]{
 		ctx:    ctx,
 		cancel: cancel,
-		all:    make(map[T]struct{}),
+		all:    make(map[T]context.CancelCauseFunc),
 	}
 	if mode == ConnPoolOrdered {
 		state.idleElements = make(map[T]*list.Element[T])
@@ -179,6 +181,9 @@ func (p *ConnPool[T]) releaseSlot() {
 
 // removeConn must be called with p.access held.
 func (p *ConnPool[T]) removeConn(state *connPoolState[T], conn T, cause error) {
+	if cancel := state.all[conn]; cancel != nil {
+		cancel(cause)
+	}
 	delete(state.all, conn)
 	switch p.options.Mode {
 	case ConnPoolSingle:
@@ -263,7 +268,7 @@ func (p *ConnPool[T]) acquireOrdered(ctx context.Context, dial func(context.Cont
 				p.access.Unlock()
 				return idleConn, false, nil
 			}
-			delete(current.all, idleConn)
+			p.removeConn(current, idleConn, net.ErrClosed)
 			p.access.Unlock()
 			p.options.Close(idleConn, net.ErrClosed)
 			continue
@@ -281,6 +286,12 @@ func (p *ConnPool[T]) dialAndInstall(ctx context.Context, current *connPoolState
 	}
 	defer p.releaseSlot()
 	dialCtx, dialCancel := context.WithCancelCause(ctx)
+	retained := false
+	defer func() {
+		if !retained {
+			dialCancel(nil)
+		}
+	}()
 	stopStateCancel := context.AfterFunc(current.ctx, func() {
 		dialCancel(context.Cause(current.ctx))
 	})
@@ -290,7 +301,6 @@ func (p *ConnPool[T]) dialAndInstall(ctx context.Context, current *connPoolState
 	if dialErr == nil && !stateCancelStopped {
 		dialErr = context.Cause(current.ctx)
 	}
-	dialCancel(nil)
 	if err != nil {
 		if dialErr != nil {
 			return zero, false, dialErr
@@ -313,7 +323,8 @@ func (p *ConnPool[T]) dialAndInstall(ctx context.Context, current *connPoolState
 		p.options.Close(conn, net.ErrClosed)
 		return zero, false, net.ErrClosed
 	}
-	current.all[conn] = struct{}{}
+	current.all[conn] = dialCancel
+	retained = true
 	p.access.Unlock()
 	return conn, true, nil
 }
@@ -381,6 +392,12 @@ func (p *ConnPool[T]) acquireShared(ctx context.Context, dial func(context.Conte
 
 func (p *ConnPool[T]) connectSingle(current *connPoolState[T], state *connPoolConnect[T], ctx context.Context, dial func(context.Context) (T, error)) {
 	dialCtx, dialCancel := context.WithCancelCause(ctx)
+	retained := false
+	defer func() {
+		if !retained {
+			dialCancel(nil)
+		}
+	}()
 	stopStateCancel := context.AfterFunc(current.ctx, func() {
 		dialCancel(context.Cause(current.ctx))
 	})
@@ -390,7 +407,6 @@ func (p *ConnPool[T]) connectSingle(current *connPoolState[T], state *connPoolCo
 	if dialErr == nil && !stateCancelStopped {
 		dialErr = context.Cause(current.ctx)
 	}
-	dialCancel(nil)
 	if dialErr != nil {
 		if err == nil {
 			p.options.Close(conn, dialErr)
@@ -415,7 +431,8 @@ func (p *ConnPool[T]) connectSingle(current *connPoolState[T], state *connPoolCo
 		current.hasShared = true
 		current.sharedCtx = sharedCtx
 		current.sharedCancel = sharedCancel
-		current.all[conn] = struct{}{}
+		current.all[conn] = dialCancel
+		retained = true
 	}
 	p.access.Unlock()
 
@@ -469,7 +486,8 @@ func (p *ConnPool[T]) collectShared(current *connPoolState[T], state *connPoolCo
 
 func (p *ConnPool[T]) closeState(state *connPoolState[T], cause error) {
 	state.cancel(cause)
-	for conn := range state.all {
+	for conn, cancel := range state.all {
+		cancel(cause)
 		p.options.Close(conn, cause)
 	}
 }
