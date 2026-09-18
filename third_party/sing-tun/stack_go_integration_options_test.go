@@ -166,7 +166,7 @@ func TestGoConnKeepalive(t *testing.T) {
 	})
 	t.Run("answered", func(scenario *testing.T) {
 		connectionCases(scenario, fixture, func(test *testing.T, conn *GoConn, kernel *net.TCPConn, port uint16) {
-			err := conn.SetKeepAliveConfig(net.KeepAliveConfig{Enable: true, Idle: 100 * time.Millisecond, Interval: 100 * time.Millisecond, Count: 2})
+			err := conn.SetKeepAliveConfig(net.KeepAliveConfig{Enable: true, Idle: 600 * time.Millisecond, Interval: 600 * time.Millisecond, Count: 2})
 			if err != nil {
 				test.Fatal(err)
 			}

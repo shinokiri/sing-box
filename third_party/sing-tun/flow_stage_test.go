@@ -125,7 +125,7 @@ func TestForwardStageIdleSweepKeepsWorkerTablesIndependent(t *testing.T) {
 	_, pending = active.sweepDue()
 	require.False(t, pending, "an empty worker must not schedule idle wakeups")
 
-	packet := udpHistoryPacket(netip.MustParseAddrPort("10.0.0.2:50000"), netip.MustParseAddrPort("203.0.113.1:53"))
+	packet := udpHistoryPacket(netip.MustParseAddrPort("10.0.0.2:50000"), netip.MustParseAddrPort("203.0.113.2:53"))
 	require.True(t, active.Dispatch(packet))
 	active.Flush()
 	require.Len(t, port.packets, 1)
