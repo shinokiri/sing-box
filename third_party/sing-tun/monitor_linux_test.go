@@ -28,10 +28,16 @@ func TestNetworkUpdateMonitorReceiveOverrun(t *testing.T) {
 		default:
 		}
 	})
-	require.NoError(t, monitor.Start())
+	// Queue the burst before starting the reader. A concurrent reader can
+	// otherwise consume every event and never exercise ENOBUFS recovery.
+	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, unix.NETLINK_ROUTE)
+	require.NoError(t, err)
+	implementation := monitor.(*networkUpdateMonitor)
+	implementation.socket = os.NewFile(uintptr(fd), "netlink-overrun-test")
 	defer monitor.Close()
+	require.NoError(t, unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK, Groups: netlinkGroups}))
 
-	rawConn, err := monitor.(*networkUpdateMonitor).socket.SyscallConn()
+	rawConn, err := implementation.socket.SyscallConn()
 	require.NoError(t, err)
 	var (
 		socketInode uint64
@@ -63,6 +69,8 @@ func TestNetworkUpdateMonitorReceiveOverrun(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.Greater(t, netlinkSocketDrops(t, socketInode), 0)
+	go implementation.loopRead()
+	go implementation.loopUpdate(time.Second)
 
 drain:
 	for {

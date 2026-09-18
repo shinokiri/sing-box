@@ -36,3 +36,8 @@ event-driven connection timers, and iptables DNS-hijack fix. The new idle
 sweep query reads each worker's dispatcher table and last-sweep time under
 its existing lock. Empty workers do not schedule sweeps; active workers still
 retire expired flows. The regression covers worker isolation and idle cleanup.
+
+Linux kernel fixtures use keepalive probe intervals above the default 500 ms
+invalid-ACK rate limit. The netlink overrun fixture fills its socket before
+starting the reader so it deterministically exercises overflow recovery;
+production keepalive and network-monitor behavior are unchanged by these tests.

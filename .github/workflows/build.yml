@@ -71,9 +71,9 @@ jobs:
           upstream_probe_dir=$(mktemp -d)
           cd "$upstream_probe_dir"
           go mod init alpha6-upstream-keepalive-check
-          go get github.com/sagernet/sing-tun@v0.9.4-0.20260917142847-fbc0c3dff312
+          go get -t github.com/sagernet/sing-tun@v0.9.4-0.20260917142847-fbc0c3dff312
           set +e
-          go test -exec sudo -tags with_gvisor -count=1 -run '^TestGoConnKeepalive/answered$' -v github.com/sagernet/sing-tun
+          go test -mod=mod -exec sudo -tags with_gvisor -count=1 -run '^TestGoConnKeepalive/answered$' -v github.com/sagernet/sing-tun
           upstream_probe_status=$?
           set -e
           echo "Unmodified upstream keepalive fixture exit status: $upstream_probe_status" >> "$GITHUB_STEP_SUMMARY"

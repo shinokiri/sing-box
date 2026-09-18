@@ -166,6 +166,8 @@ func TestGoConnKeepalive(t *testing.T) {
 	})
 	t.Run("answered", func(scenario *testing.T) {
 		connectionCases(scenario, fixture, func(test *testing.T, conn *GoConn, kernel *net.TCPConn, port uint16) {
+			// Event-driven probes now honor subsecond intervals. Stay above Linux
+			// tcp_invalid_ratelimit (500 ms), which also limits keepalive replies.
 			err := conn.SetKeepAliveConfig(net.KeepAliveConfig{Enable: true, Idle: 600 * time.Millisecond, Interval: 600 * time.Millisecond, Count: 2})
 			if err != nil {
 				test.Fatal(err)
