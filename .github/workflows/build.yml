@@ -64,20 +64,6 @@ jobs:
           restore-keys: |
             android-arm64-api36-go-${{ steps.source.outputs.go_version }}-ndk-r29-${{ hashFiles('go.sum', 'third_party/sing-mux/go.sum', 'third_party/sing-tun/go.sum') }}-
             android-arm64-api36-go-${{ steps.source.outputs.go_version }}-ndk-r29-
-      - name: Diagnose unchanged upstream alpha.6 keepalive fixture
-        if: github.event_name == 'pull_request'
-        run: |
-          cat /proc/sys/net/ipv4/tcp_invalid_ratelimit
-          upstream_probe_dir=$(mktemp -d)
-          cd "$upstream_probe_dir"
-          go mod init alpha6-upstream-keepalive-check
-          go get -t github.com/sagernet/sing-tun@v0.9.4-0.20260917142847-fbc0c3dff312
-          set +e
-          go test -mod=mod -exec sudo -tags with_gvisor -count=1 -run '^TestGoConnKeepalive/answered$' -v github.com/sagernet/sing-tun
-          upstream_probe_status=$?
-          set -e
-          echo "Unmodified upstream keepalive fixture exit status: $upstream_probe_status" >> "$GITHUB_STEP_SUMMARY"
-          exit 0
       - name: Check local patches against both module requirements
         run: sh .github/check_local_patches.sh
       - name: Test Snell URLTest session handoff

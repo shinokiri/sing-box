@@ -59,10 +59,11 @@ func (s *ForwardStage) sweepDue() (time.Duration, bool) {
 	}
 	d := s.dispatcher
 	d.access.Lock()
-	count := len(d.table)
+	// A delayed verdict can install an entry without waking the Go engine.
+	pending := len(d.table) > 0 || d.async != nil && d.async.workers > 0
 	lastSweep := d.lastSweep
 	d.access.Unlock()
-	if count == 0 {
+	if !pending {
 		return 0, false
 	}
 	return max(time.Duration(lastSweep+int64(flowSweepInterval)-d.now()), 0), true

@@ -148,3 +148,36 @@ func TestForwardStageIdleSweepKeepsWorkerTablesIndependent(t *testing.T) {
 	_, pending = active.sweepDue()
 	require.False(t, pending, "a drained worker must stop scheduling sweeps")
 }
+
+func TestForwardStagePendingVerdictKeepsIdleSweepScheduled(t *testing.T) {
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	handler := &pendingHandler{judge: func(ctx context.Context, _ netip.AddrPort, _ []byte) FlowVerdict {
+		close(entered)
+		select {
+		case <-unblock:
+		case <-ctx.Done():
+		}
+		return FlowVerdict{Action: ActionDrop, RejectTimeout: time.Second}
+	}}
+	d := NewForwardDispatcher(handler, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
+	t.Cleanup(d.Close)
+	d.EnableAsyncFlow(t.Context(), nil)
+	stage := d.NewStage(nil)
+	require.True(t, stage.Dispatch(pendingPacket(50000, []byte("pending"))))
+	pendingReceive(t, entered)
+
+	// The Go engine may sleep before DNS/routing produces a table entry.
+	// Its existing sweep timer must stay armed for the eventual verdict.
+	remaining, pending := stage.sweepDue()
+	require.True(t, pending)
+	require.Positive(t, remaining)
+	close(unblock)
+	waitPendingIdle(t, d)
+	_, pending = stage.sweepDue()
+	require.True(t, pending)
+
+	d.epoch = time.Now().Add(-time.Minute)
+	stage.Flush()
+	_, pending = stage.sweepDue()
+	require.False(t, pending, "the delayed drop verdict must expire without another packet")
+}
