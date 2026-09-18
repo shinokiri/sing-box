@@ -111,3 +111,40 @@ func TestGoEngineDefersRoutingAndHandsAcceptedVerdictBack(t *testing.T) {
 	engine.injectFlowPacket(pendingPacket(50001, []byte("closed")))
 	require.Nil(t, engine.injectStack.popAll(), "shutdown must stop late asynchronous handoffs")
 }
+
+func TestForwardStageIdleSweepKeepsWorkerTablesIndependent(t *testing.T) {
+	var absent *ForwardStage
+	remaining, pending := absent.sweepDue()
+	require.Zero(t, remaining)
+	require.False(t, pending)
+
+	port := new(stagedUDPPort)
+	d := NewForwardDispatcher(udpHistoryHandler{port: port}, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
+	t.Cleanup(d.Close)
+	active, idle := d.NewStage(nil), d.NewStage(nil)
+	_, pending = active.sweepDue()
+	require.False(t, pending, "an empty worker must not schedule idle wakeups")
+
+	packet := udpHistoryPacket(netip.MustParseAddrPort("10.0.0.2:50000"), netip.MustParseAddrPort("203.0.113.1:53"))
+	require.True(t, active.Dispatch(packet))
+	active.Flush()
+	require.Len(t, port.packets, 1)
+	flow := port.packets[0].Flow
+	require.True(t, flow.IsActive())
+	remaining, pending = active.sweepDue()
+	require.True(t, pending)
+	require.Positive(t, remaining)
+	require.LessOrEqual(t, remaining, flowSweepInterval)
+	_, pending = idle.sweepDue()
+	require.False(t, pending, "another worker's traffic must not arm this worker")
+
+	// Advance only this worker's monotonic test clock, without waiting for TTLs.
+	active.dispatcher.epoch = time.Now().Add(-3 * time.Minute)
+	remaining, pending = active.sweepDue()
+	require.True(t, pending)
+	require.Zero(t, remaining)
+	active.Flush()
+	require.False(t, flow.IsActive(), "the scheduled sweep must retire an expired idle flow")
+	_, pending = active.sweepDue()
+	require.False(t, pending, "a drained worker must stop scheduling sweeps")
+}

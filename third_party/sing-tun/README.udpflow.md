@@ -1,7 +1,7 @@
 # Local sing-tun patches
 
-Upstream source: v0.9.4-0.20260916043548-e842d006fa65, as required by the
-sing-box v1.15.0-alpha.5 (37611b410481dfca1265873284c9bfd3f04f8fd6).
+Upstream source: v0.9.4-0.20260917142847-fbc0c3dff312, as required by the
+sing-box v1.15.0-alpha.6 (8330820fa62505f9574e4c35cd969d9af6eb7769).
 
 The fork retains bounded asynchronous first-flow routing, fixed DNS failure
 retry deadlines, writeback outside the flow-table lock, selector cancellation,
@@ -30,3 +30,9 @@ for Linux IPv6 packet memory limits while retaining the FIN-loss checks.
 
 The alpha.5 update retains the window-edge ACK and incremental half-close
 regressions while masking the new goPermitWindowBit in window comparisons.
+
+The alpha.6 update includes upstream's Go memory arenas, read-slot parking,
+event-driven connection timers, and iptables DNS-hijack fix. The new idle
+sweep query reads each worker's dispatcher table and last-sweep time under
+its existing lock. Empty workers do not schedule sweeps; active workers still
+retire expired flows. The regression covers worker isolation and idle cleanup.

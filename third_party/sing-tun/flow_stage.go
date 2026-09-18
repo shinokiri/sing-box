@@ -1,5 +1,7 @@
 package tun
 
+import "time"
+
 // ForwardStage keeps each TUN worker's flow table and borrowed packet batches
 // independent. The first stage uses the dispatcher directly for compatibility
 // with the system/gVisor asynchronous receive paths; later stages share only
@@ -48,6 +50,22 @@ func (s *ForwardStage) Flush() {
 	if s != nil {
 		s.dispatcher.Flush()
 	}
+}
+
+// sweepDue keeps upstream's idle sweep scheduling local to this worker's table.
+func (s *ForwardStage) sweepDue() (time.Duration, bool) {
+	if s == nil {
+		return 0, false
+	}
+	d := s.dispatcher
+	d.access.Lock()
+	count := len(d.table)
+	lastSweep := d.lastSweep
+	d.access.Unlock()
+	if count == 0 {
+		return 0, false
+	}
+	return max(time.Duration(lastSweep+int64(flowSweepInterval)-d.now()), 0), true
 }
 
 func (s *ForwardStage) teardownFlow(key flowKey, reason FlowCloseReason) {
