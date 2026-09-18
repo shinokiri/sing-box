@@ -349,3 +349,145 @@ index fa39ea9..886b17c 100644
          ApkInstaller.install(context, apkFile)
      }
  }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/Application.kt b/app/src/main/java/io/nekohasekai/sfa/Application.kt
+index 402af8e..d0c5d8d 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/Application.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/Application.kt
+@@ -25,8 +25,10 @@ import io.nekohasekai.sfa.database.Settings
+ import io.nekohasekai.sfa.utils.AppLifecycleObserver
+ import io.nekohasekai.sfa.utils.HookModuleUpdateNotifier
+ import io.nekohasekai.sfa.utils.HookStatusClient
++import io.nekohasekai.sfa.utils.LibboxInitializer
+ import io.nekohasekai.sfa.utils.PrivilegeSettingsClient
+ import io.nekohasekai.sfa.vendor.Vendor
++import kotlinx.coroutines.DelicateCoroutinesApi
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.GlobalScope
+ import kotlinx.coroutines.launch
+@@ -36,11 +38,14 @@ import java.util.Locale
+ import io.nekohasekai.sfa.Application as BoxApplication
+
+ class Application : Application() {
++    private lateinit var libboxInitializer: LibboxInitializer
++
+     override fun attachBaseContext(base: Context?) {
+         super.attachBaseContext(base)
+         application = this
+     }
+
++    @OptIn(DelicateCoroutinesApi::class)
+     override fun onCreate() {
+         super.onCreate()
+         AppLifecycleObserver.register(this)
+@@ -64,12 +69,19 @@ class Application : Application() {
+             PowerReportManager.install(workingDir)
+         }
+
+-        @Suppress("OPT_IN_USAGE")
+-        GlobalScope.launch(Dispatchers.IO) {
++        libboxInitializer = LibboxInitializer(GlobalScope) {
+             Settings.dataStore.initialize()
+             HookStatusClient.register(this@Application)
+             PrivilegeSettingsClient.register(this@Application)
+             initialize(baseDir, workingDir, tempDir)
++        }
++        GlobalScope.launch(Dispatchers.IO) {
++            try {
++                awaitLibboxInitialization()
++            } catch (e: Exception) {
++                Log.e("Application", "initialize libbox", e)
++                return@launch
++            }
+             UpdateProfileWork.reconfigureUpdater()
+             HookModuleUpdateNotifier.sync(this@Application)
+             TaildropFiles.cleanCache()
+@@ -87,8 +99,10 @@ class Application : Application() {
+         }
+     }
+
++    internal suspend fun awaitLibboxInitialization() = libboxInitializer.await()
++
+     private fun initialize(baseDir: File, workingDir: File?, tempDir: File) {
+-        val actualWorkingDir = workingDir ?: return
++        val actualWorkingDir = checkNotNull(workingDir) { "External files directory is unavailable" }
+         setupLibbox(baseDir, actualWorkingDir, tempDir)
+     }
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+index e63e4bf..22d65e7 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+@@ -120,10 +120,6 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+
+     private suspend fun startService() {
+         try {
+-            withContext(Dispatchers.Main) {
+-                notification.show(lastProfileName, R.string.status_starting)
+-            }
+-
+             val selectedProfileId = Settings.selectedProfile
+             if (selectedProfileId == -1L) {
+                 stopAndAlert(Alert.EmptyConfiguration)
+@@ -326,6 +322,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+     }
+
+     private suspend fun stopAndAlert(type: Alert, message: String? = null) {
++        Log.e(TAG, "service alert: $type: ${message.orEmpty()}")
+         Settings.startedByUser = false
+         Settings.dataStore.flush()
+         val pfd = fileDescriptor
+@@ -373,15 +370,27 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+             receiverRegistered = true
+         }
+
+-        GlobalScope.launch(Dispatchers.IO) {
+-            Settings.startedByUser = true
++        GlobalScope.launch(Dispatchers.Main.immediate) {
++            // Meet the foreground-service deadline before waiting for setup or I/O.
+             try {
+-                startCommandServer()
++                notification.show(lastProfileName, R.string.status_starting)
+             } catch (e: Exception) {
+-                stopAndAlert(Alert.StartCommandServer, e.message)
++                withContext(Dispatchers.IO) {
++                    stopAndAlert(Alert.StartService, e.message)
++                }
+                 return@launch
+             }
+-            startService()
++            withContext(Dispatchers.IO) {
++                try {
++                    Application.application.awaitLibboxInitialization()
++                    Settings.startedByUser = true
++                    startCommandServer()
++                } catch (e: Exception) {
++                    stopAndAlert(Alert.StartCommandServer, e.message)
++                    return@withContext
++                }
++                startService()
++            }
+         }
+         return Service.START_NOT_STICKY
+     }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt b/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt
+new file mode 100644
+index 0000000..4b78183
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt
+@@ -0,0 +1,16 @@
++package io.nekohasekai.sfa.utils
++
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.CoroutineStart
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.async
++
++/** Shares one application-owned setup task across UI and system service starts. */
++internal class LibboxInitializer(scope: CoroutineScope, initialize: suspend () -> Unit) {
++    private val initialized = scope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
++        initialize()
++    }
++
++    // A cancelled waiter must not cancel setup; failures reach every caller.
++    suspend fun await() = initialized.await()
++}
