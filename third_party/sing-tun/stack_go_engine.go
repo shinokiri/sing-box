@@ -44,6 +44,8 @@ const (
 	goMessageConnPacing
 	goMessageConnThrottle
 	goMessageConnSplice
+	goMessageConnKeepalive
+	goMessageConnTransmitted
 	goMessagePacketSplice
 	goMessagePacketClose
 	goMessageUDPOpen
@@ -139,8 +141,7 @@ type goEngine struct {
 	resetMessage         goMessage
 	delayedAckTickNode   goWheelNode
 	reassemblyTickNode   goWheelNode
-	sweepTickNode        goWheelNode
-	reclaimTickNode      goWheelNode
+	dispatchTickNode     goWheelNode
 	reassemblyEntries    []goReassemblyEntry
 	udpUserData          goUDPUserData
 	udpNat               *UDPNat
@@ -161,7 +162,7 @@ type goEngine struct {
 	spliceDirtyList      *GoConn
 	spliceSegments       [][]byte
 	spliceIovecs         []goIOVector
-	packetReceiveBuffers [goPacketBatchSize]*buf.Buffer
+	packetSlots          goReadSlots
 	packetReceiveBatch   int
 	packetMessages       [goPacketBatchSize]goPacketMessage
 	packetFrames         [goPacketBatchSize]goUDPFrame
@@ -194,11 +195,10 @@ type goEngine struct {
 	rateSample      goRateSample
 	ackSample       goAckSample
 
-	gsoReadOptions N.ReadWaitOptions
-	gsoBuffers     [goGSOMaxSegments]*buf.Buffer
-	gsoSegments    [goGSOMaxSegments][]byte
-	gsoSizes       [goGSOMaxSegments]int
-	gsoFrame       goFrame
+	gsoSlots    goReadSlots
+	gsoSegments [goGSOMaxSegments][]byte
+	gsoSizes    [goGSOMaxSegments]int
+	gsoFrame    goFrame
 }
 
 func (e *goEngine) singleFrame(packet []byte) [][]byte {
@@ -218,7 +218,6 @@ func newGoEngine(stack *Go, platformIO goPlatformIO, engineCount int) *goEngine 
 		flows:              stack.directory.flows,
 		flowCapacity:       max(goFlowCapacity/engineCount, 1024),
 		slabPool:           newGoSlabPool(stack.memoryPressure, max(goSlabPoolLowWater/engineCount, 8)),
-		descriptorPool:     goDescriptorPool{lowWater: max(goDescriptorPoolLowWater/engineCount, 4)},
 		sequenceSeed:       maphash.MakeSeed(),
 		controlSegments:    make([][]byte, 0, 8),
 		socketEvents:       make([]goSocketEvent, goSocketEventBatch),
@@ -247,12 +246,9 @@ func newGoEngine(stack *Go, platformIO goPlatformIO, engineCount int) *goEngine 
 	engine.packetReadOptions.Store(new(N.ReadWaitOptions))
 	engine.delayedAckTickNode.expire = func(now int64) { engine.drainAckList(now, false) }
 	engine.reassemblyTickNode.expire = engine.expireReassemblyTick
-	engine.sweepTickNode.expire = engine.expireSweepTick
-	engine.reclaimTickNode.expire = engine.expireReclaimTick
+	engine.dispatchTickNode.expire = func(int64) { engine.dispatchStage.Flush() }
 	engine.refreshCoarseTime()
 	engine.wheel.currentTick = engine.coarseTime.Load() / goWheelTick
-	engine.wheel.schedule(&engine.sweepTickNode, engine.coarseTime.Load()+int64(goSweepInterval))
-	engine.wheel.schedule(&engine.reclaimTickNode, engine.coarseTime.Load()+int64(goReclaimInterval))
 	return engine
 }
 
@@ -301,6 +297,10 @@ func (e *goEngine) run() {
 		e.drainAckList(e.coarseTime.Load(), true)
 		if e.dispatchStage != nil {
 			e.dispatchStage.Flush()
+			remaining, pending := e.dispatchStage.sweepDue()
+			if pending && e.dispatchTickNode.slot == nil {
+				e.wheel.schedule(&e.dispatchTickNode, e.coarseTime.Load()+int64(remaining))
+			}
 		}
 		e.flushPacketUploads()
 		e.flushPacketFrames()
@@ -320,6 +320,8 @@ func (e *goEngine) run() {
 func (e *goEngine) exit() {
 	e.shutdown()
 	e.releaseReadBuffers()
+	e.packetSlots.release()
+	e.gsoSlots.release()
 	e.engineState.Store(goEngineExited)
 	e.releaseControlQueue()
 	e.releaseInjected()
@@ -411,10 +413,8 @@ func (e *goEngine) releaseReadBuffers() {
 	clear(e.spliceSegments[:cap(e.spliceSegments)])
 	clear(e.spliceIovecs[:cap(e.spliceIovecs)])
 	clear(e.controlSegments[:cap(e.controlSegments)])
-	buf.ReleaseMulti(e.packetReceiveBuffers[:])
-	clear(e.packetReceiveBuffers[:])
-	buf.ReleaseMulti(e.gsoBuffers[:])
-	clear(e.gsoBuffers[:])
+	e.packetSlots.sleep()
+	e.gsoSlots.sleep()
 	clear(e.gsoSegments[:])
 	e.gsoFrame = goFrame{}
 	clear(e.packetMessages[:])
@@ -422,13 +422,7 @@ func (e *goEngine) releaseReadBuffers() {
 	clear(e.packetUploads[:])
 	e.packetIO.reset()
 	e.platformIO.releaseReadBuffers()
-	for index := range e.reassemblyEntries {
-		entry := &e.reassemblyEntries[index]
-		if !entry.active {
-			entry.buffer.Release()
-			entry.buffer = nil
-		}
-	}
+	e.slabPool.purge()
 }
 
 func (e *goEngine) postMessage(message *goMessage) {
@@ -500,6 +494,10 @@ func (e *goEngine) handleMessage(message *goMessage) {
 		}
 	case goMessageConnSplice:
 		e.handleSpliceEngage(message.conn)
+	case goMessageConnKeepalive:
+		e.handleKeepaliveUpdate(message.conn)
+	case goMessageConnTransmitted:
+		e.handleTransmitted(message.conn)
 	case goMessagePacketSplice:
 		e.handlePacketSpliceEngage(message.packet)
 	case goMessagePacketClose:
@@ -584,7 +582,7 @@ func (e *goEngine) shutdown() {
 	e.closeAllUDPSockets()
 	e.closeAllListeners()
 	for index := range e.reassemblyEntries {
-		e.reassemblyEntries[index].active = false
+		e.reassemblyEntries[index].discard()
 	}
 	e.releaseReadBuffers()
 	unreset := e.closeAllFlows()
@@ -860,6 +858,12 @@ type goReassemblyEntry struct {
 	rangeCount   int
 }
 
+func (r *goReassemblyEntry) discard() {
+	r.active = false
+	r.buffer.Release()
+	r.buffer = nil
+}
+
 func (e *goEngine) reassembleIPv4(packet []byte, parsed *forwardPacket) {
 	ipHdr := header.IPv4(parsed.network)
 	headerLength := int(ipHdr.HeaderLength())
@@ -901,7 +905,7 @@ func (e *goEngine) reassemblyEntry(ipVersion uint8, protocol uint8, source netip
 	for index := range e.reassemblyEntries {
 		entry := &e.reassemblyEntries[index]
 		if entry.active && entry.deadline <= now {
-			entry.active = false
+			entry.discard()
 		}
 		if !entry.active {
 			if free == nil {
@@ -953,23 +957,23 @@ func (e *goEngine) reassemblyAdd(entry *goReassemblyEntry, offset int, fragment 
 	}
 	end := offset + len(fragment)
 	if end > 65535 {
-		entry.active = false
+		entry.discard()
 		return
 	}
 	if !more {
 		if entry.totalLength >= 0 && entry.totalLength != end {
-			entry.active = false
+			entry.discard()
 			return
 		}
 		entry.totalLength = end
 	}
 	if entry.totalLength >= 0 && end > entry.totalLength {
-		entry.active = false
+		entry.discard()
 		return
 	}
 	copy(entry.buffer.Range(entry.headroom+offset, entry.headroom+end), fragment)
 	if !reassemblyMergeRanges(entry, offset, end) {
-		entry.active = false
+		entry.discard()
 		return
 	}
 	if entry.headerSeen && entry.totalLength >= 0 && entry.rangeCount == 1 &&
@@ -1008,10 +1012,12 @@ func reassemblyMergeRanges(entry *goReassemblyEntry, start int, end int) bool {
 
 func (e *goEngine) completeReassembly(entry *goReassemblyEntry) {
 	entry.active = false
+	buffer := entry.buffer
+	entry.buffer = nil
+	defer buffer.Release()
 	if entry.ipVersion == 4 && entry.headerLength+entry.totalLength > 65535 {
 		return
 	}
-	buffer := entry.buffer
 	buffer.Resize(entry.headroom-entry.headerLength, entry.headerLength+entry.totalLength)
 	packet := buffer.Bytes()
 	if entry.ipVersion == 4 {
@@ -1041,11 +1047,7 @@ func (e *goEngine) expireReassemblyTick(now int64) {
 			continue
 		}
 		if entry.deadline <= now {
-			entry.active = false
-			if !e.readBuffersHeld {
-				entry.buffer.Release()
-				entry.buffer = nil
-			}
+			entry.discard()
 		} else {
 			next = min(next, entry.deadline)
 		}
