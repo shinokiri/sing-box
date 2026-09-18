@@ -13,20 +13,20 @@ index d90e2c7..53f3226 100644
 @@ -21,6 +22,7 @@ class ApkDownloader : Closeable {
          cacheDir.mkdirs()
          val apkFile = File(cacheDir, "update.apk")
- 
+
 +        Settings.cachedApkUrl = ""
          if (apkFile.exists()) apkFile.delete()
- 
+
          val request = client.newRequest()
 @@ -42,7 +44,7 @@ class ApkDownloader : Closeable {
              throw Exception("Download failed: empty file")
          }
- 
+
 -        UpdateState.saveApkPath(apkFile)
 +        UpdateState.saveApkPath(apkFile, url)
          apkFile
      }
- 
+
 @@ -50,3 +52,6 @@ class ApkDownloader : Closeable {
          client.close()
      }
@@ -40,13 +40,13 @@ index ab0c1c2..eb60662 100644
 +++ b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
 @@ -1,6 +1,5 @@
  package io.nekohasekai.sfa.vendor
- 
+
 -import android.os.Build
  import io.nekohasekai.libbox.Libbox
  import io.nekohasekai.sfa.BuildConfig
  import io.nekohasekai.sfa.ktx.unwrap
 @@ -14,7 +13,8 @@ import java.io.Closeable
- 
+
  class GitHubUpdateChecker : Closeable {
      companion object {
 -        private const val RELEASES_URL = "https://api.github.com/repos/SagerNet/sing-box/releases"
@@ -54,11 +54,11 @@ index ab0c1c2..eb60662 100644
 +        internal const val LATEST_RELEASE_URL = "https://api.github.com/repos/shinokiri/sing-box/releases/latest"
          private const val METADATA_FILENAME = "SFA-version-metadata.json"
      }
- 
+
 @@ -25,48 +25,14 @@ class GitHubUpdateChecker : Closeable {
- 
+
      private val json = Json { ignoreUnknownKeys = true }
- 
+
 -    fun checkUpdate(track: UpdateTrack, githubToken: String): UpdateInfo? {
 -        val releases = getReleases(githubToken)
 -        var selected: ReleaseCandidate? = null
@@ -79,7 +79,7 @@ index ab0c1c2..eb60662 100644
 +        selectUdpflowUpdate(getUdpflowReleases(track) { getReleaseFeed(it, githubToken) }, track, BuildConfig.VERSION_CODE) { release ->
 +            runCatching { downloadMetadata(release) }.getOrNull()
          }
- 
+
 -        val release = selected?.release ?: return null
 -        val metadata = selected.metadata
 -
@@ -112,7 +112,7 @@ index ab0c1c2..eb60662 100644
 @@ -74,32 +40,7 @@ class GitHubUpdateChecker : Closeable {
          }
          request.setUserAgent(HTTPClient.userAgent)
- 
+
 -        val response = request.execute()
 -        val content = response.content.unwrap
 -
@@ -146,7 +146,7 @@ index ab0c1c2..eb60662 100644
 @@ -144,8 +85,45 @@ class GitHubUpdateChecker : Closeable {
          @SerialName("version_name") val versionName: String = "",
      )
- 
+
 -    private data class ReleaseCandidate(
 -        val release: GitHubRelease,
 -        val metadata: VersionMetadata,
@@ -206,11 +206,11 @@ index 059458d..0b2ea8f 100644
  import io.nekohasekai.sfa.update.UpdateTrack
 -import io.nekohasekai.sfa.update.checkFDroidUpdate
  import java.util.concurrent.TimeUnit
- 
+
  class UpdateWorker(private val appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
 @@ -61,13 +59,8 @@ class UpdateWorker(private val appContext: Context, params: WorkerParameters) :
          Log.d(TAG, "Checking for updates...")
- 
+
          return try {
 -            val updateInfo = when (UpdateSource.fromString(Settings.updateSource)) {
 -                UpdateSource.FDROID -> checkFDroidUpdate(appContext)
@@ -221,7 +221,7 @@ index 059458d..0b2ea8f 100644
 -            }
 +            val track = UpdateTrack.fromString(Settings.updateTrack)
 +            val updateInfo = GitHubUpdateChecker().use { it.checkUpdate(track, Settings.githubToken) }
- 
+
              if (updateInfo == null) {
                  Log.d(TAG, "No update available")
 diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
@@ -254,7 +254,7 @@ index 20c0e7b..a91173d 100644
 +++ b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
 @@ -43,8 +43,8 @@ object Settings {
      var startedByUser by dataStore.boolean(SettingsKey.STARTED_BY_USER)
- 
+
      var updateSource by dataStore.string(SettingsKey.UPDATE_SOURCE) { "github" }
 -    var checkUpdateEnabled by dataStore.boolean(SettingsKey.CHECK_UPDATE_ENABLED) { false }
 -    var updateCheckPrompted by dataStore.boolean(SettingsKey.UPDATE_CHECK_PROMPTED) { false }
@@ -264,12 +264,12 @@ index 20c0e7b..a91173d 100644
          val versionName = BuildConfig.VERSION_NAME.lowercase()
          if (versionName.contains("-alpha") ||
 @@ -134,6 +134,7 @@ object Settings {
- 
+
      var cachedUpdateInfo by dataStore.string(SettingsKey.CACHED_UPDATE_INFO) { "" }
      var cachedApkPath by dataStore.string(SettingsKey.CACHED_APK_PATH) { "" }
 +    var cachedApkUrl by dataStore.string(SettingsKey.CACHED_APK_URL) { "" }
      var lastShownUpdateVersion by dataStore.int(SettingsKey.LAST_SHOWN_UPDATE_VERSION) { 0 }
- 
+
      fun serviceClass(): Class<*> = when (serviceMode) {
 diff --git a/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt b/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt
 index 19ba94e..907f41d 100644
@@ -278,14 +278,14 @@ index 19ba94e..907f41d 100644
 @@ -80,14 +80,16 @@ object UpdateState {
          Settings.cachedUpdateInfo = info?.toJson() ?: ""
      }
- 
+
 -    fun saveApkPath(file: File) {
 +    fun saveApkPath(file: File, url: String) {
          Settings.cachedApkPath = file.absolutePath
 +        Settings.cachedApkUrl = url
          cachedApkFile.value = file
      }
- 
+
      private fun clearCache() {
          Settings.cachedUpdateInfo = ""
          Settings.cachedApkPath = ""
@@ -310,16 +310,16 @@ index fa39ea9..886b17c 100644
  import io.nekohasekai.sfa.update.UpdateState
  import io.nekohasekai.sfa.update.UpdateTrack
 -import io.nekohasekai.sfa.update.checkFDroidUpdate
- 
+
  object Vendor : VendorInterface {
      private const val TAG = "Vendor"
 @@ -97,15 +95,12 @@ object Vendor : VendorInterface {
- 
+
      override val hasCustomUpdate = true
- 
+
 -    override val updateSources = listOf(UpdateSource.GITHUB, UpdateSource.FDROID)
 +    override val updateSources = listOf(UpdateSource.GITHUB)
- 
+
 -    override fun checkUpdateAsync(): UpdateInfo? = when (UpdateSource.fromString(Settings.updateSource)) {
 -        UpdateSource.FDROID -> checkFDroidUpdate(Application.application)
 -        UpdateSource.GITHUB -> {
@@ -333,10 +333,10 @@ index fa39ea9..886b17c 100644
 +            checker.checkUpdate(track, Settings.githubToken)
          }
      }
- 
+
 @@ -134,12 +129,8 @@ object Vendor : VendorInterface {
      }
- 
+
      override suspend fun downloadAndInstall(context: android.content.Context, downloadUrl: String) {
 -        val cachedApk = UpdateState.cachedApkFile.value
 -        val apkFile = if (cachedApk != null && cachedApk.exists() && cachedApk.length() > 0) {
@@ -349,3 +349,145 @@ index fa39ea9..886b17c 100644
          ApkInstaller.install(context, apkFile)
      }
  }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/Application.kt b/app/src/main/java/io/nekohasekai/sfa/Application.kt
+index 402af8e..d0c5d8d 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/Application.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/Application.kt
+@@ -25,8 +25,10 @@ import io.nekohasekai.sfa.database.Settings
+ import io.nekohasekai.sfa.utils.AppLifecycleObserver
+ import io.nekohasekai.sfa.utils.HookModuleUpdateNotifier
+ import io.nekohasekai.sfa.utils.HookStatusClient
++import io.nekohasekai.sfa.utils.LibboxInitializer
+ import io.nekohasekai.sfa.utils.PrivilegeSettingsClient
+ import io.nekohasekai.sfa.vendor.Vendor
++import kotlinx.coroutines.DelicateCoroutinesApi
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.GlobalScope
+ import kotlinx.coroutines.launch
+@@ -36,11 +38,14 @@ import java.util.Locale
+ import io.nekohasekai.sfa.Application as BoxApplication
+
+ class Application : Application() {
++    private lateinit var libboxInitializer: LibboxInitializer
++
+     override fun attachBaseContext(base: Context?) {
+         super.attachBaseContext(base)
+         application = this
+     }
+
++    @OptIn(DelicateCoroutinesApi::class)
+     override fun onCreate() {
+         super.onCreate()
+         AppLifecycleObserver.register(this)
+@@ -64,12 +69,19 @@ class Application : Application() {
+             PowerReportManager.install(workingDir)
+         }
+
+-        @Suppress("OPT_IN_USAGE")
+-        GlobalScope.launch(Dispatchers.IO) {
++        libboxInitializer = LibboxInitializer(GlobalScope) {
+             Settings.dataStore.initialize()
+             HookStatusClient.register(this@Application)
+             PrivilegeSettingsClient.register(this@Application)
+             initialize(baseDir, workingDir, tempDir)
++        }
++        GlobalScope.launch(Dispatchers.IO) {
++            try {
++                awaitLibboxInitialization()
++            } catch (e: Exception) {
++                Log.e("Application", "initialize libbox", e)
++                return@launch
++            }
+             UpdateProfileWork.reconfigureUpdater()
+             HookModuleUpdateNotifier.sync(this@Application)
+             TaildropFiles.cleanCache()
+@@ -87,8 +99,10 @@ class Application : Application() {
+         }
+     }
+
++    internal suspend fun awaitLibboxInitialization() = libboxInitializer.await()
++
+     private fun initialize(baseDir: File, workingDir: File?, tempDir: File) {
+-        val actualWorkingDir = workingDir ?: return
++        val actualWorkingDir = checkNotNull(workingDir) { "External files directory is unavailable" }
+         setupLibbox(baseDir, actualWorkingDir, tempDir)
+     }
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+index e63e4bf..22d65e7 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+@@ -120,10 +120,6 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+
+     private suspend fun startService() {
+         try {
+-            withContext(Dispatchers.Main) {
+-                notification.show(lastProfileName, R.string.status_starting)
+-            }
+-
+             val selectedProfileId = Settings.selectedProfile
+             if (selectedProfileId == -1L) {
+                 stopAndAlert(Alert.EmptyConfiguration)
+@@ -326,6 +322,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+     }
+
+     private suspend fun stopAndAlert(type: Alert, message: String? = null) {
++        Log.e(TAG, "service alert: $type: ${message.orEmpty()}")
+         Settings.startedByUser = false
+         Settings.dataStore.flush()
+         val pfd = fileDescriptor
+@@ -373,15 +370,27 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+             receiverRegistered = true
+         }
+
+-        GlobalScope.launch(Dispatchers.IO) {
+-            Settings.startedByUser = true
++        GlobalScope.launch(Dispatchers.Main.immediate) {
++            // Meet the foreground-service deadline before waiting for setup or I/O.
+             try {
+-                startCommandServer()
++                notification.show(lastProfileName, R.string.status_starting)
+             } catch (e: Exception) {
+-                stopAndAlert(Alert.StartCommandServer, e.message)
++                withContext(Dispatchers.IO) {
++                    stopAndAlert(Alert.StartService, e.message)
++                }
+                 return@launch
+             }
+-            startService()
++            withContext(Dispatchers.IO) {
++                try {
++                    Application.application.awaitLibboxInitialization()
++                    Settings.startedByUser = true
++                    startCommandServer()
++                } catch (e: Exception) {
++                    stopAndAlert(Alert.StartCommandServer, e.message)
++                    return@withContext
++                }
++                startService()
++            }
+         }
+         return Service.START_NOT_STICKY
+     }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt b/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt
+new file mode 100644
+index 0000000..4b78183
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt
+@@ -0,0 +1,16 @@
++package io.nekohasekai.sfa.utils
++
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.CoroutineStart
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.async
++
++/** Shares one application-owned setup task across UI and system service starts. */
++internal class LibboxInitializer(scope: CoroutineScope, initialize: suspend () -> Unit) {
++    private val initialized = scope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
++        initialize()
++    }
++
++    // A cancelled waiter must not cancel setup; failures reach every caller.
++    suspend fun await() = initialized.await()
++}

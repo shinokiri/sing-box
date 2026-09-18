@@ -40,7 +40,9 @@ jobs:
     permissions:
       contents: write
     env:
-      BUILD_ANDROID: ${{ github.ref == 'refs/heads/udpflow-testing' && github.event_name != 'pull_request' }}
+      # Exercise Android changes on in-repository PRs before merging.
+      # Fork PRs run core checks without access to signing secrets.
+      BUILD_ANDROID: ${{ github.ref == 'refs/heads/udpflow-testing' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
@@ -144,13 +146,20 @@ jobs:
           test -n "$KEYSTORE_BASE64"
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > clients/android/app/release.keystore
           chmod 600 clients/android/app/release.keystore
-      - name: Test client updates and build APK
+      - name: Test client startup and updates, then build APK
         if: env.BUILD_ANDROID == 'true'
         working-directory: clients/android
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
         run: ./gradlew --build-cache --parallel --init-script ../../.github/android-arm64.init.gradle :app:testOtherReleaseUnitTest :app:assembleOtherRelease
+      - name: Save Android unit test results
+        if: always() && env.BUILD_ANDROID == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-unit-test-results
+          path: clients/android/app/build/test-results/testOtherReleaseUnitTest/*.xml
+          if-no-files-found: ignore
       - name: Verify APK and record its sources
         if: env.BUILD_ANDROID == 'true'
         run: python3 .github/verify_android_apk.py
