@@ -157,9 +157,10 @@ func TestForwardStagePendingVerdictKeepsIdleSweepScheduled(t *testing.T) {
 		case <-unblock:
 		case <-ctx.Done():
 		}
-		return FlowVerdict{Action: ActionDrop, RejectTimeout: time.Second}
+		return FlowVerdict{Action: ActionDrop}
 	}}
-	d := NewForwardDispatcher(handler, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
+	// Drop verdicts use the protocol idle timeout, not RejectTimeout.
+	d := NewForwardDispatcher(handler, udpHistoryWriteback{}, logger.NOP(), time.Second, time.Second)
 	t.Cleanup(d.Close)
 	d.EnableAsyncFlow(t.Context(), nil)
 	stage := d.NewStage(nil)
@@ -176,7 +177,7 @@ func TestForwardStagePendingVerdictKeepsIdleSweepScheduled(t *testing.T) {
 	_, pending = stage.sweepDue()
 	require.True(t, pending)
 
-	d.epoch = time.Now().Add(-time.Minute)
+	d.epoch = d.epoch.Add(-2 * flowSweepInterval)
 	stage.Flush()
 	_, pending = stage.sweepDue()
 	require.False(t, pending, "the delayed drop verdict must expire without another packet")
