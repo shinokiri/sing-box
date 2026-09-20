@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [udpflow-testing]
   workflow_dispatch:
+    inputs:
+      sync_upstream:
+        description: Follow the newest published upstream alpha/beta/rc release
+        type: boolean
+        default: true
+      force_build:
+        description: Rebuild and test an already published version without republishing
+        type: boolean
+        default: false
+  schedule:
+    - cron: '23 */6 * * *'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,20 +27,23 @@ permissions:
 
 jobs:
   plan:
-    name: Select pinned testing snapshot
+    name: Select published testing release
     if: github.repository == 'shinokiri/sing-box'
     runs-on: ubuntu-latest
     outputs:
       build: ${{ steps.source.outputs.build }}
       publish: ${{ steps.source.outputs.publish }}
+      source: ${{ steps.source.outputs.source }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
       - name: Test release selection, upstream merges and APK verification
         run: python3 -m unittest discover -s .github -p 'test_*.py' -v
-      - name: Select reviewed snapshot
+      - name: Check for published testing updates
         id: source
         env:
           GH_TOKEN: ${{ github.token }}
+          SYNC_UPSTREAM: ${{ github.event_name == 'schedule' || inputs.sync_upstream }}
+          FORCE_BUILD: ${{ inputs.force_build }}
         run: python3 .github/udpflow_testing_release.py plan
 
   build:
@@ -51,6 +65,8 @@ jobs:
         id: source
         env:
           PUBLISH_RELEASE: ${{ needs.plan.outputs.publish }}
+          TESTING_SOURCE: ${{ needs.plan.outputs.source }}
+          GH_TOKEN: ${{ github.token }}
         run: python3 .github/udpflow_testing_release.py prepare
       - uses: actions/setup-go@v5
         with:
