@@ -4,10 +4,22 @@ The universal proxy platform.
 
 This is the **udpflow testing branch**. Download its signed **Android 16+ ARM64** APK
 from [Releases](https://github.com/shinokiri/sing-box/releases).
-The current development snapshot is `1.15.0-alpha.2-udpflow.2`, based on upstream
-`testing` commit `b84b42bc72dd7fad73ee1b3b65bfddf864eacf1b`, with Android client
-`ec05af8afa066b87025784355590a802168a0e07`. Exact pins are recorded in
-`release/udpflow.json`; testing snapshots are published as prereleases.
+Exact core and Android pins are recorded in [`release/udpflow.json`](release/udpflow.json).
+This branch follows newly published upstream **alpha/beta/rc releases** every six hours
+when it is the repository default branch. Unreleased `testing` commits are not selected.
+The Actions **Android ARM64** workflow also supports a manual update check.
+
+Updates merge the released core snapshot, pin a matching Android client, and rebase
+local `sing-mux`, `sing-tun`, and `sing-snell` changes onto their required versions.
+Fork automation and Android patches are retained. A conflict, mismatched dependency,
+or failed test stops publication and reports the reason in Actions; the existing
+public release remains available. Core, race, Android unit, and signed APK checks
+must all pass before the tested commit and prerelease are published.
+
+Already published versions skip scheduled/manual builds. Use `force_build` for a
+verification build without replacing the published APK. Pushing a reviewed fork
+revision continues to use the pinned source and the normal release gates.
+
 Install the first udpflow release manually; subsequent releases are checked
 from this repository when the app starts. Previously disabled update checks
 remain disabled and can be enabled in app settings.

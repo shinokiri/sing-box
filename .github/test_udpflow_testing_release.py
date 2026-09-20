@@ -37,7 +37,7 @@ class TestingReleaseTest(unittest.TestCase):
                 responses = [{"sha": self.source["upstream_commit"]}, {"draft": False, "prerelease": True} if published else None]
                 with patch.object(release, "snapshot", return_value=(self.source, "1.15.0-alpha.2-udpflow.1")), patch.object(release, "api", side_effect=responses) as api, patch.dict(os.environ, GITHUB_REF="refs/heads/udpflow-testing", GITHUB_EVENT_NAME="push", GITHUB_REPOSITORY="example/fork", GITHUB_OUTPUT=str(output)):
                     release.plan()
-                self.assertEqual(release.properties(output), {"build": "true", "publish": str(not published).lower()})
+                self.assertEqual(release.properties(output), {"build": "true", "publish": str(not published).lower(), "source": json.dumps(self.source), "reason": "verify-current-source" if published else "unpublished-fork-revision"})
                 self.assertEqual(api.call_args_list[0].args, (f"repos/SagerNet/sing-box/commits/{self.source['upstream_commit']}",))
 
     def test_plan_does_not_publish_from_stable_branch(self):
@@ -51,7 +51,7 @@ class TestingReleaseTest(unittest.TestCase):
             output = Path(directory) / "output"
             with patch.object(release, "snapshot", return_value=(self.source, "version")), patch.object(release, "api") as api, patch.dict(os.environ, GITHUB_EVENT_NAME="pull_request", GITHUB_OUTPUT=str(output)):
                 release.plan()
-            self.assertEqual(release.properties(output), {"build": "true", "publish": "false"})
+            self.assertEqual(release.properties(output), {"build": "true", "publish": "false", "source": json.dumps(self.source), "reason": "pull-request"})
             api.assert_not_called()
 
     def test_testing_release_cannot_be_silently_promoted_to_stable(self):

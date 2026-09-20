@@ -1,59 +1,70 @@
-"""Build and publish an explicitly reviewed, immutable upstream testing snapshot."""
+"""Follow published testing releases while preserving local patches and release gates."""
 
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 
 from udpflow_release import CLIENT, MANIFEST, UPSTREAM, api, git, output, properties
+import udpflow_testing_sync as sync
 
 BRANCH = "udpflow-testing"
 
 
 def snapshot():
     source = json.loads(MANIFEST.read_text())
-    if source.get("upstream_branch") != "testing":
-        raise ValueError("Expected an explicitly pinned testing snapshot")
-    for field in ("upstream_commit", "android_client_commit"):
-        if not re.fullmatch(r"[0-9a-f]{40}", source.get(field, "")):
-            raise ValueError(f"Invalid {field}")
-    if not re.fullmatch(r"[1-9]\d*\.\d+\.\d+-(alpha|beta|rc)\.\d+", source["upstream_version"]):
-        raise ValueError("Expected an upstream development version")
-    revision = source["fork_revision"]
-    if type(revision) is not int or revision < 1:
-        raise ValueError("Expected a positive fork revision")
-    return source, f"{source['upstream_version']}-udpflow.{revision}"
+    return source, sync.validate_source(source)
 
 
 def plan():
-    source, version = snapshot()
-    if os.environ["GITHUB_EVENT_NAME"] == "pull_request":
-        output(build=True, publish=False)
+    current, _ = snapshot()
+    event = os.environ["GITHUB_EVENT_NAME"]
+    if event == "pull_request":
+        output(build=True, publish=False, source=json.dumps(current), reason="pull-request")
         return
     if os.environ["GITHUB_REF"] != f"refs/heads/{BRANCH}":
         raise ValueError("Testing snapshots must be published from udpflow-testing")
-    recorded = api(f"repos/{UPSTREAM}/commits/{source['upstream_commit']}")
-    if recorded["sha"] != source["upstream_commit"]:
-        raise ValueError("Upstream did not return the pinned commit")
+    auto_sync = event == "schedule" or os.environ.get("SYNC_UPSTREAM") == "true"
+    source = sync.select_source(current) if auto_sync else current
+    version = sync.validate_source(source)
+    if not auto_sync:
+        recorded = api(f"repos/{UPSTREAM}/commits/{source['upstream_commit']}")
+        if recorded["sha"] != source["upstream_commit"]:
+            raise ValueError("Upstream did not return the pinned commit")
     release = api(f"repos/{os.environ['GITHUB_REPOSITORY']}/releases/tags/v{version}", missing_ok=True)
     published = release is not None and not release["draft"]
     if published and not release["prerelease"]:
         raise ValueError("Testing release must be marked as a prerelease")
-    output(build=True, publish=not published)
+    if published and source != current:
+        raise ValueError("A newer fork release is already public but its source manifest is not adopted; reconcile the branch before publishing")
+    build = not published or event == "push" or os.environ.get("FORCE_BUILD") == "true"
+    reason = "new-upstream-release" if source != current else "unpublished-fork-revision" if not published else "verify-current-source" if build else "already-published"
+    output(build=build, publish=not published, source=json.dumps(source), reason=reason)
+    print(f"{reason}: {version}")
+    if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(summary, "a") as stream:
+            stream.write(f"Testing update: **{reason}** — `{version}`\n\nCore: `{source['upstream_commit']}`; Android: `{source['android_client_commit']}`.\n")
 
 
 def prepare():
-    source, version = snapshot()
+    current, _ = snapshot()
+    source = json.loads(os.environ["TESTING_SOURCE"]) if os.environ.get("TESTING_SOURCE") else current
+    version = sync.validate_source(source)
     base = git("rev-parse", "HEAD")
     git("diff", "--quiet")
     git("diff", "--cached", "--quiet")
     git("fetch", "--no-tags", f"https://github.com/{UPSTREAM}.git", source["upstream_commit"])
     if git("rev-parse", "FETCH_HEAD^{commit}") != source["upstream_commit"]:
         raise ValueError("Fetched a different upstream commit")
-    git("merge-base", "--is-ancestor", source["upstream_commit"], base)
+    git("merge-base", "--is-ancestor", current["upstream_commit"], base)
+    if source != current:
+        # Recheck the release tag after planning, before merging any source.
+        git("fetch", "--no-tags", f"https://github.com/{UPSTREAM}.git", f"refs/tags/v{source['upstream_version']}")
+        if git("rev-parse", "FETCH_HEAD^{commit}") != source["upstream_commit"]:
+            raise ValueError("Upstream release tag changed after planning")
     git("submodule", "update", "--init", "--recursive", str(CLIENT))
+    commit = sync.synchronize(current, source, base) if source != current else base
     if git("rev-parse", "HEAD", cwd=CLIENT) != source["android_client_commit"]:
         raise ValueError("Android client does not match the reviewed pin")
     props = properties(CLIENT / "version.properties")
@@ -62,18 +73,18 @@ def prepare():
     git("apply", "--check", "../../.github/android-udpflow.patch", cwd=CLIENT)
     git("apply", "../../.github/android-udpflow.patch", cwd=CLIENT)
     if os.environ["PUBLISH_RELEASE"] != "true":
-        version += ".g" + base[:7]
+        version += ".g" + commit[:7]
     props["VERSION_NAME"] = version
     props["VERSION_CODE"] = str(1000000 + int(os.environ["GITHUB_RUN_NUMBER"]))
     (CLIENT / "version.properties").write_text("".join(f"{key}={value}\n" for key, value in props.items()))
     tag = "v" + version
     existing = subprocess.run(["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"], capture_output=True, text=True)
     if existing.returncode == 0:
-        if existing.stdout.strip() != base:
+        if existing.stdout.strip() != commit:
             raise ValueError("Existing build tag belongs to a different commit")
     else:
         git("tag", tag)
-    state = {"base": base, "commit": base, "tag": tag, "version": version, **source}
+    state = {"base": base, "commit": commit, "tag": tag, "version": version, **source}
     (Path(os.environ["RUNNER_TEMP"]) / "udpflow-source.json").write_text(json.dumps(state))
     output(go_version=props["GO_VERSION"].removeprefix("go"))
 
@@ -91,7 +102,7 @@ def publish():
     if release and not release["draft"]:
         raise ValueError("Published releases cannot be overwritten")
     remote = git("ls-remote", "origin", f"refs/heads/{BRANCH}").split()[0]
-    if remote != state["commit"]:
+    if remote not in {state["base"], state["commit"]}:
         raise ValueError("Testing branch changed during the build")
     git("push", "--atomic", "origin", f"{state['commit']}:refs/heads/{BRANCH}", f"{state['commit']}:refs/tags/{state['tag']}")
     notes = Path(os.environ["RUNNER_TEMP"]) / "udpflow-testing-notes.md"
@@ -118,4 +129,10 @@ def publish():
 
 
 if __name__ == "__main__":
-    {"plan": plan, "prepare": prepare, "publish": publish}[sys.argv[1]]()
+    try:
+        {"plan": plan, "prepare": prepare, "publish": publish}[sys.argv[1]]()
+    except (ValueError, subprocess.CalledProcessError) as error:
+        if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(summary, "a") as stream:
+                stream.write(f"\nTesting update stopped; the existing public release is retained.\n\n```text\n{error}\n```\n")
+        raise
