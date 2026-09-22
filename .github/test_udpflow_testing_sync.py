@@ -16,6 +16,10 @@ def published(version, **values):
     return {"tag_name": "v" + version, "draft": False, "prerelease": True, "published_at": "2026-09-20T01:00:00Z", **values}
 
 
+def release_page(nodes, cursor=None):
+    return {"data": {"repository": {"releases": {"nodes": nodes, "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor}}}}}
+
+
 class SourceSelectionTest(unittest.TestCase):
     def setUp(self):
         self.source = {"upstream_branch": "testing", "upstream_version": "1.15.0-alpha.6", "upstream_commit": "a" * 40, "android_client_commit": "b" * 40, "fork_revision": 2}
@@ -23,17 +27,35 @@ class SourceSelectionTest(unittest.TestCase):
     def test_semantic_release_order_and_pagination_exclude_drafts_and_stable(self):
         page = [published("1.15.0-alpha.9")] * 97 + [published("1.15.0-alpha.10"), published("9.0.0", prerelease=False), published("9.0.0-rc.1", draft=True)]
         last = [published("1.15.0-beta.2"), published("1.15.0-rc.1"), published("1.15.0-rc.2", published_at=None)]
-        with patch.object(sync, "api", side_effect=[page, last]) as api:
+        with patch.object(sync, "api", side_effect=[release_page(page, "next-page"), release_page(last)]) as api:
             self.assertEqual(sync.latest_testing_release(), published("1.15.0-rc.1"))
-        self.assertIn("page=2", api.call_args.args[0])
+        self.assertEqual(api.call_args.args, ("graphql",))
+        self.assertEqual(api.call_args.kwargs["data"]["variables"]["cursor"], "next-page")
+        self.assertIsNone(api.call_args_list[0].kwargs["data"]["variables"]["cursor"])
+        self.assertNotIn("assets", api.call_args.kwargs["data"]["query"])
         for invalid in ("1.15.0", "1.15.0-alpha.06", "01.15.0-alpha.6", "v1.15.0-alpha.6", "1.15.0-alpha.6-udpflow.2"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 sync.version_key(invalid)
 
     def test_no_published_testing_release_is_a_visible_failure(self):
-        with patch.object(sync, "api", return_value=[published("1.15.0", prerelease=False)]):
+        with patch.object(sync, "api", return_value=release_page([published("1.15.0", prerelease=False)])):
             with self.assertRaisesRegex(ValueError, "No published"):
                 sync.latest_testing_release()
+
+    def test_partial_graphql_errors_and_missing_repository_fail_visibly(self):
+        partial = release_page([published("1.15.0-alpha.7")])
+        partial["errors"] = [{"message": "query failed"}]
+        for response in (partial, {"data": {"repository": None}}):
+            with self.subTest(response=response), patch.object(sync, "api", return_value=response):
+                with self.assertRaisesRegex(ValueError, "GitHub release query"):
+                    sync.latest_testing_release()
+
+    def test_stuck_pagination_does_not_return_an_incomplete_release_list(self):
+        page = release_page([published("1.15.0-alpha.7")], "same-cursor")
+        with patch.object(sync, "api", return_value=page) as api:
+            with self.assertRaisesRegex(ValueError, "pagination did not advance"):
+                sync.latest_testing_release()
+        self.assertEqual(api.call_count, 2)
 
     def test_current_release_keeps_client_pin_and_fork_revision(self):
         with patch.object(sync, "latest_testing_release", return_value=published("1.15.0-alpha.6")), patch.object(sync, "tag_commit", return_value="a" * 40), patch.object(sync, "matching_android_commit") as android:
