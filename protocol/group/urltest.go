@@ -103,7 +103,7 @@ func (s *URLTest) All() []string {
 	return s.tags
 }
 
-func (s *URLTest) NowForFlow(network string) (string, context.Context) {
+func (s *URLTest) SelectedForFlow(network string) (adapter.Outbound, context.Context) {
 	s.group.Touch()
 	s.group.updateAccess.Lock()
 	defer s.group.updateAccess.Unlock()
@@ -118,10 +118,7 @@ func (s *URLTest) NowForFlow(network string) (string, context.Context) {
 	if outbound == nil {
 		outbound, _ = s.group.Select(network)
 	}
-	if outbound == nil {
-		return "", lifetime
-	}
-	return outbound.Tag(), lifetime
+	return outbound, lifetime
 }
 
 func (s *URLTest) Selected(network string) adapter.Outbound {

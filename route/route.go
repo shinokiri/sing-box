@@ -505,8 +505,8 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 		}
 		var selectedOutbound adapter.Outbound
 		if flowGroup, ok := group.(adapter.FlowOutboundGroup); ok {
-			selectedTag, lifetime := flowGroup.NowForFlow(metadata.Network)
-			selectedOutbound, _ = r.outbound.Outbound(selectedTag)
+			var lifetime context.Context
+			selectedOutbound, lifetime = flowGroup.SelectedForFlow(metadata.Network)
 			if lifetime != nil {
 				routeContexts = append(routeContexts, lifetime)
 			}

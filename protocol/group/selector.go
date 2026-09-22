@@ -107,20 +107,12 @@ func (s *Selector) Start() error {
 	return nil
 }
 
-func (s *Selector) Now() string {
-	selected := s.selected.Load()
-	if selected == nil {
-		return s.tags[0]
-	}
-	return selected.Tag()
-}
-
-func (s *Selector) NowForFlow(string) (string, context.Context) {
+func (s *Selector) SelectedForFlow(string) (adapter.Outbound, context.Context) {
 	var lifetime context.Context
 	if s.interruptExternalConnections {
 		lifetime = s.interruptGroup.FlowContext()
 	}
-	return s.Now(), lifetime
+	return s.selected.Load(), lifetime
 }
 
 func (s *Selector) All() []string {

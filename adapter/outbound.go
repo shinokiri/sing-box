@@ -47,7 +47,7 @@ type FlowOutbound interface {
 // FlowOutboundGroup selects a network-specific outbound and snapshots the
 // selection's lifetime. A nil context preserves existing flows on a switch.
 type FlowOutboundGroup interface {
-	NowForFlow(network string) (string, context.Context)
+	SelectedForFlow(network string) (Outbound, context.Context)
 }
 
 // InboundFlowOutbound isolates ports when selector allocation belongs to the
