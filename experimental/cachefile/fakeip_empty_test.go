@@ -54,7 +54,7 @@ func TestFakeIPKnownEmptyAfterMetadataFlush(t *testing.T) {
 	if err := cache.FakeIPReset(); err != nil {
 		t.Fatal(err)
 	}
-	cache.FakeIPSaveMetadataAsync(&adapter.FakeIPMetadata{Inet4Range: netip.MustParsePrefix("198.18.0.0/15"), Inet4Current: netip.MustParseAddr("198.18.0.21")})
+	cache.queueFakeIPMetadata(&adapter.FakeIPMetadata{Inet4Range: netip.MustParsePrefix("198.18.0.0/15"), Inet4Current: netip.MustParseAddr("198.18.0.21")})
 	cache.Flush()
 	transactions := cache.DB.Stats().TxN
 	if _, found := cache.FakeIPLoadDomain("absent.example", false); found {

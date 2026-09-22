@@ -22,7 +22,7 @@ var (
 
 func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
 	var metadata adapter.FakeIPMetadata
-	err := c.update(func(tx *bbolt.Tx) error {
+	err := c.view(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket(bucketFakeIP)
 		if bucket == nil {
 			return os.ErrNotExist
@@ -30,10 +30,6 @@ func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
 		metadataBinary := bucket.Get(keyMetadata)
 		if len(metadataBinary) == 0 {
 			return os.ErrInvalid
-		}
-		err := bucket.Delete(keyMetadata)
-		if err != nil {
-			return err
 		}
 		return metadata.UnmarshalBinary(metadataBinary)
 	})
@@ -44,12 +40,12 @@ func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
 }
 
 func (c *CacheFile) FakeIPSaveMetadata(metadata *adapter.FakeIPMetadata) error {
-	c.FakeIPSaveMetadataAsync(metadata)
+	c.queueFakeIPMetadata(metadata)
 	c.Flush()
 	return nil
 }
 
-func (c *CacheFile) FakeIPSaveMetadataAsync(metadata *adapter.FakeIPMetadata) {
+func (c *CacheFile) queueFakeIPMetadata(metadata *adapter.FakeIPMetadata) {
 	c.pendingAccess.Lock()
 	defer c.pendingAccess.Unlock()
 	added := c.pending.fakeIPMetadata == nil

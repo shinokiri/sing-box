@@ -55,7 +55,7 @@ func (c *httpConn) Read(b []byte) (n int, err error) {
 	if c.create != nil {
 		<-c.create
 		if c.err != nil {
-			return 0, c.err
+			return 0, baderror.WrapH2(c.err)
 		}
 	}
 	n, err = c.reader.Read(b)

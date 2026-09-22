@@ -533,3 +533,40 @@ func TestPlatformTFOInterfaceBindingFailure(t *testing.T) {
 		t.Fatalf("interface binding was ignored: n=%d, error=%v, protect calls=%d", n, err, protected.Load())
 	}
 }
+
+func TestPlatformTFOWriteAfterDialContextCanceled(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	listener.(*net.TCPListener).SetDeadline(time.Now().Add(5 * time.Second))
+	ctx, cancel := context.WithCancel(tfoContext(t, adapter.NetworkOptions{}, nil))
+	defer cancel()
+	dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", M.ParseSocksaddr(listener.Addr().String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	cancel()
+	if n, err := conn.Write([]byte("ping")); err != nil || n != 4 {
+		t.Fatalf("delayed first write was canceled with the completed dial: n=%d, err=%v", n, err)
+	}
+	peer, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	peer.SetReadDeadline(time.Now().Add(5 * time.Second))
+	payload := make([]byte, 4)
+	if _, err := io.ReadFull(peer, payload); err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "ping" {
+		t.Fatalf("unexpected delayed payload: %q", payload)
+	}
+}

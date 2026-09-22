@@ -8,6 +8,8 @@ Exact core and Android pins are recorded in [`release/udpflow.json`](release/udp
 This branch follows newly published upstream **alpha/beta/rc releases** every six hours
 when it is the repository default branch. Unreleased `testing` commits are not selected.
 The Actions **Android ARM64** workflow also supports a manual update check.
+Release selection queries only version metadata through GraphQL; transient API
+read failures retry at most three times without accepting partial results.
 
 Updates merge the released core snapshot, pin a matching Android client, and rebase
 local `sing-mux`, `sing-tun`, and `sing-snell` changes onto their required versions.

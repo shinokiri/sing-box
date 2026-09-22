@@ -32,6 +32,8 @@ func TestURLTestFlowSelectionAndInterruption(t *testing.T) {
 		g := &URLTestGroup{outbounds: []adapter.Outbound{tcp, udpA, udpB}, history: history, interruptGroup: interrupt.NewGroup(), interruptExternalConnections: interruptExisting}
 		s := &URLTest{group: g, interruptExternalConnections: interruptExisting}
 		g.performUpdateCheck()
+		require.Same(t, tcp, s.Selected(N.NetworkTCP))
+		require.Same(t, udpA, s.Selected(N.NetworkUDP))
 		tag, lifetime := s.NowForFlow(N.NetworkUDP)
 		require.Equal(t, "udp-a", tag, "UDP must not use Now's preferred TCP selection")
 		history.StoreURLTestHistory("udp-b", &adapter.URLTestHistory{Delay: 1})
@@ -41,6 +43,7 @@ func TestURLTestFlowSelectionAndInterruption(t *testing.T) {
 		} else {
 			require.Nil(t, lifetime)
 		}
+		require.Same(t, udpB, s.Selected(N.NetworkUDP))
 		tag, lifetime = s.NowForFlow(N.NetworkUDP)
 		require.Equal(t, "udp-b", tag)
 		if lifetime != nil {
