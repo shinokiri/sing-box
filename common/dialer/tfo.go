@@ -46,7 +46,7 @@ func dialSlowContext(dialer *tfo.Dialer, ctx context.Context, network string, de
 			return dialer.Dialer.DialContext(ctx, network, destination.AddrString())
 		}
 	}
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	return &slowOpenConn{
 		dialer:      dialer,
 		ctx:         ctx,

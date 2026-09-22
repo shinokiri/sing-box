@@ -38,17 +38,38 @@ def validate_source(source):
 
 
 def latest_testing_release():
+    # REST release pages include every asset (tens of MB for this upstream).
+    # Query only version-selection metadata while still scanning all pages.
+    query = """query($owner: String!, $name: String!, $cursor: String) {
+      repository(owner: $owner, name: $name) {
+        releases(first: 100, after: $cursor, orderBy: {field: CREATED_AT, direction: DESC}) {
+          nodes { tag_name: tagName draft: isDraft prerelease: isPrerelease published_at: publishedAt }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }"""
+    owner, name = UPSTREAM.split("/")
     candidates = []
-    page = 1
+    cursor = None
+    seen = set()
     while True:
-        releases = api(f"repos/{UPSTREAM}/releases?per_page=100&page={page}")
-        for release in releases:
+        result = api("graphql", data={"query": query, "variables": {"owner": owner, "name": name, "cursor": cursor}})
+        if result.get("errors"):
+            raise ValueError("GitHub release query failed: " + json.dumps(result["errors"]))
+        repository = (result.get("data") or {}).get("repository")
+        if repository is None:
+            raise ValueError("GitHub release query did not return the upstream repository")
+        connection = repository["releases"]
+        for release in connection["nodes"]:
             tag = release["tag_name"]
             if not release["draft"] and release["prerelease"] and release.get("published_at") and tag.startswith("v") and VERSION.fullmatch(tag[1:]):
                 candidates.append(release)
-        if len(releases) < 100:
+        if not connection["pageInfo"]["hasNextPage"]:
             break
-        page += 1
+        cursor = connection["pageInfo"]["endCursor"]
+        if not cursor or cursor in seen:
+            raise ValueError("GitHub release pagination did not advance")
+        seen.add(cursor)
     if not candidates:
         raise ValueError("No published upstream alpha/beta/rc release found")
     return max(candidates, key=lambda item: version_key(item["tag_name"][1:]))

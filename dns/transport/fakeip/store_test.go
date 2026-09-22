@@ -86,3 +86,68 @@ func TestStoreStartRejectsFailedReset(t *testing.T) {
 		t.Fatalf("start ignored failed storage reset: got %v; want %v", err, resetError)
 	}
 }
+
+func TestStoreRestartPreservesReservedAddresses(t *testing.T) {
+	for _, isIPv6 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ipv6=%v", isIPv6), func(t *testing.T) {
+			options := option.CacheFileOptions{
+				Path:        filepath.Join(t.TempDir(), "cache.db"),
+				StoreFakeIP: true,
+			}
+			cache := cachefile.New(context.Background(), logger.NOP(), options)
+			if err := cache.Start(adapter.StartStateInitialize); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := cache.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			newStore := func() *fakeip.Store {
+				ctx := service.ContextWith[adapter.CacheFile](context.Background(), cache)
+				store := fakeip.NewStore(ctx, logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("fc00::/18"))
+				if err := store.Start(); err != nil {
+					t.Fatal(err)
+				}
+				return store
+			}
+			store := newStore()
+			first, err := store.Create("before-restart.example", isIPv6)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata := cache.FakeIPMetadata()
+			if metadata == nil {
+				t.Fatal("address allocation did not persist its reservation")
+			}
+			reserved := metadata.Inet4Current
+			if isIPv6 {
+				reserved = metadata.Inet6Current
+			}
+			if reserved.Compare(first) <= 0 {
+				t.Fatalf("reservation does not extend past the allocated address: %v <= %v", reserved, first)
+			}
+			// Reopen the real database without Store.Close: the allocator never
+			// replaces its reservation with a graceful-shutdown checkpoint.
+			if err := cache.Close(); err != nil {
+				t.Fatal(err)
+			}
+			cache = cachefile.New(context.Background(), logger.NOP(), options)
+			if err := cache.Start(adapter.StartStateInitialize); err != nil {
+				t.Fatal(err)
+			}
+			restarted := newStore()
+			restored, err := restarted.Create("before-restart.example", isIPv6)
+			if err != nil || restored != first {
+				t.Fatalf("restart lost the persisted mapping: %v, %v", restored, err)
+			}
+			next, err := restarted.Create("after-restart.example", isIPv6)
+			if err != nil || next != reserved.Next() {
+				t.Fatalf("restart reused the reserved address block: %v, %v; want %v", next, err, reserved.Next())
+			}
+			if err := restarted.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

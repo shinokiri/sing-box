@@ -1,11 +1,13 @@
 """Follow upstream stable releases and publish the tested Android build."""
 
+import http.client
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -19,18 +21,30 @@ def git(*args, cwd=None, env=None):
     return subprocess.check_output(["git", *args], cwd=cwd, env=env, text=True).strip()
 
 
-def api(path, missing_ok=False):
+def api(path, missing_ok=False, *, data=None):
+    # All callers perform reads, including GraphQL queries sent with POST.
     request = urllib.request.Request(
         "https://api.github.com/" + path,
-        headers={"Accept": "application/vnd.github+json", "Authorization": "Bearer " + os.environ["GH_TOKEN"]},
+        data=json.dumps(data).encode() if data is not None else None,
+        headers={"Accept": "application/vnd.github+json", "Content-Type": "application/json", "Authorization": "Bearer " + os.environ["GH_TOKEN"]},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as error:
-        if missing_ok and error.code == 404:
-            return None
-        raise
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            error.close()
+            if missing_ok and error.code == 404:
+                return None
+            if error.code not in {500, 502, 503, 504}:
+                raise
+            failure = error
+        except (urllib.error.URLError, http.client.IncompleteRead, http.client.RemoteDisconnected, TimeoutError, ConnectionError, json.JSONDecodeError) as error:
+            failure = error
+        if attempt == 2:
+            raise ValueError(f"GitHub request failed after 3 attempts ({path}): {failure}") from failure
+        print(f"Retrying GitHub request ({path}) after {type(failure).__name__}", file=sys.stderr)
+        time.sleep(2 ** attempt)
 
 
 def stable_version(tag):

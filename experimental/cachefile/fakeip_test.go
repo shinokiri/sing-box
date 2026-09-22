@@ -120,3 +120,26 @@ func TestFakeIPResetEmptyCache(t *testing.T) {
 		}
 	}
 }
+
+func TestFakeIPMetadataSurvivesReads(t *testing.T) {
+	cache := newFakeIPTestCache(t)
+	metadata := &adapter.FakeIPMetadata{
+		Inet4Range:   netip.MustParsePrefix("198.18.0.0/15"),
+		Inet4Current: netip.MustParseAddr("198.18.4.21"),
+	}
+	if err := cache.FakeIPSaveMetadata(metadata); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		got := cache.FakeIPMetadata()
+		if got == nil || got.Inet4Range != metadata.Inet4Range || got.Inet4Current != metadata.Inet4Current {
+			t.Fatalf("metadata was consumed or changed during read: %v", got)
+		}
+	}
+	if err := cache.FakeIPReset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := cache.FakeIPMetadata(); got != nil {
+		t.Fatalf("reset retained metadata: %v", got)
+	}
+}

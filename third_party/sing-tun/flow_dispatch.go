@@ -627,16 +627,8 @@ func (d *ForwardDispatcher) forwardToPort(flow *forwardFlow, packet *forwardPack
 				}
 				return
 			}
-			reply, ok := buildFragmentationNeeded(ipHdr, flow.effectiveMTU, d.writeback.ReturnHeadroom())
-			if ok {
-				d.writebackBatch = append(d.writebackBatch, reply)
-			}
-			return
 		}
-		reply, ok := buildPacketTooBig(header.IPv6(packet.network), flow.effectiveMTU, d.writeback.ReturnHeadroom())
-		if ok {
-			d.writebackBatch = append(d.writebackBatch, reply)
-		}
+		d.writebackBatch = append(d.writebackBatch, buildICMPError(packet, ICMPErrorPacketTooBig, flow.effectiveMTU, d.writeback.ReturnHeadroom()))
 		return
 	}
 	if flow.tracker != nil {

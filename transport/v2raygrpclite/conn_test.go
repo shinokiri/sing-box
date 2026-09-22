@@ -1,6 +1,7 @@
 package v2raygrpclite
 
 import (
+	"context"
 	"io"
 	"net"
 	"strings"
@@ -11,13 +12,16 @@ import (
 )
 
 func TestLateGunConnCloseBeforeSetup(t *testing.T) {
-	conn := newLateGunConn(io.Discard)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn := newLateGunConn(io.Discard, cancel)
 	done := make(chan error, 1)
 	go func() {
 		_, err := conn.Read(make([]byte, 1))
 		done <- err
 	}()
 	require.NoError(t, conn.Close())
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, net.ErrClosed)
@@ -42,7 +46,7 @@ func TestLateGunConnCloseBeforeSetup(t *testing.T) {
 }
 
 func TestLateGunConnSetupPublishesReader(t *testing.T) {
-	conn := newLateGunConn(io.Discard)
+	conn := newLateGunConn(io.Discard, nil)
 	defer conn.Close()
 	done := make(chan error, 1)
 	buffer := make([]byte, 1)

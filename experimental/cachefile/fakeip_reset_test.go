@@ -20,7 +20,7 @@ func TestFakeIPResetPreservesOtherPendingEntries(t *testing.T) {
 			count, size := cache.pending.count, cache.pending.size
 			address := netip.MustParseAddr(addressText)
 			cache.FakeIPStoreAsync(address, "fake.example", logger.NOP())
-			cache.FakeIPSaveMetadataAsync(&adapter.FakeIPMetadata{})
+			cache.queueFakeIPMetadata(&adapter.FakeIPMetadata{})
 			if err := cache.FakeIPReset(); err != nil {
 				t.Fatal(err)
 			}
@@ -56,7 +56,7 @@ func TestFakeIPFailedResetPreservesPending(t *testing.T) {
 			address := netip.MustParseAddr(addressText)
 			cache.FakeIPStoreAsync(address, "keep.example", logger.NOP())
 			metadata := &adapter.FakeIPMetadata{}
-			cache.FakeIPSaveMetadataAsync(metadata)
+			cache.queueFakeIPMetadata(metadata)
 			count, size := cache.pending.count, cache.pending.size
 			if err := cache.DB.Close(); err != nil {
 				t.Fatal(err)
