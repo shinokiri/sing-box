@@ -156,11 +156,30 @@ def module_ref(version):
     return pseudo[1] if pseudo else version
 
 
-def module_requirement(path, name):
-    matches = re.findall(rf"(?m)^\s*(?:require\s+)?github\.com/sagernet/{re.escape(name)}\s+(v\S+)", path.read_text())
+def module_requirement(path, name, *, ref=None):
+    content = git("show", f"{ref}:{path}") if ref else path.read_text()
+    matches = re.findall(rf"(?m)^\s*(?:require\s+)?github\.com/sagernet/{re.escape(name)}\s+(v\S+)", content)
     if len(matches) != 1:
-        raise ValueError(f"Expected one {name} requirement in {path}")
+        raise ValueError(f"Expected one {name} requirement in {ref + ':' if ref else ''}{path}")
     return matches[0]
+
+
+def migration_requirements(current, base, target):
+    requirements = {}
+    for name in MODULES:
+        previous = (Path("third_party") / name / "UPSTREAM_VERSION").read_text().strip()
+        if any(module_requirement(Path(path), name, ref=base) != previous for path in ("go.mod", "test/go.mod")):
+            raise ValueError(f"Current core, test module and local patches disagree about {name}; review dependency migration")
+        required = module_requirement(Path("go.mod"), name, ref=target)
+        upstream_test = module_requirement(Path("test/go.mod"), name, ref=target)
+        previous_test = module_requirement(Path("test/go.mod"), name, ref=current["upstream_commit"])
+        # Upstream may bump only its main module and keep using a local replace
+        # in test/go.mod. Adopt that bump only when its test pin is unchanged;
+        # a newly introduced disagreement needs review, even if merges are clean.
+        if upstream_test not in {required, previous_test}:
+            raise ValueError(f"Upstream core and changed test module disagree about {name}; review dependency migration")
+        requirements[name] = previous, required
+    return requirements
 
 
 def migrate_module(name, directory, required):
@@ -205,6 +224,7 @@ def synchronize(current, selected, base):
     if version_key(selected["upstream_version"]) <= version_key(current["upstream_version"]):
         raise ValueError("Automatic synchronization requires a newer published testing version")
     target = selected["upstream_commit"]
+    requirements = migration_requirements(current, base, target)
     merged = merge_snapshots(current["upstream_commit"], base, target, owned_paths=(".github", str(CLIENT)))
     git("read-tree", "-m", "-u", base, merged)
     git("fetch", "--no-tags", "origin", selected["android_client_commit"], cwd=CLIENT)
@@ -212,13 +232,20 @@ def synchronize(current, selected, base):
     git("submodule", "update", "--init", "--recursive", cwd=CLIENT)
     if properties(CLIENT / "version.properties")["VERSION_NAME"] != selected["upstream_version"]:
         raise ValueError("Selected Android client does not match the new testing core")
-    for name in MODULES:
-        required = module_requirement(Path("go.mod"), name)
-        if module_requirement(Path("test/go.mod"), name) != required:
+    test_module = Path("test/go.mod")
+    for name, (previous, required) in requirements.items():
+        if module_requirement(Path("go.mod"), name) != required or module_requirement(test_module, name) not in {previous, required}:
             raise ValueError(f"Core and test module disagree about {name}; review dependency migration")
         migrate_module(name, Path("third_party") / name, required)
+        if module_requirement(test_module, name) != required:
+            content = re.sub(
+                rf"(?m)^(\s*(?:require\s+)?github\.com/sagernet/{re.escape(name)}\s+)v\S+",
+                lambda match: match[1] + required, test_module.read_text(),
+            )
+            test_module.write_text(content)
+            print(f"Aligned test module {name}: {previous} -> {required}")
     MANIFEST.write_text(json.dumps(selected, indent=2) + "\n")
-    git("add", str(MANIFEST), str(CLIENT), "third_party")
+    git("add", str(MANIFEST), str(CLIENT), "third_party", str(test_module))
     commit = commit_tree(git("write-tree"), [base, target], f"release: follow upstream v{selected['upstream_version']}")
     git("update-ref", "HEAD", commit, base)
     return commit

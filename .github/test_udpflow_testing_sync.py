@@ -303,13 +303,68 @@ class SnapshotMergeTest(unittest.TestCase):
             self.prepare()
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.fork), self.base)
 
-    def test_mismatched_core_and_test_dependency_blocks_migration(self):
+    def test_unchanged_upstream_test_pin_follows_core_and_preserves_module_format(self):
+        test_module = self.fork / "test/go.mod"
+        content = "module example/test\n\nrequire (\n\tgithub.com/sagernet/sing-mux v0.1.0 // indirect\n)\n\nreplace github.com/sagernet/sing-mux => ../third_party/sing-mux\n"
+        test_module.write_text(content)
+        self.base = self.commit(self.fork, "local test module replacement")
         (self.core / "test/go.mod").write_text("require github.com/sagernet/sing-mux v0.1.0\n")
+        self.selected["upstream_commit"] = self.commit(self.core, "keep previous test dependency")
+        self.git("tag", "-f", "v1.15.0-alpha.7", self.selected["upstream_commit"], cwd=self.core)
+        self.prepare()
+        self.assertEqual(test_module.read_text(), content.replace("v0.1.0", "v0.2.0"))
+        self.assertEqual(self.git("show", "HEAD:test/go.mod", cwd=self.fork), test_module.read_text().strip())
+        self.assertEqual((self.fork / "third_party/sing-mux/UPSTREAM_VERSION").read_text(), "v0.2.0\n")
+        self.assertEqual((self.fork / "third_party/sing-mux/patched.go").read_text(), "fork module fix\n")
+        self.assertEqual((self.fork / "third_party/sing-mux/upstream.go").read_text(), "upstream new\n")
+
+    def test_test_pin_already_corrected_in_fork_follows_next_core_bump(self):
+        # Reproduce alpha.8: upstream test/go.mod is older than both the fork's
+        # last reviewed core and its test pin, and remains unchanged upstream.
+        self.git("checkout", "--detach", self.current["upstream_commit"], cwd=self.core)
+        (self.core / "test/go.mod").write_text("require github.com/sagernet/sing-mux v0.0.5\n")
+        self.current["upstream_commit"] = self.commit(self.core, "old upstream test pin")
+        self.git("fetch", str(self.core), self.current["upstream_commit"], cwd=self.fork)
+        (self.fork / "release/udpflow.json").write_text(json.dumps(self.current))
+        fork_commit = self.commit(self.fork, "record old upstream snapshot")
+        tree = self.git("rev-parse", "HEAD^{tree}", cwd=self.fork)
+        self.base = self.git("commit-tree", tree, "-p", fork_commit, "-p", self.current["upstream_commit"], "-m", "retain upstream ancestry", cwd=self.fork)
+        self.git("update-ref", "HEAD", self.base, fork_commit, cwd=self.fork)
+        self.git("checkout", "--detach", self.new_core, cwd=self.core)
+        (self.core / "test/go.mod").write_text("require github.com/sagernet/sing-mux v0.0.5\n")
+        self.selected["upstream_commit"] = self.commit(self.core, "keep older upstream test pin")
+        self.git("tag", "-f", "v1.15.0-alpha.7", self.selected["upstream_commit"], cwd=self.core)
+        self.prepare()
+        for path in ("go.mod", "test/go.mod"):
+            self.assertEqual(sync.module_requirement(self.fork / path, "sing-mux"), "v0.2.0")
+            self.assertIn("v0.2.0", self.git("show", f"HEAD:{path}", cwd=self.fork))
+        self.assertEqual((self.fork / "third_party/sing-mux/UPSTREAM_VERSION").read_text(), "v0.2.0\n")
+
+    def test_changed_mismatched_upstream_test_dependency_blocks_migration(self):
+        (self.core / "test/go.mod").write_text("require github.com/sagernet/sing-mux v0.3.0\n")
         self.selected["upstream_commit"] = self.commit(self.core, "mismatched requirements")
         self.git("tag", "-f", "v1.15.0-alpha.7", self.selected["upstream_commit"], cwd=self.core)
         with self.assertRaisesRegex(ValueError, "disagree"):
             self.prepare()
         self.assertFalse((self.root / "udpflow-source.json").exists())
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.fork), self.base)
+        self.assertEqual((self.fork / "third_party/sing-mux/UPSTREAM_VERSION").read_text(), "v0.1.0\n")
+
+    def test_inconsistent_current_test_module_blocks_migration(self):
+        (self.fork / "test/go.mod").write_text("require github.com/sagernet/sing-mux v0.0.9\n")
+        self.base = self.commit(self.fork, "unreviewed test dependency")
+        with self.assertRaisesRegex(ValueError, "Current core, test module and local patches disagree"):
+            self.prepare()
+        self.assertFalse((self.root / "udpflow-source.json").exists())
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.fork), self.base)
+
+    def test_inconsistent_current_vendor_blocks_migration(self):
+        (self.fork / "third_party/sing-mux/UPSTREAM_VERSION").write_text("v0.0.9\n")
+        self.base = self.commit(self.fork, "unreviewed vendor version")
+        with self.assertRaisesRegex(ValueError, "Current core, test module and local patches disagree"):
+            self.prepare()
+        self.assertFalse((self.root / "udpflow-source.json").exists())
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.fork), self.base)
 
     def test_nonmatching_client_version_blocks_release(self):
         (self.client / "version.properties").write_text("VERSION_NAME=1.15.0-alpha.8\n")
