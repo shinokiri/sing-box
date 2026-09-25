@@ -57,10 +57,14 @@ func (d *DefaultDialer) prepareNetworkTFO(base *tfo.Dialer) (*tfo.Dialer, error)
 	switch iif.Type {
 	case C.InterfaceTypeWIFI, C.InterfaceTypeEthernet, C.InterfaceTypeOther:
 		dialer.DisableTFO = base.DisableTFO
+	default:
+		// Ordinary TCP can follow the existing route if the default changes.
+		// No extra platform binding is needed when TFO is already disabled.
+		return &dialer, nil
 	}
-	// Bind even when TFO is suppressed. The type decision and socket must
-	// refer to the same physical network. A lost network fails this dial;
-	// it must not silently reroute a TFO SYN through a new cellular default.
+	// A TFO-enabled socket must use the same physical network as the type
+	// decision. A lost network fails this dial instead of silently rerouting
+	// a TFO SYN through a new cellular default.
 	dialer.Control = control.Append(dialer.Control, func(_ string, _ string, conn syscall.RawConn) error {
 		return control.Raw(conn, func(fd uintptr) error {
 			return iif.BindSocket(int(fd))
@@ -70,14 +74,13 @@ func (d *DefaultDialer) prepareNetworkTFO(base *tfo.Dialer) (*tfo.Dialer, error)
 }
 
 func (d *DefaultDialer) tfoNetworkInterface(localAddr net.Addr) (*adapter.NetworkInterface, error) {
-	interfaces := d.networkManager.NetworkInterfaces()
 	var localIP netip.Addr
 	if addr, ok := localAddr.(*net.TCPAddr); ok && !addr.IP.IsUnspecified() {
 		localIP, _ = netip.AddrFromSlice(addr.IP)
 		localIP = localIP.Unmap()
 	}
 	if d.tfoBindInterface != "" || localIP.IsValid() {
-		for _, iif := range interfaces {
+		for _, iif := range d.networkManager.NetworkInterfaces() {
 			if d.tfoBindInterface != "" && iif.Name != d.tfoBindInterface {
 				continue
 			}
