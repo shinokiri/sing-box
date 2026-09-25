@@ -679,7 +679,7 @@ index 1db738a..3f673b0 100644
                          Icon(
                              Icons.Default.Speed,
 diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt
-index 214bfa5..beb5cc3 100644
+index 214bfa5..c0403ef 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt
 @@ -7,6 +7,8 @@ import io.nekohasekai.sfa.compose.base.ScreenEvent
@@ -737,7 +737,7 @@ index 214bfa5..beb5cc3 100644
              try {
 -                CommandTarget.standaloneClient().urlTest(groupTag)
 +                withContext(Dispatchers.IO) {
-+                    CommandTarget.standaloneClient().urlTest(groupTag)
++                    CommandTarget.standaloneClient().urlTestAndWait(groupTag)
 +                }
              } catch (e: Exception) {
 +                updateState { copy(pendingTests = pendingTests - baselines.keys) }

@@ -597,10 +597,18 @@ func (c *CommandClient) SelectOutbound(groupTag string, outboundTag string) erro
 }
 
 func (c *CommandClient) URLTest(outboundTag string) error {
+	return c.urlTest(outboundTag, false)
+}
+
+func (c *CommandClient) URLTestAndWait(outboundTag string) error {
+	return c.urlTest(outboundTag, true)
+}
+
+func (c *CommandClient) urlTest(outboundTag string, wait bool) error {
 	_, err := callWithResult(c, func(ctx context.Context, client daemon.StartedServiceClient) (*emptypb.Empty, error) {
 		return client.URLTest(ctx, &daemon.URLTestRequest{
 			OutboundTag: outboundTag,
-			Wait:        true,
+			Wait:        wait,
 		})
 	})
 	if err != nil {
