@@ -486,7 +486,7 @@ func BenchmarkPlatformTFONetworkPolicy(b *testing.B) {
 		b.Run(kind.String(), func(b *testing.B) {
 			iif := control.Interface{Name: "physical", Index: 1}
 			manager := &tfoNetworkManager{
-				loopback: &iif,
+				loopback:   &iif,
 				interfaces: []adapter.NetworkInterface{{
 					Interface: iif, Type: kind, BindSocket: func(int) error { return nil },
 				}},
