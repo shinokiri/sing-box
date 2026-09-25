@@ -1,0 +1,45 @@
+name: URLTest progress preflight
+on:
+  push:
+    branches: [fix/urltest-progress]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.8
+          cache: false
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: urltest-progress-${{ github.sha }}
+          restore-keys: |
+            android-arm64-api36-go-1.26.8-ndk-r29-${{ hashFiles('go.sum', 'third_party/sing-mux/go.sum', 'third_party/sing-tun/go.sum') }}-
+      - name: Generate protocol and format sources
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          protoc -I . --go_out=. --go_opt=paths=source_relative daemon/started_service.proto
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('daemon/started_service.pb.go')
+          s = p.read_text()
+          p.write_text(s[s.index('package '):])
+          PY
+          gofmt -w common/urltest/progress*.go common/urltest/urltest.go protocol/group/urltest*.go daemon/started_service*.go experimental/libbox/command_types.go experimental/libbox/command_client.go
+          git diff -- '*.go' > /tmp/urltest-generated.patch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: urltest-generated
+          path: /tmp/urltest-generated.patch
+      - name: Test progress, queue lifecycle and daemon integration
+        run: go test -race -count=3 -timeout=180s ./common/urltest ./protocol/group ./daemon

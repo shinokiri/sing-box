@@ -25,6 +25,9 @@ type HistoryStorage struct {
 	access       sync.RWMutex
 	delayHistory map[string]*adapter.URLTestHistory
 	updateHooks  []*observable.Subscriber[struct{}]
+	testSequence int64
+	testStatus   map[string]TestStatus
+	testBatches  map[string]*TestBatch
 }
 
 func NewHistoryStorage() *HistoryStorage {
@@ -57,6 +60,10 @@ func (s *HistoryStorage) LoadURLTestHistory(tag string) *adapter.URLTestHistory 
 func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
 	s.access.Lock()
 	delete(s.delayHistory, tag)
+	if state, exists := s.testStatus[tag]; exists && !state.Pending() {
+		state.State, state.Delay = TestFailed, 0
+		s.testStatus[tag] = state
+	}
 	s.notifyUpdated()
 	s.access.Unlock()
 }
@@ -64,6 +71,10 @@ func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
 func (s *HistoryStorage) StoreURLTestHistory(tag string, history *adapter.URLTestHistory) {
 	s.access.Lock()
 	s.delayHistory[tag] = history
+	if state, exists := s.testStatus[tag]; exists && !state.Pending() {
+		state.State, state.Delay = TestSucceeded, history.Delay
+		s.testStatus[tag] = state
+	}
 	s.notifyUpdated()
 	s.access.Unlock()
 }
