@@ -108,7 +108,9 @@ func TestURLTestProgressQueuedNodesAndPartialSuccess(t *testing.T) {
 		t.Fatal("repeat click started another batch")
 	}
 	for _, tag := range tags[1:] {
-		if tag == fastTag { continue }
+		if tag == fastTag {
+			continue
+		}
 		releases[tag] <- false
 	}
 	select {
@@ -117,7 +119,9 @@ func TestURLTestProgressQueuedNodesAndPartialSuccess(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	for _, tag := range tags[1:] {
-		if tag == fastTag { continue }
+		if tag == fastTag {
+			continue
+		}
 		if s.LoadTestStatus(tag).State != urltest.TestFailed || s.LoadURLTestHistory(tag) != nil {
 			t.Fatalf("%s retained an old successful result", tag)
 		}

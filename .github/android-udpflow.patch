@@ -141,7 +141,7 @@ index ab0c1c2..eb60662 100644
 -        return version.versionCode > other.versionCode
 +        return request.execute().content.unwrap
      }
- 
+
      private fun downloadMetadata(release: GitHubRelease): VersionMetadata? {
 @@ -144,8 +85,45 @@ class GitHubUpdateChecker : Closeable {
          @SerialName("version_name") val versionName: String = "",
@@ -224,6 +224,131 @@ index 059458d..0b2ea8f 100644
  
              if (updateInfo == null) {
                  Log.d(TAG, "No update available")
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
+index a5424ab..a60d57d 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
+@@ -801,7 +801,7 @@ fun AppSettingsScreen(
+             ),
+         ) {
+             Column {
+-                val isFDroid = UpdateSource.fromString(currentSource) == UpdateSource.FDROID
++                val isFDroid = UpdateSource.FDROID in Vendor.updateSources && UpdateSource.fromString(currentSource) == UpdateSource.FDROID
+                 val updateItemCount =
+                     run {
+                         var count = 0
+diff --git a/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt b/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt
+index 836d0e5..1b9abae 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt
+@@ -64,5 +64,6 @@ object SettingsKey {
+     const val STARTED_BY_USER = "started_by_user"
+     const val CACHED_UPDATE_INFO = "cached_update_info"
+     const val CACHED_APK_PATH = "cached_apk_path"
++    const val CACHED_APK_URL = "cached_apk_url"
+     const val LAST_SHOWN_UPDATE_VERSION = "last_shown_update_version"
+ }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
+index 0fd720c..4992b9d 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
+@@ -42,8 +42,8 @@ object Settings {
+     var startedByUser by dataStore.boolean(SettingsKey.STARTED_BY_USER)
+ 
+     var updateSource by dataStore.string(SettingsKey.UPDATE_SOURCE) { "github" }
+-    var checkUpdateEnabled by dataStore.boolean(SettingsKey.CHECK_UPDATE_ENABLED) { false }
+-    var updateCheckPrompted by dataStore.boolean(SettingsKey.UPDATE_CHECK_PROMPTED) { false }
++    var checkUpdateEnabled by dataStore.boolean(SettingsKey.CHECK_UPDATE_ENABLED) { true }
++    var updateCheckPrompted by dataStore.boolean(SettingsKey.UPDATE_CHECK_PROMPTED) { true }
+     var updateTrack by dataStore.string(SettingsKey.UPDATE_TRACK) {
+         val versionName = BuildConfig.VERSION_NAME.lowercase()
+         if (versionName.contains("-alpha") ||
+@@ -133,6 +133,7 @@ object Settings {
+ 
+     var cachedUpdateInfo by dataStore.string(SettingsKey.CACHED_UPDATE_INFO) { "" }
+     var cachedApkPath by dataStore.string(SettingsKey.CACHED_APK_PATH) { "" }
++    var cachedApkUrl by dataStore.string(SettingsKey.CACHED_APK_URL) { "" }
+     var lastShownUpdateVersion by dataStore.int(SettingsKey.LAST_SHOWN_UPDATE_VERSION) { 0 }
+ 
+     fun serviceClass(): Class<*> = when (serviceMode) {
+diff --git a/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt b/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt
+index 19ba94e..907f41d 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt
+@@ -80,14 +80,16 @@ object UpdateState {
+         Settings.cachedUpdateInfo = info?.toJson() ?: ""
+     }
+ 
+-    fun saveApkPath(file: File) {
++    fun saveApkPath(file: File, url: String) {
+         Settings.cachedApkPath = file.absolutePath
++        Settings.cachedApkUrl = url
+         cachedApkFile.value = file
+     }
+ 
+     private fun clearCache() {
+         Settings.cachedUpdateInfo = ""
+         Settings.cachedApkPath = ""
++        Settings.cachedApkUrl = ""
+         Settings.lastShownUpdateVersion = 0
+     }
+ }
+diff --git a/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt b/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
+index fa39ea9..886b17c 100644
+--- a/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
++++ b/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
+@@ -6,7 +6,6 @@ import android.net.Uri
+ import android.util.Log
+ import androidx.camera.core.ImageAnalysis
+ import com.google.android.material.dialog.MaterialAlertDialogBuilder
+-import io.nekohasekai.sfa.Application
+ import io.nekohasekai.sfa.R
+ import io.nekohasekai.sfa.bg.RootClient
+ import io.nekohasekai.sfa.compose.screen.qrscan.QRCodeCropArea
+@@ -16,7 +15,6 @@ import io.nekohasekai.sfa.update.UpdateInfo
+ import io.nekohasekai.sfa.update.UpdateSource
+ import io.nekohasekai.sfa.update.UpdateState
+ import io.nekohasekai.sfa.update.UpdateTrack
+-import io.nekohasekai.sfa.update.checkFDroidUpdate
+ 
+ object Vendor : VendorInterface {
+     private const val TAG = "Vendor"
+@@ -97,15 +95,12 @@ object Vendor : VendorInterface {
+ 
+     override val hasCustomUpdate = true
+ 
+-    override val updateSources = listOf(UpdateSource.GITHUB, UpdateSource.FDROID)
++    override val updateSources = listOf(UpdateSource.GITHUB)
+ 
+-    override fun checkUpdateAsync(): UpdateInfo? = when (UpdateSource.fromString(Settings.updateSource)) {
+-        UpdateSource.FDROID -> checkFDroidUpdate(Application.application)
+-        UpdateSource.GITHUB -> {
+-            val track = UpdateTrack.fromString(Settings.updateTrack)
+-            GitHubUpdateChecker().use { checker ->
+-                checker.checkUpdate(track, Settings.githubToken)
+-            }
++    override fun checkUpdateAsync(): UpdateInfo? {
++        val track = UpdateTrack.fromString(Settings.updateTrack)
++        return GitHubUpdateChecker().use { checker ->
++            checker.checkUpdate(track, Settings.githubToken)
+         }
+     }
+ 
+@@ -134,12 +129,8 @@ object Vendor : VendorInterface {
+     }
+ 
+     override suspend fun downloadAndInstall(context: android.content.Context, downloadUrl: String) {
+-        val cachedApk = UpdateState.cachedApkFile.value
+-        val apkFile = if (cachedApk != null && cachedApk.exists() && cachedApk.length() > 0) {
+-            cachedApk
+-        } else {
+-            ApkDownloader().use { it.download(downloadUrl) }
+-        }
++        val cachedApk = cachedApkForUrl(UpdateState.cachedApkFile.value, Settings.cachedApkUrl, downloadUrl)
++        val apkFile = cachedApk ?: ApkDownloader().use { it.download(downloadUrl) }
+         ApkInstaller.install(context, apkFile)
+     }
+ }
 diff --git a/app/src/main/java/io/nekohasekai/sfa/Application.kt b/app/src/main/java/io/nekohasekai/sfa/Application.kt
 index 402af8e..d0c5d8d 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/Application.kt
@@ -241,7 +366,7 @@ index 402af8e..d0c5d8d 100644
  import kotlinx.coroutines.launch
 @@ -36,11 +38,14 @@ import java.util.Locale
  import io.nekohasekai.sfa.Application as BoxApplication
- 
+
  class Application : Application() {
 +    private lateinit var libboxInitializer: LibboxInitializer
 +
@@ -249,7 +374,7 @@ index 402af8e..d0c5d8d 100644
          super.attachBaseContext(base)
          application = this
      }
- 
+
 +    @OptIn(DelicateCoroutinesApi::class)
      override fun onCreate() {
          super.onCreate()
@@ -257,7 +382,7 @@ index 402af8e..d0c5d8d 100644
 @@ -64,12 +69,19 @@ class Application : Application() {
              PowerReportManager.install(workingDir)
          }
- 
+
 -        @Suppress("OPT_IN_USAGE")
 -        GlobalScope.launch(Dispatchers.IO) {
 +        libboxInitializer = LibboxInitializer(GlobalScope) {
@@ -279,7 +404,7 @@ index 402af8e..d0c5d8d 100644
 @@ -87,8 +99,10 @@ class Application : Application() {
          }
      }
- 
+
 +    internal suspend fun awaitLibboxInitialization() = libboxInitializer.await()
 +
      private fun initialize(baseDir: File, workingDir: File?, tempDir: File) {
@@ -287,13 +412,13 @@ index 402af8e..d0c5d8d 100644
 +        val actualWorkingDir = checkNotNull(workingDir) { "External files directory is unavailable" }
          setupLibbox(baseDir, actualWorkingDir, tempDir)
      }
- 
+
 diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 index e63e4bf..22d65e7 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 @@ -120,10 +120,6 @@ class BoxService(private val service: Service, private val platformInterface: Pl
- 
+
      private suspend fun startService() {
          try {
 -            withContext(Dispatchers.Main) {
@@ -305,7 +430,7 @@ index e63e4bf..22d65e7 100644
                  stopAndAlert(Alert.EmptyConfiguration)
 @@ -326,6 +322,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
      }
- 
+
      private suspend fun stopAndAlert(type: Alert, message: String? = null) {
 +        Log.e(TAG, "service alert: $type: ${message.orEmpty()}")
          Settings.startedByUser = false
@@ -314,7 +439,7 @@ index e63e4bf..22d65e7 100644
 @@ -373,15 +370,27 @@ class BoxService(private val service: Service, private val platformInterface: Pl
              receiverRegistered = true
          }
- 
+
 -        GlobalScope.launch(Dispatchers.IO) {
 -            Settings.startedByUser = true
 +        GlobalScope.launch(Dispatchers.Main.immediate) {
@@ -344,6 +469,28 @@ index e63e4bf..22d65e7 100644
          }
          return Service.START_NOT_STICKY
      }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt b/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt
+new file mode 100644
+index 0000000..4b78183
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt
+@@ -0,0 +1,16 @@
++package io.nekohasekai.sfa.utils
++
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.CoroutineStart
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.async
++
++/** Shares one application-owned setup task across UI and system service starts. */
++internal class LibboxInitializer(scope: CoroutineScope, initialize: suspend () -> Unit) {
++    private val initialized = scope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
++        initialize()
++    }
++
++    // A cancelled waiter must not cancel setup; failures reach every caller.
++    suspend fun await() = initialized.await()
++}
 diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/model/Groups.kt b/app/src/main/java/io/nekohasekai/sfa/compose/model/Groups.kt
 index c869065..82f9772 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/compose/model/Groups.kt
@@ -629,97 +776,6 @@ index 214bfa5..beb5cc3 100644
                          expandedGroups = initialExpandedGroups,
                          isLoading = false,
                      )
-diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
-index a5424ab..a60d57d 100644
---- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
-+++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
-@@ -801,7 +801,7 @@ fun AppSettingsScreen(
-             ),
-         ) {
-             Column {
--                val isFDroid = UpdateSource.fromString(currentSource) == UpdateSource.FDROID
-+                val isFDroid = UpdateSource.FDROID in Vendor.updateSources && UpdateSource.fromString(currentSource) == UpdateSource.FDROID
-                 val updateItemCount =
-                     run {
-                         var count = 0
-diff --git a/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt b/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt
-index 836d0e5..1b9abae 100644
---- a/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt
-+++ b/app/src/main/java/io/nekohasekai/sfa/constant/SettingsKey.kt
-@@ -64,5 +64,6 @@ object SettingsKey {
-     const val STARTED_BY_USER = "started_by_user"
-     const val CACHED_UPDATE_INFO = "cached_update_info"
-     const val CACHED_APK_PATH = "cached_apk_path"
-+    const val CACHED_APK_URL = "cached_apk_url"
-     const val LAST_SHOWN_UPDATE_VERSION = "last_shown_update_version"
- }
-diff --git a/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
-index 0fd720c..4992b9d 100644
---- a/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
-+++ b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
-@@ -42,8 +42,8 @@ object Settings {
-     var startedByUser by dataStore.boolean(SettingsKey.STARTED_BY_USER)
- 
-     var updateSource by dataStore.string(SettingsKey.UPDATE_SOURCE) { "github" }
--    var checkUpdateEnabled by dataStore.boolean(SettingsKey.CHECK_UPDATE_ENABLED) { false }
--    var updateCheckPrompted by dataStore.boolean(SettingsKey.UPDATE_CHECK_PROMPTED) { false }
-+    var checkUpdateEnabled by dataStore.boolean(SettingsKey.CHECK_UPDATE_ENABLED) { true }
-+    var updateCheckPrompted by dataStore.boolean(SettingsKey.UPDATE_CHECK_PROMPTED) { true }
-     var updateTrack by dataStore.string(SettingsKey.UPDATE_TRACK) {
-         val versionName = BuildConfig.VERSION_NAME.lowercase()
-         if (versionName.contains("-alpha") ||
-@@ -133,6 +133,7 @@ object Settings {
- 
-     var cachedUpdateInfo by dataStore.string(SettingsKey.CACHED_UPDATE_INFO) { "" }
-     var cachedApkPath by dataStore.string(SettingsKey.CACHED_APK_PATH) { "" }
-+    var cachedApkUrl by dataStore.string(SettingsKey.CACHED_APK_URL) { "" }
-     var lastShownUpdateVersion by dataStore.int(SettingsKey.LAST_SHOWN_UPDATE_VERSION) { 0 }
- 
-     fun serviceClass(): Class<*> = when (serviceMode) {
-diff --git a/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt b/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt
-index 19ba94e..907f41d 100644
---- a/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt
-+++ b/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt
-@@ -80,14 +80,16 @@ object UpdateState {
-         Settings.cachedUpdateInfo = info?.toJson() ?: ""
-     }
- 
--    fun saveApkPath(file: File) {
-+    fun saveApkPath(file: File, url: String) {
-         Settings.cachedApkPath = file.absolutePath
-+        Settings.cachedApkUrl = url
-         cachedApkFile.value = file
-     }
- 
-     private fun clearCache() {
-         Settings.cachedUpdateInfo = ""
-         Settings.cachedApkPath = ""
-+        Settings.cachedApkUrl = ""
-         Settings.lastShownUpdateVersion = 0
-     }
- }
-diff --git a/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt b/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt
-new file mode 100644
-index 0000000..4b78183
---- /dev/null
-+++ b/app/src/main/java/io/nekohasekai/sfa/utils/LibboxInitializer.kt
-@@ -0,0 +1,16 @@
-+package io.nekohasekai.sfa.utils
-+
-+import kotlinx.coroutines.CoroutineScope
-+import kotlinx.coroutines.CoroutineStart
-+import kotlinx.coroutines.Dispatchers
-+import kotlinx.coroutines.async
-+
-+/** Shares one application-owned setup task across UI and system service starts. */
-+internal class LibboxInitializer(scope: CoroutineScope, initialize: suspend () -> Unit) {
-+    private val initialized = scope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
-+        initialize()
-+    }
-+
-+    // A cancelled waiter must not cancel setup; failures reach every caller.
-+    suspend fun await() = initialized.await()
-+}
 diff --git a/app/src/main/res/values-zh-rCN/url_test_progress.xml b/app/src/main/res/values-zh-rCN/url_test_progress.xml
 new file mode 100644
 index 0000000..a6a69d2
@@ -759,59 +815,3 @@ index 0000000..c08ad1b
 +    <string name="url_test_failed">Failed</string>
 +    <string name="url_test_canceled">Canceled</string>
 +</resources>
-diff --git a/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt b/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
-index fa39ea9..886b17c 100644
---- a/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
-+++ b/app/src/other/java/io/nekohasekai/sfa/vendor/Vendor.kt
-@@ -6,7 +6,6 @@ import android.net.Uri
- import android.util.Log
- import androidx.camera.core.ImageAnalysis
- import com.google.android.material.dialog.MaterialAlertDialogBuilder
--import io.nekohasekai.sfa.Application
- import io.nekohasekai.sfa.R
- import io.nekohasekai.sfa.bg.RootClient
- import io.nekohasekai.sfa.compose.screen.qrscan.QRCodeCropArea
-@@ -16,7 +15,6 @@ import io.nekohasekai.sfa.update.UpdateInfo
- import io.nekohasekai.sfa.update.UpdateSource
- import io.nekohasekai.sfa.update.UpdateState
- import io.nekohasekai.sfa.update.UpdateTrack
--import io.nekohasekai.sfa.update.checkFDroidUpdate
- 
- object Vendor : VendorInterface {
-     private const val TAG = "Vendor"
-@@ -97,15 +95,12 @@ object Vendor : VendorInterface {
- 
-     override val hasCustomUpdate = true
- 
--    override val updateSources = listOf(UpdateSource.GITHUB, UpdateSource.FDROID)
-+    override val updateSources = listOf(UpdateSource.GITHUB)
- 
--    override fun checkUpdateAsync(): UpdateInfo? = when (UpdateSource.fromString(Settings.updateSource)) {
--        UpdateSource.FDROID -> checkFDroidUpdate(Application.application)
--        UpdateSource.GITHUB -> {
--            val track = UpdateTrack.fromString(Settings.updateTrack)
--            GitHubUpdateChecker().use { checker ->
--                checker.checkUpdate(track, Settings.githubToken)
--            }
-+    override fun checkUpdateAsync(): UpdateInfo? {
-+        val track = UpdateTrack.fromString(Settings.updateTrack)
-+        return GitHubUpdateChecker().use { checker ->
-+            checker.checkUpdate(track, Settings.githubToken)
-         }
-     }
- 
-@@ -134,12 +129,8 @@ object Vendor : VendorInterface {
-     }
- 
-     override suspend fun downloadAndInstall(context: android.content.Context, downloadUrl: String) {
--        val cachedApk = UpdateState.cachedApkFile.value
--        val apkFile = if (cachedApk != null && cachedApk.exists() && cachedApk.length() > 0) {
--            cachedApk
--        } else {
--            ApkDownloader().use { it.download(downloadUrl) }
--        }
-+        val cachedApk = cachedApkForUrl(UpdateState.cachedApkFile.value, Settings.cachedApkUrl, downloadUrl)
-+        val apkFile = cachedApk ?: ApkDownloader().use { it.download(downloadUrl) }
-         ApkInstaller.install(context, apkFile)
-     }
- }
