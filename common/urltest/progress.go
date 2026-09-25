@@ -1,6 +1,10 @@
 package urltest
 
-import "context"
+import (
+	"context"
+
+	"github.com/sagernet/sing-box/adapter"
+)
 
 // Test states are also exposed by daemon.GroupItem and libbox.OutboundGroupItem.
 const (
@@ -58,6 +62,22 @@ func (s *HistoryStorage) LoadTestStatus(tag string) TestStatus {
 	s.access.RLock()
 	defer s.access.RUnlock()
 	return s.testStatus[tag]
+}
+
+// Read the visible state and its measurement together. A concurrent history
+// deletion must not turn a successful state into a fabricated zero-ms result.
+func (s *HistoryStorage) LoadTestResult(tag string, realTag string) (TestStatus, *adapter.URLTestHistory) {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	state := s.testStatus[realTag]
+	if direct := s.testStatus[tag]; direct.Pending() || direct.ID > state.ID {
+		state = direct
+	}
+	history := s.delayHistory[realTag]
+	if state.State == TestSucceeded && history == nil {
+		state.State = TestFailed
+	}
+	return state, history
 }
 
 func (b *TestBatch) Context(ctx context.Context) context.Context {

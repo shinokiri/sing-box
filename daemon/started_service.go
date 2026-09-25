@@ -625,14 +625,11 @@ func (s *StartedService) readGroups() *Groups {
 			item.Tag = itemTag
 			item.Type = itemOutbound.Type()
 			realTag := group.RealTag(itemOutbound, N.NetworkTCP)
-			progress := historyStorage.LoadTestStatus(realTag)
-			if direct := historyStorage.LoadTestStatus(itemTag); direct.Pending() || direct.ID > progress.ID {
-				progress = direct
-			}
+			progress, history := historyStorage.LoadTestResult(itemTag, realTag)
 			item.UrlTestId = progress.ID
 			item.UrlTestState = progress.State
 			if !progress.Pending() && progress.State != urltest.TestCanceled && progress.State != urltest.TestFailed {
-				if history := historyStorage.LoadURLTestHistory(realTag); history != nil {
+				if history != nil {
 					item.UrlTestTime = history.Time.Unix()
 					item.UrlTestDelay = int32(history.Delay)
 				}

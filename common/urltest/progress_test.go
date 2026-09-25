@@ -88,3 +88,32 @@ func TestProgressConcurrentSnapshots(t *testing.T) {
 	wg.Wait()
 	b.Complete()
 }
+
+func TestProgressSnapshotDuringBackgroundUpdates(t *testing.T) {
+	s := NewHistoryStorage()
+	b, _ := s.BeginTestBatch("node", []string{"node"})
+	s.StoreURLTestHistory("node", &adapter.URLTestHistory{Time: time.Now(), Delay: 80})
+	TestFinished(b.Context(context.Background()), "node", 80, nil)
+	b.Complete()
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Go(func() {
+			for n := 0; n < 200; n++ {
+				s.StoreURLTestHistory("node", &adapter.URLTestHistory{Time: time.Now(), Delay: 80})
+				s.DeleteURLTestHistory("node")
+			}
+		})
+		wg.Go(func() {
+			for n := 0; n < 200; n++ {
+				state, history := s.LoadTestResult("node", "node")
+				if state.State == TestSucceeded && history == nil {
+					t.Error("snapshot paired success with a missing measurement")
+				}
+				if state.State == TestFailed && history != nil {
+					t.Error("snapshot paired failure with an old measurement")
+				}
+			}
+		})
+	}
+	wg.Wait()
+}
