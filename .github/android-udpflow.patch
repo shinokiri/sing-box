@@ -491,3 +491,31 @@ index 0000000..4b78183
 +    // A cancelled waiter must not cancel setup; failures reach every caller.
 +    suspend fun await() = initialized.await()
 +}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt b/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
+index 8817eff..597c456 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
+@@ -23,6 +23,7 @@ import io.nekohasekai.libbox.LocalDNSTransport
+ import io.nekohasekai.libbox.NeighborEntryIterator
+ import io.nekohasekai.libbox.NeighborUpdateListener
+ import io.nekohasekai.libbox.NetworkInterfaceIterator
++import io.nekohasekai.libbox.NetworkInterfaceSocketBinder
+ import io.nekohasekai.libbox.PlatformInterface
+ import io.nekohasekai.libbox.PlatformUser
+ import io.nekohasekai.libbox.ShellSession
+@@ -135,6 +136,15 @@ interface PlatformInterfaceWrapper : PlatformInterface {
+                     networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> Libbox.InterfaceTypeEthernet
+                     else -> Libbox.InterfaceTypeOther
+                 }
++            if (!networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
++                boxInterface.socketBinder = object : NetworkInterfaceSocketBinder {
++                    override fun bindSocket(fd: Int) {
++                        // Duplicate the descriptor: Go retains ownership of the socket.
++                        // Bind this Network, not whichever network is default later.
++                        ParcelFileDescriptor.fromFd(fd).use { network.bindSocket(it.fileDescriptor) }
++                    }
++                }
++            }
+             boxInterface.index = networkInterface.index
+             runCatching {
+                 boxInterface.mtu = networkInterface.mtu

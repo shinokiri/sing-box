@@ -81,6 +81,9 @@ func NormalizeWIFIBSSID(bssid string) string {
 type NetworkInterface struct {
 	control.Interface
 	Type             C.InterfaceType
+	// BindSocket pins a socket to this physical platform network. Unlike an
+	// interface name, the binding must not follow a later default-network change.
+	BindSocket       func(fd int) error `json:"-"`
 	DNSServers       []string
 	DNSSearchDomains []string
 	Gateways         []netip.Addr

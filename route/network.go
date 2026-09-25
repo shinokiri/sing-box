@@ -595,6 +595,16 @@ func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *
 			return
 		}
 		options = append(options, F.ToString("type ", networkInterface.Type))
+		if C.IsAndroid {
+			switch {
+			case networkInterface.Type == C.InterfaceTypeCellular:
+				options = append(options, "TFO policy off (cellular)")
+			case networkInterface.BindSocket == nil:
+				options = append(options, "TFO policy off (unclassified network)")
+			default:
+				options = append(options, "TFO policy follow-config")
+			}
+		}
 		if networkInterface.Expensive {
 			options = append(options, "expensive")
 		}

@@ -51,6 +51,9 @@ type DefaultDialer struct {
 	fallbackNetworkType    []C.InterfaceType
 	networkFallbackDelay   time.Duration
 	networkLastFallback    common.TypedValue[time.Time]
+	androidTFO             bool
+	tfoBindInterface       string
+	tfoUnclassifiedRoute   bool
 }
 
 func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDialer, error) {
@@ -247,6 +250,9 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 		networkManager:         networkManager,
 		powerManager:           service.FromContext[*powerreport.Manager](ctx),
 		outboundManager:        service.FromContext[adapter.OutboundManager](ctx),
+		androidTFO:             C.IsAndroid && platformInterface != nil && platformInterface.UsePlatformNetworkInterfaces(),
+		tfoBindInterface:       tfoBoundInterface(networkManager, options),
+		tfoUnclassifiedRoute:   options.NetNs != "" || options.RoutingMark != 0 || networkManager != nil && networkManager.DefaultOptions().RoutingMark != 0,
 		dnsTransportManager:    service.FromContext[adapter.DNSTransportManager](ctx),
 		networkStrategy:        networkStrategy,
 		defaultNetworkStrategy: defaultNetworkStrategy,
@@ -289,9 +295,9 @@ func (d *DefaultDialer) DialContext(ctx context.Context, network string, address
 				}
 			}
 			if !address.IsIPv6() {
-				return dialSlowContext(&d.dialer4, ctx, network, address, d.netns)
+				return d.dialSlowContext(&d.dialer4, ctx, network, address)
 			} else {
-				return dialSlowContext(&d.dialer6, ctx, network, address, d.netns)
+				return d.dialSlowContext(&d.dialer6, ctx, network, address)
 			}
 		})
 		return d.trackConn(ctx, address, conn, err)

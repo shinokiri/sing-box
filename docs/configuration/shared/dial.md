@@ -135,6 +135,14 @@ Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
 
 Enable TCP Fast Open.
 
+In this fork's Android client, enabled outbounds automatically use ordinary TCP on cellular networks.
+New connections resume the configured TFO behavior on known non-cellular physical networks.
+The decision is made when the socket is created, including connections whose first write is delayed
+until after a network change. The socket is pinned to the network used for that decision.
+If the platform cannot identify and bind the physical network, or a custom routing mark or network
+namespace makes that identification unreliable, TFO remains disabled. An explicitly disabled
+`tcp_fast_open` is never enabled by this policy. No VPN restart is required when switching networks.
+
 #### tcp_multi_path
 
 !!! warning ""
@@ -275,4 +283,3 @@ If set, the requested domain name will be resolved to IP before connect.
 |----------|--------------------------|-------------------------------------------|
 | `direct` | Domain in request        | Take `inbound.domain_strategy` if not set | 
 | others   | Domain in server address | /                                         |
-
