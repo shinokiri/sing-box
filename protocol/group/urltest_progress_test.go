@@ -75,35 +75,40 @@ func TestURLTestProgressQueuedNodesAndPartialSuccess(t *testing.T) {
 		urltest.TestFinished(testCtx, "all", 0, ctx.Err())
 		b.Complete()
 	}()
+	active := make(map[string]bool)
+	var fastTag string
 	for i := 0; i < 10; i++ {
 		select {
-		case <-started:
+		case tag := <-started:
+			active[tag] = true
+			fastTag = tag
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
 	}
-	for i, tag := range tags[1:] {
-		want := urltest.TestRunning
-		if i >= 10 {
-			want = urltest.TestQueued
+	for _, tag := range tags[1:] {
+		want := urltest.TestQueued
+		if active[tag] {
+			want = urltest.TestRunning
 		}
 		if s.LoadTestStatus(tag).State != want || s.LoadURLTestHistory(tag).Delay != 123 {
 			t.Fatalf("%s: pending state or selection history incorrect", tag)
 		}
 	}
-	releases["node-00"] <- true
+	releases[fastTag] <- true
 	select {
 	case <-started: // The newly free slot starts the eleventh node.
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	if s.LoadTestStatus("node-00").State != urltest.TestSucceeded || !s.LoadTestStatus("all").Pending() {
+	if s.LoadTestStatus(fastTag).State != urltest.TestSucceeded || !s.LoadTestStatus("all").Pending() {
 		t.Fatal("a refreshed number must not mark the whole round complete")
 	}
 	if duplicate, owner := s.BeginTestBatch("all", tags); owner || duplicate != b {
 		t.Fatal("repeat click started another batch")
 	}
-	for _, tag := range tags[2:] {
+	for _, tag := range tags[1:] {
+		if tag == fastTag { continue }
 		releases[tag] <- false
 	}
 	select {
@@ -111,7 +116,8 @@ func TestURLTestProgressQueuedNodesAndPartialSuccess(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	for _, tag := range tags[2:] {
+	for _, tag := range tags[1:] {
+		if tag == fastTag { continue }
 		if s.LoadTestStatus(tag).State != urltest.TestFailed || s.LoadURLTestHistory(tag) != nil {
 			t.Fatalf("%s retained an old successful result", tag)
 		}

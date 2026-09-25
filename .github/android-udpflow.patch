@@ -390,7 +390,7 @@ index c869065..82f9772 100644
  
 diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/model/UrlTestProgress.kt b/app/src/main/java/io/nekohasekai/sfa/compose/model/UrlTestProgress.kt
 new file mode 100644
-index 0000000..46f43b9
+index 0000000..ae5e9b6
 --- /dev/null
 +++ b/app/src/main/java/io/nekohasekai/sfa/compose/model/UrlTestProgress.kt
 @@ -0,0 +1,53 @@
@@ -428,7 +428,7 @@ index 0000000..46f43b9
 +    return pending.filter { (tag, baseline) -> ids[tag]?.let { it <= baseline } == true }
 +}
 +
-+fun displayUrlTestProgress(groups: List<Group>, pending: Map<String, Long>): List<Group> = groups.map { group ->
++fun displayUrlTestProgress(groups: List<Group>, pending: Map<String, Long>): List<Group> = if (pending.isEmpty()) groups else groups.map { group ->
 +    group.copy(
 +        urlTestRunning = group.urlTestRunning || group.tag in pending,
 +        items = group.items.map { item ->
@@ -448,7 +448,7 @@ index 0000000..46f43b9
 +    }
 +}
 diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
-index 1db738a..ef84c9a 100644
+index 1db738a..3f673b0 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
 @@ -68,6 +68,8 @@ import androidx.compose.ui.unit.dp
@@ -460,12 +460,22 @@ index 1db738a..ef84c9a 100644
  import io.nekohasekai.sfa.compat.LazyColumnCompat
  import io.nekohasekai.sfa.compat.rememberOverscrollEffectCompat
  import io.nekohasekai.sfa.compose.component.SnackbarHost
-@@ -258,13 +260,13 @@ private fun GroupsCardContent(
+@@ -219,6 +221,9 @@ private fun GroupsCardContent(
+     val scaffoldPadding = if (asSheet) PaddingValues(0.dp) else LocalScaffoldPadding.current
+     val overscrollEffect = if (asSheet) null else rememberOverscrollEffectCompat()
+     val palette = rememberUrlTestPalette()
++    val displayGroups = remember(uiState.groups, uiState.pendingTests) {
++        displayUrlTestProgress(uiState.groups, uiState.pendingTests)
++    }
+ 
+     LazyColumnCompat(
+         modifier =
+@@ -258,13 +263,13 @@ private fun GroupsCardContent(
              }
  
              else -> {
 -                uiState.groups.forEach { group ->
-+                displayUrlTestProgress(uiState.groups, uiState.pendingTests).forEach { group ->
++                displayGroups.forEach { group ->
                      val isExpanded = uiState.expandedGroups.contains(group.tag)
                      val headerContent: @Composable (Modifier) -> Unit = { headerModifier ->
                          GroupHeader(
@@ -476,7 +486,7 @@ index 1db738a..ef84c9a 100644
                              onToggleExpanded = { onToggleExpanded(group.tag) },
                              onUrlTest = { onUrlTest(group.tag) },
                              modifier = headerModifier,
-@@ -493,7 +495,7 @@ private fun GroupDotsGrid(
+@@ -493,7 +498,7 @@ private fun GroupDotsGrid(
                      val x = (index % columns) * (dotSizePx + dotSpacingPx)
                      val y = (index / columns) * (dotSizePx + dotSpacingPx)
                      drawRoundRect(
@@ -485,7 +495,7 @@ index 1db738a..ef84c9a 100644
                          topLeft = Offset(x, y),
                          size = Size(dotSizePx, dotSizePx),
                          cornerRadius = cornerRadius,
-@@ -621,12 +623,24 @@ private fun ProxyChip(
+@@ -621,12 +626,24 @@ private fun ProxyChip(
                              MaterialTheme.colorScheme.onSurfaceVariant
                          },
                      )
@@ -513,7 +523,7 @@ index 1db738a..ef84c9a 100644
                          )
                      }
                  }
-@@ -639,6 +653,7 @@ private fun ProxyChip(
+@@ -639,6 +656,7 @@ private fun ProxyChip(
              ) {
                  DropdownMenuItem(
                      text = { Text(stringResource(R.string.url_test)) },

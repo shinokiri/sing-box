@@ -415,7 +415,9 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
 		}
 		done := g.checkingDone
 		g.checkingAccess.Unlock()
-		if !force {
+		// Background checks keep their existing coalescing behavior. A manual
+		// round must actually run before its UI can report completion.
+		if !force || !urltest.HasTestBatch(ctx) {
 			return make(map[string]uint16), nil
 		}
 		select {

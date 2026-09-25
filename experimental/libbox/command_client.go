@@ -600,7 +600,7 @@ func (c *CommandClient) URLTest(outboundTag string) error {
 	_, err := callWithResult(c, func(ctx context.Context, client daemon.StartedServiceClient) (*emptypb.Empty, error) {
 		return client.URLTest(ctx, &daemon.URLTestRequest{
 			OutboundTag: outboundTag,
-			Wait: true,
+			Wait:        true,
 		})
 	})
 	if err != nil {

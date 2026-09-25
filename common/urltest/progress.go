@@ -88,6 +88,10 @@ func (b *TestBatch) Complete() {
 	s.notifyUpdated()
 }
 
+func HasTestBatch(ctx context.Context) bool {
+	return ctx.Value(testBatchKey{}) != nil
+}
+
 func TestStarted(ctx context.Context, tag string) {
 	updateTestStatus(ctx, tag, TestRunning, 0)
 }
