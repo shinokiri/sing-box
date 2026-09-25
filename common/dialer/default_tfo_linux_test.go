@@ -44,10 +44,12 @@ func (m tfoInterfaceMonitor) MyInterfaces() []string               { return nil 
 
 type tfoNetworkManager struct {
 	adapter.NetworkManager
-	defaults   adapter.NetworkOptions
-	protect    control.Func
-	loopback   *control.Interface
-	interfaces []adapter.NetworkInterface
+	defaults       adapter.NetworkOptions
+	protect        control.Func
+	loopback       *control.Interface
+	interfaces     []adapter.NetworkInterface
+	tfoState       atomic.Pointer[adapter.NetworkTFOState]
+	interfaceReads atomic.Int64
 }
 
 func (m *tfoNetworkManager) InterfaceFinder() control.InterfaceFinder {
@@ -58,11 +60,17 @@ func (m *tfoNetworkManager) DefaultOptions() adapter.NetworkOptions   { return m
 func (m *tfoNetworkManager) ProtectFunc() control.Func                { return m.protect }
 func (m *tfoNetworkManager) AutoDetectInterfaceFunc() control.Func    { return m.protect }
 func (m *tfoNetworkManager) AutoRedirectOutputMarkFunc() control.Func { return nil }
+func (m *tfoNetworkManager) AutoRedirectOutputMark() uint32           { return 0 }
 func (m *tfoNetworkManager) InterfaceMonitor() tun.DefaultInterfaceMonitor {
 	return tfoInterfaceMonitor{loopback: m.loopback}
 }
 func (m *tfoNetworkManager) NetworkInterfaces() []adapter.NetworkInterface {
+	m.interfaceReads.Add(1)
 	return m.interfaces
+}
+
+func (m *tfoNetworkManager) NetworkTFOState() *adapter.NetworkTFOState {
+	return m.tfoState.Load()
 }
 
 func tfoContext(t *testing.T, defaults adapter.NetworkOptions, protect control.Func) context.Context {

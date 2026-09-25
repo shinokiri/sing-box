@@ -20,6 +20,7 @@ import (
 
 type slowOpenConn struct {
 	dialer      *tfo.Dialer
+	prepare     func() *tfo.Dialer
 	ctx         context.Context
 	cancel      context.CancelFunc
 	netns       string
@@ -46,9 +47,14 @@ func dialSlowContext(dialer *tfo.Dialer, ctx context.Context, network string, de
 			return dialer.Dialer.DialContext(ctx, network, destination.AddrString())
 		}
 	}
+	return newSlowOpenConn(dialer, ctx, network, destination, netns, nil), nil
+}
+
+func newSlowOpenConn(dialer *tfo.Dialer, ctx context.Context, network string, destination M.Socksaddr, netns string, prepare func() *tfo.Dialer) *slowOpenConn {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	return &slowOpenConn{
 		dialer:      dialer,
+		prepare:     prepare,
 		ctx:         ctx,
 		cancel:      cancel,
 		netns:       netns,
@@ -56,7 +62,7 @@ func dialSlowContext(dialer *tfo.Dialer, ctx context.Context, network string, de
 		destination: destination,
 		create:      make(chan struct{}),
 		done:        make(chan struct{}),
-	}, nil
+	}
 }
 
 func (c *slowOpenConn) Read(b []byte) (n int, err error) {
@@ -94,7 +100,11 @@ func (c *slowOpenConn) Write(b []byte) (n int, err error) {
 	}
 	// TFO opens the socket on the first write, so enter the namespace here.
 	conn, err := listener.ListenNetworkNamespace[net.Conn](c.ctx, c.netns, func() (net.Conn, error) {
-		return c.dialer.DialContext(c.ctx, c.network, c.destination.String(), b)
+		dialer := c.dialer
+		if c.prepare != nil {
+			dialer = c.prepare()
+		}
+		return dialer.DialContext(c.ctx, c.network, c.destination.String(), b)
 	})
 	if err == nil {
 		c.conn.Store(conn.(*net.TCPConn))

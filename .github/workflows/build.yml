@@ -93,8 +93,10 @@ jobs:
           exit "$urltest_format_status"
       - name: Test Android platform TCP Fast Open
         run: |
-          gofmt -d common/dialer/default.go common/dialer/default_tfo.go common/dialer/default_tfo_linux_test.go common/dialer/resolve.go common/dialer/tfo.go
+          gofmt -d adapter/network_tfo.go adapter/network_tfo_test.go common/dialer/default.go common/dialer/default_tfo.go common/dialer/default_tfo_linux_test.go common/dialer/resolve.go common/dialer/tfo.go common/dialer/tfo_network.go common/dialer/tfo_network_linux_test.go route/network.go route/network_tfo.go route/network_tfo_test.go
           go test -race -exec sudo -count=3 -run '^TestPlatform(TCPFastOpen|TFO)' ./common/dialer
+          go test -race -ldflags "$(cat release/LDFLAGS)" -count=3 -run '^TestNetworkTFO' ./adapter ./route
+          go test -run '^$' -bench '^BenchmarkPlatformTFONetworkPolicy$' -benchmem -count=3 ./common/dialer
       - name: Test DNS connection contexts through Snell
         run: go test -race -count=10 -timeout=120s -run '^Test(UDPOverSnellTFODialContext|ConnPoolDialContextRetirement|ConnPoolResetCancelsPendingDial|ConnPoolFailedDialContextCleanup|ConnPoolLateDialContextCleanup)$' ./dns/transport
       - name: Test all core packages with release features

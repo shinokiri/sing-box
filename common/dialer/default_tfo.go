@@ -34,6 +34,14 @@ func (d *DefaultDialer) dialTFOInterface(ctx context.Context, network string, ad
 		// writes instead could send application data on more than one socket.
 		return nil, E.New("`tcp_fast_open` requires a default network interface when multiple interfaces are available")
 	}
+	if d.androidTFO {
+		// Read the latest cached policy on the first write, not when the lazy
+		// connection is returned to the caller.
+		if address.IsIPv6() {
+			return d.dialSlowContext(&d.dialer6, ctx, network, address)
+		}
+		return d.dialSlowContext(&d.dialer4, ctx, network, address)
+	}
 	tcpDialer := d.dialer4
 	if address.IsIPv6() {
 		tcpDialer = d.dialer6
