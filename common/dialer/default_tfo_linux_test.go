@@ -44,11 +44,11 @@ func (m tfoInterfaceMonitor) MyInterfaces() []string               { return nil 
 
 type tfoNetworkManager struct {
 	adapter.NetworkManager
-	defaults   adapter.NetworkOptions
-	protect    control.Func
-	loopback   *control.Interface
-	interfaces []adapter.NetworkInterface
-	tfoState atomic.Pointer[adapter.NetworkTFOState]
+	defaults       adapter.NetworkOptions
+	protect        control.Func
+	loopback       *control.Interface
+	interfaces     []adapter.NetworkInterface
+	tfoState       atomic.Pointer[adapter.NetworkTFOState]
 	interfaceReads atomic.Int64
 }
 

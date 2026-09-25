@@ -17,9 +17,9 @@ func TestNetworkTFOExplicitSource(t *testing.T) {
 	}
 	state := NewNetworkTFOState(2, interfaces)
 	for _, tc := range []struct {
-		name string
+		name    string
 		address netip.Addr
-		want bool
+		want    bool
 	}{
 		{"", netip.Addr{}, false},
 		{"wifi", netip.Addr{}, true},

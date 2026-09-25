@@ -3,7 +3,6 @@
 package dialer
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net"
@@ -118,10 +117,10 @@ func TestPlatformTFONetworkPolicy(t *testing.T) {
 					}
 					dialer.androidTFO = true
 					for _, tc := range []struct {
-						name string
-						kind C.InterfaceType
+						name  string
+						kind  C.InterfaceType
 						known bool
-						want bool
+						want  bool
 					}{
 						{"wifi", C.InterfaceTypeWIFI, true, true},
 						{"sim1", C.InterfaceTypeCellular, true, false},
@@ -365,7 +364,7 @@ func BenchmarkPlatformTFONetworkPolicy(b *testing.B) {
 			manager := &tfoNetworkManager{}
 			manager.tfoState.Store(adapter.NewNetworkTFOState(1, []adapter.NetworkInterface{{Interface: iif, Type: kind}}))
 			dialer := &DefaultDialer{networkManager: manager}
-			selectDialer := newNetworkTFOSelector(&dialer.dialer4, manager, option.DialerOptions{TCPFastOpen: true})
+			selectDialer := newNetworkTFOSelector(&dialer.dialer4, manager, option.DialerOptions{})
 			b.ReportAllocs()
 			for b.Loop() {
 				selected := selectDialer()

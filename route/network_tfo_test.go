@@ -38,11 +38,11 @@ func TestNetworkTFOEventPublication(t *testing.T) {
 		{Interface: cell, Type: C.InterfaceTypeCellular},
 	}}
 	manager := &NetworkManager{
-		logger: logger.NOP(),
-		interfaceFinder: control.NewDefaultInterfaceFinder(),
-		interfaceMonitor: monitor,
+		logger:            logger.NOP(),
+		interfaceFinder:   control.NewDefaultInterfaceFinder(),
+		interfaceMonitor:  monitor,
 		platformInterface: platform,
-		networkTFOPolicy: true,
+		networkTFOPolicy:  true,
 	}
 	refresh := func() {
 		t.Helper()
