@@ -4,108 +4,48 @@ import (
 	"context"
 	"net"
 	"net/netip"
-	"syscall"
 
 	"github.com/sagernet/sing-box/adapter"
-	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common/control"
-	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 
 	"github.com/database64128/tfo-go/v2"
 )
 
-func tfoBoundInterface(manager adapter.NetworkManager, options option.DialerOptions) string {
-	if options.BindInterface != "" {
-		return options.BindInterface
-	}
-	if manager != nil && options.Inet4BindAddress == nil && options.Inet6BindAddress == nil {
-		return manager.DefaultOptions().BindInterface
-	}
-	return ""
-}
-
 func (d *DefaultDialer) dialSlowContext(base *tfo.Dialer, ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if !d.androidTFO || base.DisableTFO || N.NetworkName(network) != N.NetworkTCP {
 		return dialSlowContext(base, ctx, network, destination, d.netns)
 	}
-	return newSlowOpenConn(base, ctx, network, destination, d.netns, func() (*tfo.Dialer, error) {
-		return d.prepareNetworkTFO(base)
-	}), nil
+	selectDialer := d.selectTFO4
+	if base == &d.dialer6 {
+		selectDialer = d.selectTFO6
+	}
+	return newSlowOpenConn(base, ctx, network, destination, d.netns, selectDialer), nil
 }
 
-func (d *DefaultDialer) prepareNetworkTFO(base *tfo.Dialer) (*tfo.Dialer, error) {
-	// A dial owns its copy. Never change the shared IPv4/IPv6 TFO dialers.
-	dialer := *base
-	dialer.DisableTFO = true
-	if d.networkManager == nil || d.tfoUnclassifiedRoute {
-		// A custom mark or namespace may route outside the platform network.
-		// Preserve that routing, but do not infer a non-cellular path for it.
-		return &dialer, nil
+// Prepare both choices once, while constructing the outbound. New connections
+// read an event-updated snapshot; they do not copy dialers or call Android.
+func newNetworkTFOSelector(base *tfo.Dialer, manager adapter.NetworkManager, options option.DialerOptions) func() *tfo.Dialer {
+	ordinary := *base
+	ordinary.DisableTFO = true
+	provider, ok := manager.(adapter.NetworkTFOProvider)
+	if !ok || options.NetNs != "" || options.RoutingMark != 0 || manager.DefaultOptions().RoutingMark != 0 {
+		return func() *tfo.Dialer { return &ordinary }
 	}
-	iif, err := d.tfoNetworkInterface(base.LocalAddr)
-	if err != nil {
-		return nil, err
+	bindInterface := options.BindInterface
+	if bindInterface == "" && options.Inet4BindAddress == nil && options.Inet6BindAddress == nil {
+		bindInterface = manager.DefaultOptions().BindInterface
 	}
-	if iif == nil || iif.BindSocket == nil {
-		// In particular, a missing platform record is not InterfaceTypeWIFI
-		// just because that enum's zero value happens to be Wi-Fi.
-		return &dialer, nil
-	}
-	switch iif.Type {
-	case C.InterfaceTypeWIFI, C.InterfaceTypeEthernet, C.InterfaceTypeOther:
-		dialer.DisableTFO = base.DisableTFO
-	default:
-		// Ordinary TCP can follow the existing route if the default changes.
-		// No extra platform binding is needed when TFO is already disabled.
-		return &dialer, nil
-	}
-	// A TFO-enabled socket must use the same physical network as the type
-	// decision. A lost network fails this dial instead of silently rerouting
-	// a TFO SYN through a new cellular default.
-	dialer.Control = control.Append(dialer.Control, func(_ string, _ string, conn syscall.RawConn) error {
-		return control.Raw(conn, func(fd uintptr) error {
-			return iif.BindSocket(int(fd))
-		})
-	})
-	return &dialer, nil
-}
-
-func (d *DefaultDialer) tfoNetworkInterface(localAddr net.Addr) (*adapter.NetworkInterface, error) {
 	var localIP netip.Addr
-	if addr, ok := localAddr.(*net.TCPAddr); ok && !addr.IP.IsUnspecified() {
+	if addr, ok := base.LocalAddr.(*net.TCPAddr); ok && !addr.IP.IsUnspecified() {
 		localIP, _ = netip.AddrFromSlice(addr.IP)
 		localIP = localIP.Unmap()
 	}
-	if d.tfoBindInterface != "" || localIP.IsValid() {
-		for _, iif := range d.networkManager.NetworkInterfaces() {
-			if d.tfoBindInterface != "" && iif.Name != d.tfoBindInterface {
-				continue
-			}
-			if localIP.IsValid() {
-				matched := false
-				for _, prefix := range iif.Addresses {
-					if prefix.Addr().Unmap() == localIP {
-						matched = true
-						break
-					}
-				}
-				if !matched {
-					continue
-				}
-			}
-			return &iif, nil
+	return func() *tfo.Dialer {
+		if provider.NetworkTFOState().Allowed(bindInterface, localIP) {
+			return base
 		}
-		return nil, nil
+		return &ordinary
 	}
-	selected, _ := selectInterfaces(d.networkManager, C.NetworkStrategyDefault, nil, nil)
-	if len(selected) > 1 {
-		return nil, E.New("`tcp_fast_open` requires a default network interface when multiple interfaces are available")
-	}
-	if len(selected) == 0 {
-		return nil, nil
-	}
-	return &selected[0], nil
 }

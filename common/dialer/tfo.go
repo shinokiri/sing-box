@@ -20,7 +20,7 @@ import (
 
 type slowOpenConn struct {
 	dialer      *tfo.Dialer
-	prepare     func() (*tfo.Dialer, error)
+	prepare     func() *tfo.Dialer
 	ctx         context.Context
 	cancel      context.CancelFunc
 	netns       string
@@ -50,7 +50,7 @@ func dialSlowContext(dialer *tfo.Dialer, ctx context.Context, network string, de
 	return newSlowOpenConn(dialer, ctx, network, destination, netns, nil), nil
 }
 
-func newSlowOpenConn(dialer *tfo.Dialer, ctx context.Context, network string, destination M.Socksaddr, netns string, prepare func() (*tfo.Dialer, error)) *slowOpenConn {
+func newSlowOpenConn(dialer *tfo.Dialer, ctx context.Context, network string, destination M.Socksaddr, netns string, prepare func() *tfo.Dialer) *slowOpenConn {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	return &slowOpenConn{
 		dialer:      dialer,
@@ -102,11 +102,7 @@ func (c *slowOpenConn) Write(b []byte) (n int, err error) {
 	conn, err := listener.ListenNetworkNamespace[net.Conn](c.ctx, c.netns, func() (net.Conn, error) {
 		dialer := c.dialer
 		if c.prepare != nil {
-			var err error
-			dialer, err = c.prepare()
-			if err != nil {
-				return nil, err
-			}
+			dialer = c.prepare()
 		}
 		return dialer.DialContext(c.ctx, c.network, c.destination.String(), b)
 	})

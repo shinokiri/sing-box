@@ -136,13 +136,13 @@ Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
 Enable TCP Fast Open.
 
 In this fork's Android client, enabled outbounds automatically use ordinary TCP on cellular networks.
-New connections resume the configured TFO behavior on known non-cellular physical networks.
-The decision is made when the socket is created, including connections whose first write is delayed
-until after a network change. Only a TFO-enabled socket is additionally pinned to the network used
-for that decision; ordinary TCP keeps the existing routing behavior.
-If the platform cannot identify and bind the physical network, or a custom routing mark or network
-namespace makes that identification unreliable, TFO remains disabled. An explicitly disabled
-`tcp_fast_open` is never enabled by this policy. No VPN restart is required when switching networks.
+Network events update an immutable policy snapshot. New connections read that snapshot on their first
+write and select a prepared TFO or ordinary TCP dialer; the policy adds no per-connection Android calls,
+interface enumeration, or heap allocations. Known non-cellular networks restore the configured behavior.
+Unclassified networks and custom routing marks or network namespaces use ordinary TCP. An explicitly
+disabled `tcp_fast_open` remains disabled. Existing network resets handle the transition without
+restarting the VPN. Connections started before the system delivers a network-change notification
+may briefly use the preceding policy.
 
 #### tcp_multi_path
 

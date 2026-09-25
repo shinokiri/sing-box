@@ -52,8 +52,8 @@ type DefaultDialer struct {
 	networkFallbackDelay   time.Duration
 	networkLastFallback    common.TypedValue[time.Time]
 	androidTFO             bool
-	tfoBindInterface       string
-	tfoUnclassifiedRoute   bool
+	selectTFO4             func() *tfo.Dialer
+	selectTFO6             func() *tfo.Dialer
 }
 
 func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDialer, error) {
@@ -236,7 +236,7 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 	}
 	tcpDialer4 := tfo.Dialer{Dialer: dialer4, DisableTFO: !options.TCPFastOpen}
 	tcpDialer6 := tfo.Dialer{Dialer: dialer6, DisableTFO: !options.TCPFastOpen}
-	return &DefaultDialer{
+	result := &DefaultDialer{
 		dialer4:                tcpDialer4,
 		dialer6:                tcpDialer6,
 		udpDialer4:             udpDialer4,
@@ -251,15 +251,18 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 		powerManager:           service.FromContext[*powerreport.Manager](ctx),
 		outboundManager:        service.FromContext[adapter.OutboundManager](ctx),
 		androidTFO:             C.IsAndroid && platformInterface != nil && platformInterface.UsePlatformNetworkInterfaces(),
-		tfoBindInterface:       tfoBoundInterface(networkManager, options),
-		tfoUnclassifiedRoute:   options.NetNs != "" || options.RoutingMark != 0 || networkManager != nil && networkManager.DefaultOptions().RoutingMark != 0,
 		dnsTransportManager:    service.FromContext[adapter.DNSTransportManager](ctx),
 		networkStrategy:        networkStrategy,
 		defaultNetworkStrategy: defaultNetworkStrategy,
 		networkType:            networkType,
 		fallbackNetworkType:    fallbackNetworkType,
 		networkFallbackDelay:   networkFallbackDelay,
-	}, nil
+	}
+	if options.TCPFastOpen && platformInterface != nil && platformInterface.UsePlatformNetworkInterfaces() {
+		result.selectTFO4 = newNetworkTFOSelector(&result.dialer4, networkManager, options)
+		result.selectTFO6 = newNetworkTFOSelector(&result.dialer6, networkManager, options)
+	}
+	return result, nil
 }
 
 func setMarkWrapper(networkManager adapter.NetworkManager, mark uint32, isDefault bool) control.Func {

@@ -1,0 +1,35 @@
+name: TFO network preflight
+
+on:
+  push:
+    branches: [fix/android-cellular-tfo]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tfo-network-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.8'
+      - name: Format reviewed files
+        run: |
+          gofmt -w adapter/network_tfo.go adapter/network_tfo_test.go common/dialer/default.go common/dialer/default_tfo.go common/dialer/default_tfo_linux_test.go common/dialer/tfo.go common/dialer/tfo_network.go common/dialer/tfo_network_linux_test.go route/network.go route/network_tfo.go route/network_tfo_test.go
+          git diff --binary > "$RUNNER_TEMP/tfo-format.patch"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfo-format
+          path: ${{ runner.temp }}/tfo-format.patch
+      - name: Test network policy on kernel TCP sockets
+        run: go test -race -exec sudo -count=3 -timeout=180s -run '^TestPlatform(TCPFastOpen|TFO)' ./common/dialer
+      - name: Test network event publication
+        run: go test -race -ldflags "$(cat release/LDFLAGS)" -count=3 -run '^TestNetworkTFO' ./adapter ./route
+      - name: Measure cached policy selection
+        run: go test -run '^$' -bench '^BenchmarkPlatformTFONetworkPolicy$' -benchmem -count=3 ./common/dialer

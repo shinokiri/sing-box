@@ -35,8 +35,8 @@ func (d *DefaultDialer) dialTFOInterface(ctx context.Context, network string, ad
 		return nil, E.New("`tcp_fast_open` requires a default network interface when multiple interfaces are available")
 	}
 	if d.androidTFO {
-		// Select and bind the physical network again on the first write, not
-		// when the lazy connection is returned to the caller.
+		// Read the latest cached policy on the first write, not when the lazy
+		// connection is returned to the caller.
 		if address.IsIPv6() {
 			return d.dialSlowContext(&d.dialer6, ctx, network, address)
 		}

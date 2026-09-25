@@ -48,6 +48,8 @@ type tfoNetworkManager struct {
 	protect    control.Func
 	loopback   *control.Interface
 	interfaces []adapter.NetworkInterface
+	tfoState atomic.Pointer[adapter.NetworkTFOState]
+	interfaceReads atomic.Int64
 }
 
 func (m *tfoNetworkManager) InterfaceFinder() control.InterfaceFinder {
@@ -63,7 +65,12 @@ func (m *tfoNetworkManager) InterfaceMonitor() tun.DefaultInterfaceMonitor {
 	return tfoInterfaceMonitor{loopback: m.loopback}
 }
 func (m *tfoNetworkManager) NetworkInterfaces() []adapter.NetworkInterface {
+	m.interfaceReads.Add(1)
 	return m.interfaces
+}
+
+func (m *tfoNetworkManager) NetworkTFOState() *adapter.NetworkTFOState {
+	return m.tfoState.Load()
 }
 
 func tfoContext(t *testing.T, defaults adapter.NetworkOptions, protect control.Func) context.Context {

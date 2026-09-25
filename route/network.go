@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,6 +41,9 @@ type NetworkManager struct {
 	router                  adapter.Router
 	interfaceFinder         *control.DefaultInterfaceFinder
 	networkInterfaces       common.TypedValue[[]adapter.NetworkInterface]
+	networkTFOPolicy        bool
+	networkTFOAccess        sync.Mutex
+	networkTFOState         atomic.Pointer[adapter.NetworkTFOState]
 	autoDetectInterface     bool
 	defaultOptions          adapter.NetworkOptions
 	autoRedirectOutputMark  uint32
@@ -114,6 +118,7 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
 		outbound:          service.FromContext[adapter.OutboundManager](ctx),
 		needWIFIState:     hasRule(options.Rules, isWIFIRule) || hasDNSRule(dnsOptions.Rules, isWIFIDNSRule),
 	}
+	nm.networkTFOPolicy = C.IsAndroid && nm.platformInterface != nil && nm.platformInterface.UsePlatformNetworkInterfaces()
 	if options.DefaultNetworkStrategy != nil {
 		if options.DefaultInterface != "" {
 			return nil, E.New("`default_network_strategy` is conflict with `default_interface`")
@@ -208,6 +213,7 @@ func (r *NetworkManager) Start(stage adapter.StartStage) error {
 		r.interfaceUpdateAccess.Lock()
 		r.startedCtx, r.startedCancel = context.WithCancel(r.ctx)
 		if r.interfaceMonitor != nil {
+			r.updateNetworkTFOState()
 			r.dispatchInterfaceUpdateLocked()
 		}
 		r.interfaceUpdateAccess.Unlock()
@@ -332,6 +338,7 @@ func (r *NetworkManager) UpdateInterfaces() error {
 			return it.Flags&net.FlagUp != 0
 		})
 		r.networkInterfaces.Store(newInterfaces)
+		r.updateNetworkTFOState()
 		if len(newInterfaces) > 0 && !slices.EqualFunc(oldInterfaces, newInterfaces, func(oldInterface adapter.NetworkInterface, newInterface adapter.NetworkInterface) bool {
 			return oldInterface.Interface.Index == newInterface.Interface.Index &&
 				oldInterface.Interface.Name == newInterface.Interface.Name &&
@@ -546,6 +553,7 @@ func (r *NetworkManager) ReleaseMemory(ctx context.Context) {
 }
 
 func (r *NetworkManager) notifyInterfaceUpdate(_ *control.Interface, _ int) {
+	r.updateNetworkTFOState()
 	r.interfaceUpdateAccess.Lock()
 	defer r.interfaceUpdateAccess.Unlock()
 	r.networkResetPending = true
@@ -599,7 +607,7 @@ func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *
 			switch {
 			case networkInterface.Type == C.InterfaceTypeCellular:
 				options = append(options, "TFO policy off (cellular)")
-			case networkInterface.BindSocket == nil || networkInterface.Type > C.InterfaceTypeOther:
+			case networkInterface.Type > C.InterfaceTypeOther:
 				options = append(options, "TFO policy off (unclassified network)")
 			default:
 				options = append(options, "TFO policy follow-config")

@@ -122,12 +122,6 @@ const (
 	InterfaceTypeOther    = int32(C.InterfaceTypeOther)
 )
 
-// NetworkInterfaceSocketBinder binds an unconnected socket to the physical
-// network represented by one NetworkInterface, even if the default changes.
-type NetworkInterfaceSocketBinder interface {
-	BindSocket(fd int32) error
-}
-
 type NetworkInterface struct {
 	Index     int32
 	MTU       int32
@@ -136,7 +130,6 @@ type NetworkInterface struct {
 	Flags     int32
 
 	Type            int32
-	SocketBinder    NetworkInterfaceSocketBinder
 	DNSServer       StringIterator
 	DNSSearchDomain StringIterator
 	Gateway         StringIterator

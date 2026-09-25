@@ -129,10 +129,6 @@ func (w *platformInterfaceWrapper) NetworkInterfaces() ([]adapter.NetworkInterfa
 	}
 	var interfaces []adapter.NetworkInterface
 	for _, netInterface := range iteratorToArray[*NetworkInterface](interfaceIterator) {
-		var bindSocket func(int) error
-		if binder := netInterface.SocketBinder; binder != nil {
-			bindSocket = func(fd int) error { return binder.BindSocket(int32(fd)) }
-		}
 		w.defaultInterfaceAccess.Lock()
 		// (GOOS=windows) SA4006: this value of `isDefault` is never used
 		// Why not used?
@@ -148,7 +144,6 @@ func (w *platformInterfaceWrapper) NetworkInterfaces() ([]adapter.NetworkInterfa
 				Flags:     linkFlags(uint32(netInterface.Flags)),
 			},
 			Type:             C.InterfaceType(netInterface.Type),
-			BindSocket:       bindSocket,
 			DNSServers:       iteratorToArray[string](netInterface.DNSServer),
 			DNSSearchDomains: iteratorToArray[string](netInterface.DNSSearchDomain),
 			Gateways: common.Filter(common.Map(iteratorToArray[string](netInterface.Gateway), func(it string) netip.Addr {
