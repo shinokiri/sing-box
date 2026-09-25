@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"syscall"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
@@ -60,9 +61,11 @@ func (d *DefaultDialer) prepareNetworkTFO(base *tfo.Dialer) (*tfo.Dialer, error)
 	// Bind even when TFO is suppressed. The type decision and socket must
 	// refer to the same physical network. A lost network fails this dial;
 	// it must not silently reroute a TFO SYN through a new cellular default.
-	dialer.Control = control.Append(dialer.Control, control.Raw(func(fd uintptr) error {
-		return iif.BindSocket(int(fd))
-	}))
+	dialer.Control = control.Append(dialer.Control, func(_ string, _ string, conn syscall.RawConn) error {
+		return control.Raw(conn, func(fd uintptr) error {
+			return iif.BindSocket(int(fd))
+		})
+	})
 	return &dialer, nil
 }
 

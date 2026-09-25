@@ -15,7 +15,7 @@ func (p socketBinderTestPlatform) GetInterfaces() (NetworkInterfaceIterator, err
 }
 
 type testNetworkSocketBinder struct {
-	fd int32
+	fd  int32
 	err error
 }
 
@@ -34,10 +34,22 @@ func TestPlatformNetworkSocketBinder(t *testing.T) {
 		{Name: "unknown"},
 	}}}
 	interfaces, err := wrapper.NetworkInterfaces()
-	if err != nil { t.Fatal(err) }
-	if len(interfaces) != 3 { t.Fatalf("interfaces: %d", len(interfaces)) }
-	if err := interfaces[0].BindSocket(17); err != nil { t.Fatal(err) }
-	if err := interfaces[1].BindSocket(23); !errors.Is(err, failure) { t.Fatal(err) }
-	if wifi.fd != 17 || cellular.fd != 23 { t.Fatal("binding callback used a different network") }
-	if interfaces[2].BindSocket != nil { t.Fatal("missing binding was treated as an available network") }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(interfaces) != 3 {
+		t.Fatalf("interfaces: %d", len(interfaces))
+	}
+	if err := interfaces[0].BindSocket(17); err != nil {
+		t.Fatal(err)
+	}
+	if err := interfaces[1].BindSocket(23); !errors.Is(err, failure) {
+		t.Fatal(err)
+	}
+	if wifi.fd != 17 || cellular.fd != 23 {
+		t.Fatal("binding callback used a different network")
+	}
+	if interfaces[2].BindSocket != nil {
+		t.Fatal("missing binding was treated as an available network")
+	}
 }

@@ -116,10 +116,10 @@ func TestPlatformTFONetworkPolicy(t *testing.T) {
 					// options and actual data transfer can be checked in CI.
 					dialer.androidTFO = true
 					for _, tc := range []struct {
-						name string
-						kind C.InterfaceType
+						name   string
+						kind   C.InterfaceType
 						binder bool
-						want bool
+						want   bool
 					}{
 						{"wifi", C.InterfaceTypeWIFI, true, true},
 						{"sim1", C.InterfaceTypeCellular, true, false},
@@ -142,7 +142,7 @@ func TestPlatformTFONetworkPolicy(t *testing.T) {
 							// TFO on the selected Wi-Fi network.
 							manager.interfaces = []adapter.NetworkInterface{selected, {
 								Interface: control.Interface{Name: "unused-cellular", Index: 12345},
-								Type: C.InterfaceTypeCellular,
+								Type:      C.InterfaceTypeCellular,
 							}}
 							beforeProtect, beforeBind := protected.Load(), bound.Load()
 							var conn net.Conn
@@ -160,7 +160,9 @@ func TestPlatformTFONetworkPolicy(t *testing.T) {
 								t.Fatal(err)
 							}
 							wantBind := int32(0)
-							if configured && tc.binder { wantBind = 1 }
+							if configured && tc.binder {
+								wantBind = 1
+							}
 							if protected.Load()-beforeProtect != 1 || bound.Load()-beforeBind != wantBind {
 								t.Fatalf("protect=%d bind=%d", protected.Load()-beforeProtect, bound.Load()-beforeBind)
 							}
@@ -190,17 +192,27 @@ func TestPlatformTFONetworkChangesBeforeWrite(t *testing.T) {
 					}}
 				}
 				before, after := C.InterfaceTypeCellular, C.InterfaceTypeWIFI
-				if toCellular { before, after = after, before }
+				if toCellular {
+					before, after = after, before
+				}
 				setNetwork(before)
 				dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
-				if err != nil { t.Fatal(err) }
+				if err != nil {
+					t.Fatal(err)
+				}
 				dialer.androidTFO = true
 				conn, err := dialer.DialContext(ctx, "tcp", destination)
-				if err != nil { t.Fatal(err) }
+				if err != nil {
+					t.Fatal(err)
+				}
 				defer conn.Close()
 				setNetwork(after)
-				if err := networkTFOExchange(conn, !toCellular); err != nil { t.Fatal(err) }
-				if boundType != after { t.Fatalf("bound %s, want %s", boundType, after) }
+				if err := networkTFOExchange(conn, !toCellular); err != nil {
+					t.Fatal(err)
+				}
+				if boundType != after {
+					t.Fatalf("bound %s, want %s", boundType, after)
+				}
 			})
 		}
 	}
@@ -220,12 +232,18 @@ func TestPlatformTFONetworkPinnedDuringSocketControl(t *testing.T) {
 	manager = service.FromContext[adapter.NetworkManager](ctx).(*tfoNetworkManager)
 	manager.interfaces[0].BindSocket = func(int) error { wifiBinds.Add(1); return nil }
 	dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	dialer.androidTFO = true
 	conn, err := dialer.DialContext(ctx, "tcp", destination)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer conn.Close()
-	if err := networkTFOExchange(conn, true); err != nil { t.Fatal(err) }
+	if err := networkTFOExchange(conn, true); err != nil {
+		t.Fatal(err)
+	}
 	if wifiBinds.Load() != 1 || cellBinds.Load() != 0 {
 		t.Fatal("socket binding followed the new default after choosing TFO")
 	}
@@ -238,18 +256,26 @@ func TestPlatformTFONetworkBindingFailure(t *testing.T) {
 	var calls atomic.Int32
 	manager.interfaces[0].BindSocket = func(int) error { calls.Add(1); return failure }
 	dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	dialer.androidTFO = true
 	conn, err := dialer.DialContext(ctx, "tcp", M.ParseSocksaddr("127.0.0.1:1"))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer conn.Close()
 	for range 2 {
 		if n, err := conn.Write([]byte("ping")); n != 0 || !errors.Is(err, failure) {
 			t.Fatalf("write after lost network: n=%d err=%v", n, err)
 		}
 	}
-	if _, err := conn.Read(make([]byte, 4)); !errors.Is(err, failure) { t.Fatal(err) }
-	if calls.Load() != 1 { t.Fatal("failed first write was retried") }
+	if _, err := conn.Read(make([]byte, 4)); !errors.Is(err, failure) {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatal("failed first write was retried")
+	}
 }
 
 func TestPlatformTFONetworkExplicitBinding(t *testing.T) {
@@ -266,12 +292,18 @@ func TestPlatformTFONetworkExplicitBinding(t *testing.T) {
 			manager.loopback = &control.Interface{Name: "cellular-default", Index: 12345}
 			manager.interfaces = append(manager.interfaces, adapter.NetworkInterface{Interface: *manager.loopback, Type: C.InterfaceTypeCellular})
 			dialer, err := NewDefault(ctx, tfoOptions(t, config))
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			dialer.androidTFO = true
 			conn, err := dialer.DialContext(ctx, "tcp", destination)
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			defer conn.Close()
-			if err := networkTFOExchange(conn, true); err != nil { t.Fatal(err) }
+			if err := networkTFOExchange(conn, true); err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 }
@@ -285,15 +317,22 @@ func TestPlatformTFONetworkConcurrentConnections(t *testing.T) {
 			manager.interfaces[0].Type = kind
 			manager.interfaces[0].BindSocket = func(int) error { return nil }
 			dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			dialer.androidTFO = true
 			var group sync.WaitGroup
 			for range 16 {
 				group.Go(func() {
 					conn, err := dialer.DialContext(context.Background(), "tcp", destination)
-					if err != nil { t.Error(err); return }
+					if err != nil {
+						t.Error(err)
+						return
+					}
 					defer conn.Close()
-					if err := networkTFOExchange(conn, kind != C.InterfaceTypeCellular); err != nil { t.Error(err) }
+					if err := networkTFOExchange(conn, kind != C.InterfaceTypeCellular); err != nil {
+						t.Error(err)
+					}
 				})
 			}
 			group.Wait()
