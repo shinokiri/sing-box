@@ -599,7 +599,7 @@ func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *
 			switch {
 			case networkInterface.Type == C.InterfaceTypeCellular:
 				options = append(options, "TFO policy off (cellular)")
-			case networkInterface.BindSocket == nil:
+			case networkInterface.BindSocket == nil || networkInterface.Type > C.InterfaceTypeOther:
 				options = append(options, "TFO policy off (unclassified network)")
 			default:
 				options = append(options, "TFO policy follow-config")
