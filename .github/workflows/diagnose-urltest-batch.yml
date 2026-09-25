@@ -1,0 +1,28 @@
+name: Diagnose URLTest batch history
+on:
+  push:
+    branches: [diagnose/urltest-batch-20260925]
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.8
+          cache: false
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: urltest-batch-diagnosis-${{ github.sha }}
+          restore-keys: |
+            android-arm64-api36-go-1.26.8-ndk-r29-${{ hashFiles('go.sum', 'third_party/sing-mux/go.sum', 'third_party/sing-tun/go.sum') }}-
+      - name: Reproduce stale successes with one batch of unreachable nodes
+        run: |
+          test -z "$(gofmt -l protocol/group/urltest_batch_diagnosis_test.go)"
+          go test -race -count=1 -timeout=90s -run '^TestURLTestBatchDiagnosisStaleSuccessWhileEveryAttemptFails$' -v ./protocol/group
