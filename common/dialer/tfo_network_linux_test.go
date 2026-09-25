@@ -339,3 +339,111 @@ func TestPlatformTFONetworkConcurrentConnections(t *testing.T) {
 		})
 	}
 }
+
+func TestPlatformTFONetworkMissingRecordAtFirstWrite(t *testing.T) {
+	destination := networkTFOListener(t, "tcp4")
+	ctx := tfoContext(t, adapter.NetworkOptions{}, nil)
+	manager := service.FromContext[adapter.NetworkManager](ctx).(*tfoNetworkManager)
+	manager.interfaces[0].BindSocket = func(int) error { return nil }
+	dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialer.androidTFO = true
+	conn, err := dialer.DialContext(ctx, "tcp", destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// The monitor still has an index but the refreshed platform list does not.
+	manager.interfaces = nil
+	if err := networkTFOExchange(conn, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPlatformTFONetworkCustomMarkPreserved(t *testing.T) {
+	destination := networkTFOListener(t, "tcp4")
+	ctx := tfoContext(t, adapter.NetworkOptions{}, nil)
+	manager := service.FromContext[adapter.NetworkManager](ctx).(*tfoNetworkManager)
+	manager.interfaces[0].BindSocket = func(int) error {
+		return errors.New("platform network must not override an explicit mark")
+	}
+	dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true,"routing_mark":42}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialer.androidTFO = true
+	conn, err := dialer.DialContext(ctx, "tcp", destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := networkTFOExchange(conn, false); err != nil {
+		t.Fatal(err)
+	}
+	tcp := conn.(*slowOpenConn).Upstream().(*net.TCPConn)
+	raw, err := tcp.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mark int
+	var socketErr error
+	if err := raw.Control(func(fd uintptr) {
+		mark, socketErr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if socketErr != nil || mark != 42 {
+		t.Fatalf("routing mark=%d err=%v", mark, socketErr)
+	}
+}
+
+func TestPlatformTFONetworkCloseDuringBinding(t *testing.T) {
+	ctx := tfoContext(t, adapter.NetworkOptions{}, nil)
+	manager := service.FromContext[adapter.NetworkManager](ctx).(*tfoNetworkManager)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	manager.interfaces[0].BindSocket = func(int) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	dialer, err := NewDefault(ctx, tfoOptions(t, `{"tcp_fast_open":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialer.androidTFO = true
+	conn, err := dialer.DialContext(ctx, "tcp", M.ParseSocksaddr("127.0.0.1:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	result := make(chan error, 1)
+	go func() {
+		n, err := conn.Write([]byte("ping"))
+		if n != 0 || err == nil {
+			err = fmt.Errorf("write completed after close: n=%d err=%v", n, err)
+		} else {
+			err = nil
+		}
+		result <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("binding did not start")
+	}
+	conn.Close()
+	unblock()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("close did not cancel the pending dial")
+	}
+}

@@ -21,7 +21,7 @@ jobs:
           go-version: '1.26.8'
       - name: Format reviewed files
         run: |
-          gofmt -w adapter/network.go experimental/libbox/platform.go experimental/libbox/service.go experimental/libbox/service_network_test.go common/dialer/default.go common/dialer/default_tfo.go common/dialer/tfo.go common/dialer/tfo_network.go common/dialer/tfo_network_linux_test.go route/network.go
+          gofmt -w adapter/network.go experimental/libbox/platform.go experimental/libbox/service.go experimental/libbox/service_network_test.go common/dialer/default.go common/dialer/default_tfo.go common/dialer/default_tfo_linux_test.go common/dialer/tfo.go common/dialer/tfo_network.go common/dialer/tfo_network_linux_test.go route/network.go
           git diff --binary > "$RUNNER_TEMP/tfo-format.patch"
       - uses: actions/upload-artifact@v4
         with:
@@ -30,4 +30,4 @@ jobs:
       - name: Test network policy on kernel TCP sockets
         run: go test -race -exec sudo -count=3 -timeout=180s -run '^TestPlatform(TCPFastOpen|TFO)' -v ./common/dialer
       - name: Test Android interface binding bridge
-        run: go test -race -count=3 -run '^TestPlatformNetworkSocketBinder$' -v ./experimental/libbox
+        run: go test -race -ldflags "$(cat release/LDFLAGS)" -count=3 -run '^TestPlatformNetworkSocketBinder$' -v ./experimental/libbox

@@ -58,6 +58,7 @@ func (m *tfoNetworkManager) DefaultOptions() adapter.NetworkOptions   { return m
 func (m *tfoNetworkManager) ProtectFunc() control.Func                { return m.protect }
 func (m *tfoNetworkManager) AutoDetectInterfaceFunc() control.Func    { return m.protect }
 func (m *tfoNetworkManager) AutoRedirectOutputMarkFunc() control.Func { return nil }
+func (m *tfoNetworkManager) AutoRedirectOutputMark() uint32          { return 0 }
 func (m *tfoNetworkManager) InterfaceMonitor() tun.DefaultInterfaceMonitor {
 	return tfoInterfaceMonitor{loopback: m.loopback}
 }
