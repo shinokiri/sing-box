@@ -121,6 +121,9 @@ message Group {
   string selected = 4;
   bool isExpand = 5;
   repeated GroupItem items = 6;
+  int64 urlTestId = 7;
+  bool urlTestRunning = 8;
+  bool urlTestProgressSupported = 9;
 }
 
 message GroupItem {
@@ -128,10 +131,15 @@ message GroupItem {
   string type = 2;
   int64 urlTestTime = 3;
   int32 urlTestDelay = 4;
+  int64 urlTestId = 5;
+  // 0 idle, 1 queued, 2 running, 3 succeeded, 4 failed, 5 canceled.
+  int32 urlTestState = 6;
 }
 
 message URLTestRequest {
   string outboundTag = 1;
+  // Older clients retain the asynchronous acknowledgement behavior.
+  bool wait = 2;
 }
 
 message SelectOutboundRequest {

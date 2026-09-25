@@ -249,10 +249,10 @@ index 836d0e5..1b9abae 100644
      const val LAST_SHOWN_UPDATE_VERSION = "last_shown_update_version"
  }
 diff --git a/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
-index 20c0e7b..a91173d 100644
+index 0fd720c..4992b9d 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
-@@ -43,8 +43,8 @@ object Settings {
+@@ -42,8 +42,8 @@ object Settings {
      var startedByUser by dataStore.boolean(SettingsKey.STARTED_BY_USER)
  
      var updateSource by dataStore.string(SettingsKey.UPDATE_SOURCE) { "github" }
@@ -263,7 +263,7 @@ index 20c0e7b..a91173d 100644
      var updateTrack by dataStore.string(SettingsKey.UPDATE_TRACK) {
          val versionName = BuildConfig.VERSION_NAME.lowercase()
          if (versionName.contains("-alpha") ||
-@@ -134,6 +134,7 @@ object Settings {
+@@ -133,6 +133,7 @@ object Settings {
  
      var cachedUpdateInfo by dataStore.string(SettingsKey.CACHED_UPDATE_INFO) { "" }
      var cachedApkPath by dataStore.string(SettingsKey.CACHED_APK_PATH) { "" }
@@ -491,3 +491,327 @@ index 0000000..4b78183
 +    // A cancelled waiter must not cancel setup; failures reach every caller.
 +    suspend fun await() = initialized.await()
 +}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/model/Groups.kt b/app/src/main/java/io/nekohasekai/sfa/compose/model/Groups.kt
+index c869065..82f9772 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/model/Groups.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/model/Groups.kt
+@@ -15,6 +15,9 @@ data class Group(
+     val selected: String,
+     val isExpand: Boolean,
+     val items: List<GroupItem>,
++    val urlTestId: Long = 0,
++    val urlTestRunning: Boolean = false,
++    val urlTestProgressSupported: Boolean = true,
+ ) {
+     constructor(item: OutboundGroup) : this(
+         item.tag,
+@@ -24,6 +27,9 @@ data class Group(
+         item.selected,
+         item.isExpand,
+         item.items.toList().map { GroupItem(it) },
++        item.urlTestID,
++        item.urlTestRunning,
++        item.urlTestProgressSupported,
+     )
+ }
+ 
+@@ -34,13 +40,19 @@ data class GroupItem(
+     val displayType: String,
+     val urlTestTime: Long,
+     val urlTestDelay: Int,
++    val urlTestId: Long = 0,
++    val urlTestState: Int = UrlTestState.IDLE,
+ ) {
++    val isTesting: Boolean get() = urlTestState == UrlTestState.QUEUED || urlTestState == UrlTestState.RUNNING
++
+     constructor(item: OutboundGroupItem) : this(
+         item.tag,
+         item.type,
+         Libbox.proxyDisplayType(item.type),
+         item.urlTestTime,
+         item.urlTestDelay,
++        item.urlTestID,
++        item.urlTestState,
+     )
+ }
+ 
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/model/UrlTestProgress.kt b/app/src/main/java/io/nekohasekai/sfa/compose/model/UrlTestProgress.kt
+new file mode 100644
+index 0000000..ae5e9b6
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/model/UrlTestProgress.kt
+@@ -0,0 +1,53 @@
++package io.nekohasekai.sfa.compose.model
++
++// Wire values from daemon.GroupItem.urlTestState.
++object UrlTestState {
++    const val IDLE = 0
++    const val QUEUED = 1
++    const val RUNNING = 2
++    const val SUCCEEDED = 3
++    const val FAILED = 4
++    const val CANCELED = 5
++}
++
++// Hide old values immediately, including nested groups and nodes still queued
++// behind the concurrency limit. IDs let a coalesced final update acknowledge a
++// fast test even when the UI never received its intermediate running state.
++fun urlTestBaselines(groups: List<Group>, tag: String): Map<String, Long> {
++    if (groups.none { it.urlTestProgressSupported }) return emptyMap()
++    val ids = urlTestIds(groups)
++    val byTag = groups.associateBy { it.tag }
++    val targets = linkedMapOf<String, Long>()
++    fun collect(target: String) {
++        if (target in targets) return
++        targets[target] = ids[target] ?: 0
++        byTag[target]?.items?.forEach { collect(it.tag) }
++    }
++    collect(tag)
++    return targets
++}
++
++fun pendingUrlTests(groups: List<Group>, pending: Map<String, Long>): Map<String, Long> {
++    val ids = urlTestIds(groups)
++    return pending.filter { (tag, baseline) -> ids[tag]?.let { it <= baseline } == true }
++}
++
++fun displayUrlTestProgress(groups: List<Group>, pending: Map<String, Long>): List<Group> = if (pending.isEmpty()) groups else groups.map { group ->
++    group.copy(
++        urlTestRunning = group.urlTestRunning || group.tag in pending,
++        items = group.items.map { item ->
++            if (item.tag in pending) {
++                item.copy(urlTestDelay = 0, urlTestState = UrlTestState.QUEUED)
++            } else {
++                item
++            }
++        },
++    )
++}
++
++private fun urlTestIds(groups: List<Group>): Map<String, Long> = buildMap {
++    groups.forEach { group ->
++        put(group.tag, maxOf(get(group.tag) ?: 0, group.urlTestId))
++        group.items.forEach { item -> put(item.tag, maxOf(get(item.tag) ?: 0, item.urlTestId)) }
++    }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
+index 1db738a..3f673b0 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
+@@ -68,6 +68,8 @@ import androidx.compose.ui.unit.dp
+ import androidx.lifecycle.ViewModelProvider
+ import androidx.lifecycle.viewmodel.compose.viewModel
+ import io.nekohasekai.sfa.R
++import io.nekohasekai.sfa.compose.model.UrlTestState
++import io.nekohasekai.sfa.compose.model.displayUrlTestProgress
+ import io.nekohasekai.sfa.compat.LazyColumnCompat
+ import io.nekohasekai.sfa.compat.rememberOverscrollEffectCompat
+ import io.nekohasekai.sfa.compose.component.SnackbarHost
+@@ -219,6 +221,9 @@ private fun GroupsCardContent(
+     val scaffoldPadding = if (asSheet) PaddingValues(0.dp) else LocalScaffoldPadding.current
+     val overscrollEffect = if (asSheet) null else rememberOverscrollEffectCompat()
+     val palette = rememberUrlTestPalette()
++    val displayGroups = remember(uiState.groups, uiState.pendingTests) {
++        displayUrlTestProgress(uiState.groups, uiState.pendingTests)
++    }
+ 
+     LazyColumnCompat(
+         modifier =
+@@ -258,13 +263,13 @@ private fun GroupsCardContent(
+             }
+ 
+             else -> {
+-                uiState.groups.forEach { group ->
++                displayGroups.forEach { group ->
+                     val isExpanded = uiState.expandedGroups.contains(group.tag)
+                     val headerContent: @Composable (Modifier) -> Unit = { headerModifier ->
+                         GroupHeader(
+                             group = group,
+                             isExpanded = isExpanded,
+-                            isTesting = uiState.testingGroups.contains(group.tag),
++                            isTesting = group.urlTestRunning || uiState.testingGroups.contains(group.tag),
+                             onToggleExpanded = { onToggleExpanded(group.tag) },
+                             onUrlTest = { onUrlTest(group.tag) },
+                             modifier = headerModifier,
+@@ -493,7 +498,7 @@ private fun GroupDotsGrid(
+                     val x = (index % columns) * (dotSizePx + dotSpacingPx)
+                     val y = (index / columns) * (dotSizePx + dotSpacingPx)
+                     drawRoundRect(
+-                        color = palette.forDelay(item.urlTestDelay),
++                        color = if (item.urlTestState == UrlTestState.FAILED) palette.bad else palette.forDelay(item.urlTestDelay),
+                         topLeft = Offset(x, y),
+                         size = Size(dotSizePx, dotSizePx),
+                         cornerRadius = cornerRadius,
+@@ -621,12 +626,24 @@ private fun ProxyChip(
+                             MaterialTheme.colorScheme.onSurfaceVariant
+                         },
+                     )
+-                    if (item.urlTestDelay > 0) {
++                    val statusText = when (item.urlTestState) {
++                        UrlTestState.QUEUED -> stringResource(R.string.url_test_queued)
++                        UrlTestState.RUNNING -> stringResource(R.string.url_test_running)
++                        UrlTestState.FAILED -> stringResource(R.string.url_test_failed)
++                        UrlTestState.CANCELED -> stringResource(R.string.url_test_canceled)
++                        UrlTestState.SUCCEEDED -> "${item.urlTestDelay}ms"
++                        else -> if (item.urlTestDelay > 0) "${item.urlTestDelay}ms" else null
++                    }
++                    if (statusText != null) {
+                         Text(
+-                            text = "${item.urlTestDelay}ms",
++                            text = statusText,
+                             style = MaterialTheme.typography.labelSmall,
+                             fontWeight = FontWeight.SemiBold,
+-                            color = palette.forDelay(item.urlTestDelay),
++                            color = when {
++                                item.isTesting || item.urlTestState == UrlTestState.CANCELED -> MaterialTheme.colorScheme.onSurfaceVariant
++                                item.urlTestState == UrlTestState.FAILED -> MaterialTheme.colorScheme.error
++                                else -> palette.forDelay(item.urlTestDelay)
++                            },
+                         )
+                     }
+                 }
+@@ -639,6 +656,7 @@ private fun ProxyChip(
+             ) {
+                 DropdownMenuItem(
+                     text = { Text(stringResource(R.string.url_test)) },
++                    enabled = !item.isTesting,
+                     leadingIcon = {
+                         Icon(
+                             Icons.Default.Speed,
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt
+index 214bfa5..c0403ef 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt
+@@ -7,6 +7,8 @@ import io.nekohasekai.sfa.compose.base.ScreenEvent
+ import io.nekohasekai.sfa.compose.model.Group
+ import io.nekohasekai.sfa.compose.model.GroupItem
+ import io.nekohasekai.sfa.compose.model.toList
++import io.nekohasekai.sfa.compose.model.pendingUrlTests
++import io.nekohasekai.sfa.compose.model.urlTestBaselines
+ import io.nekohasekai.sfa.constant.Status
+ import io.nekohasekai.sfa.utils.AppLifecycleObserver
+ import io.nekohasekai.sfa.utils.CommandClient
+@@ -25,6 +27,7 @@ data class GroupsUiState(
+     val isLoading: Boolean = false,
+     val expandedGroups: Set<String> = emptySet(),
+     val testingGroups: Set<String> = emptySet(),
++    val pendingTests: Map<String, Long> = emptyMap(),
+     val showCloseConnectionsSnackbar: Boolean = false,
+ )
+ 
+@@ -109,6 +112,8 @@ class GroupsViewModel(private val sharedCommandClient: CommandClient? = null) :
+             updateState {
+                 copy(
+                     groups = emptyList(),
++                    testingGroups = emptySet(),
++                    pendingTests = emptyMap(),
+                     isLoading = false,
+                 )
+             }
+@@ -223,27 +228,26 @@ class GroupsViewModel(private val sharedCommandClient: CommandClient? = null) :
+         }
+     }
+ 
+-    fun urlTest(outboundTag: String) {
+-        viewModelScope.launch(Dispatchers.IO) {
+-            try {
+-                CommandTarget.standaloneClient().urlTest(outboundTag)
+-            } catch (e: Exception) {
+-                sendError(e)
+-            }
+-        }
+-    }
++    fun urlTest(outboundTag: String) = urlTestGroup(outboundTag)
+ 
+     fun urlTestGroup(groupTag: String) {
+-        updateState { copy(testingGroups = testingGroups + groupTag) }
+-        viewModelScope.launch(Dispatchers.IO) {
++        if (groupTag in uiState.value.testingGroups || groupTag in uiState.value.pendingTests ||
++            uiState.value.groups.any { it.tag == groupTag && it.urlTestRunning }
++        ) return
++        val baselines = urlTestBaselines(uiState.value.groups, groupTag)
++        updateState {
++            copy(testingGroups = testingGroups + groupTag, pendingTests = pendingTests + baselines)
++        }
++        viewModelScope.launch {
+             try {
+-                CommandTarget.standaloneClient().urlTest(groupTag)
++                withContext(Dispatchers.IO) {
++                    CommandTarget.standaloneClient().urlTestAndWait(groupTag)
++                }
+             } catch (e: Exception) {
++                updateState { copy(pendingTests = pendingTests - baselines.keys) }
+                 sendError(e)
+             } finally {
+-                withContext(Dispatchers.Main) {
+-                    updateState { copy(testingGroups = testingGroups - groupTag) }
+-                }
++                updateState { copy(testingGroups = testingGroups - groupTag) }
+             }
+         }
+     }
+@@ -260,6 +264,8 @@ class GroupsViewModel(private val sharedCommandClient: CommandClient? = null) :
+             updateState {
+                 copy(
+                     groups = emptyList(),
++                    testingGroups = emptySet(),
++                    pendingTests = emptyMap(),
+                     isLoading = false,
+                 )
+             }
+@@ -267,7 +273,7 @@ class GroupsViewModel(private val sharedCommandClient: CommandClient? = null) :
+     }
+ 
+     override fun updateGroups(newGroups: MutableList<OutboundGroup>) {
+-        viewModelScope.launch(Dispatchers.Default) {
++        viewModelScope.launch {
+             val currentGroups = uiState.value.groups
+             val currentByTag = currentGroups.associateBy { it.tag }
+             val mergedGroups = newGroups.map { goGroup ->
+@@ -285,6 +291,7 @@ class GroupsViewModel(private val sharedCommandClient: CommandClient? = null) :
+                     }
+                     copy(
+                         groups = if (mergedGroups == groups) groups else mergedGroups,
++                        pendingTests = pendingUrlTests(mergedGroups, pendingTests),
+                         expandedGroups = initialExpandedGroups,
+                         isLoading = false,
+                     )
+diff --git a/app/src/main/res/values-zh-rCN/url_test_progress.xml b/app/src/main/res/values-zh-rCN/url_test_progress.xml
+new file mode 100644
+index 0000000..a6a69d2
+--- /dev/null
++++ b/app/src/main/res/values-zh-rCN/url_test_progress.xml
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="url_test_queued">等待中</string>
++    <string name="url_test_running">测试中</string>
++    <string name="url_test_failed">失败</string>
++    <string name="url_test_canceled">已取消</string>
++</resources>
+diff --git a/app/src/main/res/values-zh-rTW/url_test_progress.xml b/app/src/main/res/values-zh-rTW/url_test_progress.xml
+new file mode 100644
+index 0000000..da2dc61
+--- /dev/null
++++ b/app/src/main/res/values-zh-rTW/url_test_progress.xml
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="url_test_queued">等待中</string>
++    <string name="url_test_running">測試中</string>
++    <string name="url_test_failed">失敗</string>
++    <string name="url_test_canceled">已取消</string>
++</resources>
+diff --git a/app/src/main/res/values/url_test_progress.xml b/app/src/main/res/values/url_test_progress.xml
+new file mode 100644
+index 0000000..c08ad1b
+--- /dev/null
++++ b/app/src/main/res/values/url_test_progress.xml
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="url_test_queued">Queued</string>
++    <string name="url_test_running">Testing…</string>
++    <string name="url_test_failed">Failed</string>
++    <string name="url_test_canceled">Canceled</string>
++</resources>

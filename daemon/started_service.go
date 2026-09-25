@@ -601,6 +601,10 @@ func (s *StartedService) readGroups() *Groups {
 		var g Group
 		g.Tag = iGroup.Tag()
 		g.Type = iGroup.Type()
+		progress := historyStorage.LoadTestStatus(g.Tag)
+		g.UrlTestId = progress.ID
+		g.UrlTestRunning = progress.Pending()
+		g.UrlTestProgressSupported = true
 		_, g.Selectable = iGroup.(*group.Selector)
 		if selected := iGroup.Selected(N.NetworkTCP); selected != nil {
 			g.Selected = selected.Tag()
@@ -620,9 +624,15 @@ func (s *StartedService) readGroups() *Groups {
 			var item GroupItem
 			item.Tag = itemTag
 			item.Type = itemOutbound.Type()
-			if history := historyStorage.LoadURLTestHistory(group.RealTag(itemOutbound, N.NetworkTCP)); history != nil {
-				item.UrlTestTime = history.Time.Unix()
-				item.UrlTestDelay = int32(history.Delay)
+			realTag := group.RealTag(itemOutbound, N.NetworkTCP)
+			progress, history := historyStorage.LoadTestResult(itemTag, realTag)
+			item.UrlTestId = progress.ID
+			item.UrlTestState = progress.State
+			if !progress.Pending() && progress.State != urltest.TestCanceled && progress.State != urltest.TestFailed {
+				if history != nil {
+					item.UrlTestTime = history.Time.Unix()
+					item.UrlTestDelay = int32(history.Delay)
+				}
 			}
 			g.Items = append(g.Items, &item)
 		}
@@ -728,28 +738,44 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 		return nil, status.Error(codes.NotFound, "outbound not found: "+outboundTag)
 	}
 	historyStorage := boxService.urlTestHistoryStorage
-	urlTest, isURLTest := outbound.(*group.URLTest)
-	outboundGroup, isOutboundGroup := outbound.(adapter.OutboundGroup)
-	if isURLTest {
-		go urlTest.CheckOutbounds()
-	} else if isOutboundGroup {
-		outbounds := common.FilterNotNil(common.Map(outboundGroup.All(), func(it string) adapter.Outbound {
-			itOutbound, _ := boxService.outboundManager.Outbound(it)
-			return itOutbound
-		}))
-		go group.URLTestOutbounds(boxService.ctx, boxService.outboundManager, historyStorage, boxService.logFactory.Logger(), outbounds, "", 0, true)
-	} else {
+	targets := urlTestTargets(boxService.outboundManager, outbound)
+	testBatch, owner := historyStorage.BeginTestBatch(outboundTag, targets)
+	if owner {
 		go func() {
-			t, err := urltest.URLTest(boxService.ctx, "", outbound)
-			if err != nil {
-				historyStorage.DeleteURLTestHistory(outboundTag)
+			defer testBatch.Complete()
+			testCtx := testBatch.Context(boxService.ctx)
+			urltest.TestStarted(testCtx, outboundTag)
+			if urlTest, ok := outbound.(*group.URLTest); ok {
+				_, err := urlTest.URLTest(testCtx)
+				urltest.TestFinished(testCtx, outboundTag, 0, err)
+			} else if outboundGroup, ok := outbound.(adapter.OutboundGroup); ok {
+				outbounds := common.FilterNotNil(common.Map(outboundGroup.All(), func(it string) adapter.Outbound {
+					itOutbound, _ := boxService.outboundManager.Outbound(it)
+					return itOutbound
+				}))
+				group.URLTestOutbounds(testCtx, boxService.outboundManager, historyStorage, boxService.logFactory.Logger(), outbounds, "", 0, true)
+				urltest.TestFinished(testCtx, outboundTag, 0, testCtx.Err())
 			} else {
-				historyStorage.StoreURLTestHistory(outboundTag, &adapter.URLTestHistory{
-					Time:  time.Now(),
-					Delay: t,
-				})
+				testCtx, cancel := context.WithTimeout(testCtx, C.TCPTimeout)
+				defer cancel()
+				delay, err := urltest.URLTest(testCtx, "", outbound)
+				if err == nil {
+					historyStorage.StoreURLTestHistory(outboundTag, &adapter.URLTestHistory{Time: time.Now(), Delay: delay})
+				} else if boxService.ctx.Err() == nil {
+					historyStorage.DeleteURLTestHistory(outboundTag)
+				}
+				urltest.TestFinished(testBatch.Context(boxService.ctx), outboundTag, delay, err)
 			}
 		}()
+	}
+	if request.Wait {
+		select {
+		case <-testBatch.Done():
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-boxService.ctx.Done():
+			return nil, boxService.ctx.Err()
+		}
 	}
 	return &emptypb.Empty{}, nil
 }

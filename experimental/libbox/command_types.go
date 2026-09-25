@@ -44,12 +44,15 @@ type SystemProxyStatus struct {
 }
 
 type OutboundGroup struct {
-	Tag        string
-	Type       string
-	Selectable bool
-	Selected   string
-	IsExpand   bool
-	itemList   []*OutboundGroupItem
+	Tag                      string
+	Type                     string
+	Selectable               bool
+	Selected                 string
+	IsExpand                 bool
+	URLTestID                int64
+	URLTestRunning           bool
+	URLTestProgressSupported bool
+	itemList                 []*OutboundGroupItem
 }
 
 func (g *OutboundGroup) GetItems() OutboundGroupItemIterator {
@@ -66,6 +69,8 @@ type OutboundGroupItem struct {
 	Type         string
 	URLTestTime  int64
 	URLTestDelay int32
+	URLTestID    int64
+	URLTestState int32
 }
 
 type OutboundGroupItemIterator interface {
@@ -337,11 +342,14 @@ func outboundGroupIteratorFromGRPC(groups *daemon.Groups) OutboundGroupIterator 
 	var libboxGroups []*OutboundGroup
 	for _, g := range groups.Group {
 		libboxGroup := &OutboundGroup{
-			Tag:        g.Tag,
-			Type:       g.Type,
-			Selectable: g.Selectable,
-			Selected:   g.Selected,
-			IsExpand:   g.IsExpand,
+			Tag:                      g.Tag,
+			Type:                     g.Type,
+			Selectable:               g.Selectable,
+			Selected:                 g.Selected,
+			IsExpand:                 g.IsExpand,
+			URLTestID:                g.UrlTestId,
+			URLTestRunning:           g.UrlTestRunning,
+			URLTestProgressSupported: g.UrlTestProgressSupported,
 		}
 		for _, item := range g.Items {
 			libboxGroup.itemList = append(libboxGroup.itemList, &OutboundGroupItem{
@@ -349,6 +357,8 @@ func outboundGroupIteratorFromGRPC(groups *daemon.Groups) OutboundGroupIterator 
 				Type:         item.Type,
 				URLTestTime:  item.UrlTestTime,
 				URLTestDelay: item.UrlTestDelay,
+				URLTestID:    item.UrlTestId,
+				URLTestState: item.UrlTestState,
 			})
 		}
 		libboxGroups = append(libboxGroups, libboxGroup)
