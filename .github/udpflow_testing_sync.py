@@ -182,6 +182,33 @@ def migration_requirements(current, base, target):
     return requirements
 
 
+def test_module_merge_base(upstream_base, target, requirements):
+    # The fork may have corrected an old upstream test pin. If upstream now
+    # aligns that pin with its core, remove only the already-reviewed version
+    # correction from the three-way delta. Other test module changes still
+    # participate in the normal merge, including adjacent dependencies.
+    path = Path("test/go.mod")
+    content = subprocess.check_output(["git", "show", f"{upstream_base}:{path}"], text=True)
+    original = content
+    for name, (previous, required) in requirements.items():
+        old_test = module_requirement(path, name, ref=upstream_base)
+        new_test = module_requirement(path, name, ref=target)
+        if old_test != previous and new_test == required and new_test != old_test:
+            content = re.sub(
+                rf"(?m)^(\s*(?:require\s+)?github\.com/sagernet/{re.escape(name)}\s+)v\S+",
+                lambda match: match[1] + previous, content,
+            )
+    if content == original:
+        return upstream_base
+    with tempfile.TemporaryDirectory() as directory:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(directory) / "index")}
+        git("read-tree", upstream_base, env=env)
+        mode = git("ls-tree", upstream_base, "--", str(path)).split()[0]
+        blob = subprocess.check_output(["git", "hash-object", "-w", "--stdin"], input=content, text=True).strip()
+        git("update-index", "--cacheinfo", f"{mode},{blob},{path}", env=env)
+        return git("write-tree", env=env)
+
+
 def migrate_module(name, directory, required):
     previous = (directory / "UPSTREAM_VERSION").read_text().strip()
     if previous == required:
@@ -225,7 +252,8 @@ def synchronize(current, selected, base):
         raise ValueError("Automatic synchronization requires a newer published testing version")
     target = selected["upstream_commit"]
     requirements = migration_requirements(current, base, target)
-    merged = merge_snapshots(current["upstream_commit"], base, target, owned_paths=(".github", str(CLIENT)))
+    merge_base = test_module_merge_base(current["upstream_commit"], target, requirements)
+    merged = merge_snapshots(merge_base, base, target, owned_paths=(".github", str(CLIENT)))
     git("read-tree", "-m", "-u", base, merged)
     git("fetch", "--no-tags", "origin", selected["android_client_commit"], cwd=CLIENT)
     git("checkout", "--detach", selected["android_client_commit"], cwd=CLIENT)

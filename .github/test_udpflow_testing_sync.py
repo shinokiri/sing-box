@@ -340,6 +340,51 @@ class SnapshotMergeTest(unittest.TestCase):
             self.assertIn("v0.2.0", self.git("show", f"HEAD:{path}", cwd=self.fork))
         self.assertEqual((self.fork / "third_party/sing-mux/UPSTREAM_VERSION").read_text(), "v0.2.0\n")
 
+    def corrected_test_pin_with_upstream_alignment(self, *, neighbor_conflict=False):
+        # Reproduce alpha.9: both upstream and the fork changed a stale test
+        # pin, and upstream also changed the immediately adjacent dependency.
+        old = "module example/test\n\nrequire (\n\tgithub.com/sagernet/sing-mux v0.0.5 // indirect\n\texample.com/neighbor v0.1.0\n)\n\nreplace github.com/sagernet/sing-mux => ../../sing-mux\n"
+        self.git("checkout", "--detach", self.current["upstream_commit"], cwd=self.core)
+        (self.core / "test/go.mod").write_text(old)
+        self.current["upstream_commit"] = self.commit(self.core, "old stale upstream test pin")
+        self.git("fetch", str(self.core), self.current["upstream_commit"], cwd=self.fork)
+        local = old.replace("sing-mux v0.0.5", "sing-mux v0.1.0").replace("../../sing-mux", "../third_party/sing-mux")
+        if neighbor_conflict:
+            local = local.replace("neighbor v0.1.0", "neighbor v0.3.0")
+        (self.fork / "test/go.mod").write_text(local)
+        (self.fork / "release/udpflow.json").write_text(json.dumps(self.current))
+        fork_commit = self.commit(self.fork, "correct stale test pin and keep local replacement")
+        tree = self.git("rev-parse", "HEAD^{tree}", cwd=self.fork)
+        self.base = self.git("commit-tree", tree, "-p", fork_commit, "-p", self.current["upstream_commit"], "-m", "retain upstream ancestry", cwd=self.fork)
+        self.git("update-ref", "HEAD", self.base, fork_commit, cwd=self.fork)
+        self.git("checkout", "--detach", self.new_core, cwd=self.core)
+        incoming = old.replace("sing-mux v0.0.5", "sing-mux v0.2.0").replace("neighbor v0.1.0", "neighbor v0.2.0")
+        (self.core / "test/go.mod").write_text(incoming)
+        self.selected["upstream_commit"] = self.commit(self.core, "align upstream test pin and update neighbor")
+        self.git("tag", "-f", "v1.15.0-alpha.7", self.selected["upstream_commit"], cwd=self.core)
+        return old, incoming.replace("../../sing-mux", "../third_party/sing-mux")
+
+    def test_upstream_alignment_of_corrected_test_pin_preserves_neighbor_and_replace(self):
+        old, expected = self.corrected_test_pin_with_upstream_alignment()
+        self.prepare()
+        self.assertEqual((self.fork / "test/go.mod").read_text(), expected)
+        self.assertEqual(self.git("show", "HEAD:test/go.mod", cwd=self.fork), expected.strip())
+        self.assertEqual(self.git("show", self.current["upstream_commit"] + ":test/go.mod", cwd=self.fork), old.strip())
+        self.assertEqual((self.fork / "third_party/sing-mux/UPSTREAM_VERSION").read_text(), "v0.2.0\n")
+        self.assertEqual((self.fork / "third_party/sing-mux/patched.go").read_text(), "fork module fix\n")
+        for parent in (self.base, self.selected["upstream_commit"]):
+            self.git("merge-base", "--is-ancestor", parent, "HEAD", cwd=self.fork)
+
+    def test_upstream_test_pin_alignment_still_rejects_neighbor_conflicts(self):
+        self.corrected_test_pin_with_upstream_alignment(neighbor_conflict=True)
+        before = (self.fork / "test/go.mod").read_text()
+        with self.assertRaisesRegex(ValueError, "patch conflict"):
+            self.prepare()
+        self.assertEqual((self.fork / "test/go.mod").read_text(), before)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.fork), self.base)
+        self.assertEqual(json.loads((self.fork / "release/udpflow.json").read_text()), self.current)
+        self.assertFalse((self.root / "udpflow-source.json").exists())
+
     def test_changed_mismatched_upstream_test_dependency_blocks_migration(self):
         (self.core / "test/go.mod").write_text("require github.com/sagernet/sing-mux v0.3.0\n")
         self.selected["upstream_commit"] = self.commit(self.core, "mismatched requirements")
