@@ -94,8 +94,17 @@ save_summary()
 subprocess.run(["git", "fetch", "--no-tags", "origin", FIX], check=True)
 fixed_file = TEMP / SOURCE_TEST
 fixed_file.write_text(output(["git", "show", f"{FIX}:third_party/sing-tun/{SOURCE_TEST}"]) + "\n")
-assert output(["gofmt", "-d", str(fixed_file)]) == ""
+format_check = subprocess.run(["gofmt", "-d", str(fixed_file)], text=True,
+    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+(RESULTS / "whole-file-gofmt.diff").write_text(format_check.stdout)
+print(f"Whole-file gofmt status={format_check.returncode}; diff preserved", flush=True)
 fixed_function = source_function(fixed_file)
+# Check the changed function independently of pre-existing file formatting.
+format_probe = "package tun\n\n" + fixed_function.decode() + "\n"
+formatted = subprocess.run(["gofmt"], input=format_probe, text=True,
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+(RESULTS / "changed-function-gofmt.go").write_text(formatted.stdout)
+assert formatted.stdout == format_probe, "The changed function needs gofmt"
 summary["fix_commit"] = FIX
 summary["fixed_sack_test_sha256"] = hashlib.sha256(fixed_function).hexdigest()
 fixed_binaries = {}
