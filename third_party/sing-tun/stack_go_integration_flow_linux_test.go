@@ -165,7 +165,8 @@ func TestGoKernelSACKReneging(t *testing.T) {
 					if event.outgoing && event.sequence == 1 && event.end > event.sequence {
 						return kernelTCPAction{drop: true}
 					}
-					// Let SACKs trigger loss recovery before the initial burst completes.
+					// Hold the fourth segment until the first retransmission. Recovery
+					// may start even before the fourth segment reaches this pause.
 					if earlyRecovery && !paused && event.outgoing && event.sequence == uint64(3*mss+1) {
 						paused = true
 						return kernelTCPAction{pause: barrier}
@@ -178,11 +179,6 @@ func TestGoKernelSACKReneging(t *testing.T) {
 					written <- err
 				}()
 				if earlyRecovery {
-					select {
-					case <-barrier.entered:
-					case <-time.After(kernelTCPTimeout):
-						test.Fatal("fourth packet did not reach the controlled pause")
-					}
 					traffic.await(test, server, "first packet retransmission before resuming the fourth", func(flow kernelTCPFlow) bool {
 						attempts := 0
 						for _, event := range flow.events {
