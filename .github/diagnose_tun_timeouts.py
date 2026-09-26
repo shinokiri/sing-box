@@ -17,7 +17,7 @@ TEMP = Path(os.environ["RUNNER_TEMP"]) / "tun-timeout-diagnosis"
 TEMP.mkdir(exist_ok=True)
 UPSTREAM = TEMP / "upstream"
 PIN = "97d11460f2ea140441219f3055e3ff00a03282ff"
-FIX = "6dc7419fdc657e044049fdb715ded95807535527"
+FIX = "f949e929e267c62844834e25c7626ef80d7e9c9d"
 FORK = ROOT / "third_party/sing-tun"
 SOURCE_TEST = "stack_go_integration_flow_linux_test.go"
 MODFILE = ROOT / "diagnostic-upstream.mod"
@@ -127,27 +127,52 @@ for variant in ("upstream", "fork"):
     run_case(fixed_binaries[variant], variant, "final-sack", "^TestGoKernelSACKReneging$", 100)
 race_binary = compile_binary("fork-fixed-race.test", "fork", race=True)
 run_case(race_binary, "fork", "final-sack-race", "^TestGoKernelSACKReneging$", 10)
+expected_passes = list(summary["results"])
 
-# A temporary mutation must be detected by the unchanged reneging/recovery
-# assertions. Restore production source immediately after compiling it.
-congestion = FORK / "stack_go_tcp_cong.go"
-original_congestion = congestion.read_text()
-reneging = "reneging := len(conn.scoreboard.entries) > 0 && conn.scoreboard.entries[0].flags&goDescriptorSacked != 0"
-assert original_congestion.count(reneging) == 1
+# Keep first-hole recovery working, but suppress retransmission of data beyond
+# that hole. The fixture must reach reneging, then fail full-payload recovery.
+retransmit = FORK / "stack_go_tcp_ack.go"
+original_retransmit = retransmit.read_text()
+signature = "func (e *goEngine) transmitRetransmit(conn *GoConn, offset uint64, length int, probe bool) int {\n"
+assert original_retransmit.count(signature) == 1
 try:
-    congestion.write_text(original_congestion.replace(reneging, "reneging := false"))
-    mutation_binary = compile_binary("fork-disabled-reneging.test", "fork")
+    retransmit.write_text(original_retransmit.replace(signature,
+        signature + "\tif offset > 1 {\n\t\treturn 0\n\t}\n"))
+    mutation_binary = compile_binary("fork-blocked-retransmission.test", "fork")
 finally:
-    congestion.write_text(original_congestion)
-run_case(mutation_binary, "fork", "disabled-reneging", "^TestGoKernelSACKReneging$", 2)
+    retransmit.write_text(original_retransmit)
+run_case(mutation_binary, "fork", "blocked-retransmission", "^TestGoKernelSACKReneging$", 2)
 
-expected_passes = summary["results"][:-1]
 mutation = summary["results"][-1]
 summary["final_patch_validated"] = all(r["exit_code"] == 0 for r in expected_passes)
 mutation_log = (RESULTS / mutation["log"]).read_text()
 summary["mutation_detected"] = (mutation["exit_code"] != 0
     and sum("/ipv6=" in line for line in mutation["failure_lines"]) == 8
     and mutation_log.count("SACK reneging: received=") == 8)
+
+# Restore only the old complete-initial-burst assumption. The final controlled
+# regression must still reproduce the original setup timeout with this change.
+test_source = FORK / SOURCE_TEST
+fixed_source = test_source.read_text()
+start = fixed_source.index("\t\t\t\tretained := goSackBlock{start:")
+end = fixed_source.index("\n\t\t\t\terr := client.SetReadBuffer(512)", start)
+old_setup = '''\t\t\t\tretained := goSackBlock{start: uint64(mss + 1), end: uint64(len(payload) + 1)}
+\t\t\t\ttraffic.await(test, server, "kernel SACK of queued out-of-order data", func(flow kernelTCPFlow) bool {
+\t\t\t\t\treturn slices.ContainsFunc(flow.events, func(event kernelTCPEvent) bool {
+\t\t\t\t\t\treturn !event.outgoing && slices.Contains(event.sacks, retained)
+\t\t\t\t\t})
+\t\t\t\t})'''
+try:
+    test_source.write_text(fixed_source[:start] + old_setup + fixed_source[end:])
+    before_binary = compile_binary("fork-original-setup.test", "fork")
+finally:
+    test_source.write_text(fixed_source)
+run_case(before_binary, "fork", "original-setup", "^TestGoKernelSACKReneging$/^early_recovery=true$", 5)
+before = summary["results"][-1]
+before_log = (RESULTS / before["log"]).read_text()
+summary["original_setup_reproduced"] = (before["exit_code"] != 0
+    and sum("/ipv6=" in line for line in before["failure_lines"]) == 10
+    and before_log.count("kernel SACK of queued out-of-order data timed out") == 10)
 
 summary["completed"] = True
 summary["note"] = "Test exit codes are evidence, not suppressed release gates. This diagnostic workflow does not build or publish an APK."
@@ -157,4 +182,5 @@ with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as report:
     for result in summary["results"]:
         report.write(f"| {result['variant']} | {result['case']} | {result['count']} | {result['exit_code']} | {result['elapsed_seconds']:.1f} |\n")
 assert summary["final_patch_validated"], "The exact final patch failed a positive test"
-assert summary["mutation_detected"], "The fixture did not detect disabled SACK-reneging recovery as expected"
+assert summary["mutation_detected"], "The fixture did not detect blocked retransmission of reneged data"
+assert summary["original_setup_reproduced"], "The final controlled regression did not reproduce the original setup timeout"

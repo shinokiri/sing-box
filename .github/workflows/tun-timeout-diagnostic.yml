@@ -19,7 +19,7 @@ jobs:
         with:
           go-version: 1.26.8
           cache: true
-      - name: Stress the final fixture, run race checks, and disable reneging recovery
+      - name: Stress the final fixture, check races, and verify regression sensitivity
         run: python3 .github/diagnose_tun_timeouts.py
       - name: Preserve every result, including expected diagnostic failures
         if: always()
