@@ -19,7 +19,7 @@ jobs:
         with:
           go-version: 1.26.8
           cache: true
-      - name: Capture engine state and validate observed SACK preparation
+      - name: Stress the final fixture, run race checks, and disable reneging recovery
         run: python3 .github/diagnose_tun_timeouts.py
       - name: Preserve every result, including expected diagnostic failures
         if: always()

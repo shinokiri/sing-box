@@ -17,6 +17,7 @@ TEMP = Path(os.environ["RUNNER_TEMP"]) / "tun-timeout-diagnosis"
 TEMP.mkdir(exist_ok=True)
 UPSTREAM = TEMP / "upstream"
 PIN = "97d11460f2ea140441219f3055e3ff00a03282ff"
+FIX = "6dc7419fdc657e044049fdb715ded95807535527"
 FORK = ROOT / "third_party/sing-tun"
 SOURCE_TEST = "stack_go_integration_flow_linux_test.go"
 MODFILE = ROOT / "diagnostic-upstream.mod"
@@ -38,9 +39,11 @@ def source_function(path):
     return data[start:end]
 
 
-def compile_binary(name, variant):
+def compile_binary(name, variant, race=False):
     binary = TEMP / name
     args = ["go", "test", "-c", "-tags", "with_gvisor", "-o", str(binary)]
+    if race:
+        args += ["-race"]
     if variant == "upstream":
         args += ["-modfile", str(MODFILE)]
     args += ["github.com/sagernet/sing-tun"]
@@ -87,22 +90,19 @@ subprocess.run(["go", "mod", "edit", "-modfile", str(MODFILE),
                 f"-replace=github.com/sagernet/sing-tun={UPSTREAM}"], check=True)
 save_summary()
 
-# Round one preserved the unchanged suites. Round two instruments only the
-# harness's existing engine-owned inspection point, leaving production intact.
-diagnostic_binaries = {}
+# Validate the exact final function, with no diagnostic harness hooks.
+subprocess.run(["git", "fetch", "--no-tags", "origin", FIX], check=True)
+fixed_file = TEMP / SOURCE_TEST
+fixed_file.write_text(output(["git", "show", f"{FIX}:third_party/sing-tun/{SOURCE_TEST}"]) + "\n")
+assert output(["gofmt", "-d", str(fixed_file)]) == ""
+fixed_function = source_function(fixed_file)
+summary["fix_commit"] = FIX
+summary["fixed_sack_test_sha256"] = hashlib.sha256(fixed_function).hexdigest()
+fixed_binaries = {}
 for variant, directory in (("upstream", UPSTREAM), ("fork", FORK)):
-    harness = directory / "stack_go_integration_tcp_test.go"
-    contents = harness.read_text()
-    anchor = "\t\tflight := conn.flight\n"
-    assert contents.count(anchor) == 1
-    harness.write_text(contents.replace(anchor,
-        '\t\tif h.config.checkpoint != nil {\n'
-        '\t\t\th.config.checkpoint("engine", conn)\n'
-        '\t\t}\n' + anchor))
-    shutil.copyfile(ROOT / ".github/tun-timeout-diagnostic_test.go",
-                    directory / "timeout_diagnostic_linux_test.go")
-    subprocess.run(["gofmt", "-w", str(directory / "timeout_diagnostic_linux_test.go")], check=True)
-    diagnostic_binaries[variant] = compile_binary(f"{variant}-diagnostic.test", variant)
+    source = directory / SOURCE_TEST
+    source.write_bytes(source.read_bytes().replace(source_function(source), fixed_function))
+    fixed_binaries[variant] = compile_binary(f"{variant}-fixed.test", variant)
     args = ["go", "list", "-m", "-f", "{{.Path}} {{.Version}} {{with .Replace}}{{.Path}} {{.Version}}{{end}}"]
     if variant == "upstream":
         args += ["-modfile", str(MODFILE)]
@@ -115,8 +115,30 @@ assert [line for line in graphs[0] if not line.startswith("github.com/sagernet/s
 summary["other_module_versions_identical"] = True
 save_summary()
 for variant in ("upstream", "fork"):
-    for case, count in (("early-recovery", 5), ("observed-sack", 50), ("observed-sack-early-recovery", 50)):
-        run_case(diagnostic_binaries[variant], variant, case, f"^TestDiagnosticSACKReneging$/^{case}$", count)
+    run_case(fixed_binaries[variant], variant, "final-sack", "^TestGoKernelSACKReneging$", 100)
+race_binary = compile_binary("fork-fixed-race.test", "fork", race=True)
+run_case(race_binary, "fork", "final-sack-race", "^TestGoKernelSACKReneging$", 10)
+
+# A temporary mutation must be detected by the unchanged reneging/recovery
+# assertions. Restore production source immediately after compiling it.
+congestion = FORK / "stack_go_tcp_cong.go"
+original_congestion = congestion.read_text()
+reneging = "reneging := len(conn.scoreboard.entries) > 0 && conn.scoreboard.entries[0].flags&goDescriptorSacked != 0"
+assert original_congestion.count(reneging) == 1
+try:
+    congestion.write_text(original_congestion.replace(reneging, "reneging := false"))
+    mutation_binary = compile_binary("fork-disabled-reneging.test", "fork")
+finally:
+    congestion.write_text(original_congestion)
+run_case(mutation_binary, "fork", "disabled-reneging", "^TestGoKernelSACKReneging$", 2)
+
+expected_passes = summary["results"][:-1]
+mutation = summary["results"][-1]
+summary["final_patch_validated"] = all(r["exit_code"] == 0 for r in expected_passes)
+mutation_log = (RESULTS / mutation["log"]).read_text()
+summary["mutation_detected"] = (mutation["exit_code"] != 0
+    and sum("/ipv6=" in line for line in mutation["failure_lines"]) == 8
+    and mutation_log.count("SACK reneging: received=") == 8)
 
 summary["completed"] = True
 summary["note"] = "Test exit codes are evidence, not suppressed release gates. This diagnostic workflow does not build or publish an APK."
@@ -125,3 +147,5 @@ with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as report:
     report.write("| Source | Case | Repetitions | Exit | Seconds |\n|---|---|---:|---:|---:|\n")
     for result in summary["results"]:
         report.write(f"| {result['variant']} | {result['case']} | {result['count']} | {result['exit_code']} | {result['elapsed_seconds']:.1f} |\n")
+assert summary["final_patch_validated"], "The exact final patch failed a positive test"
+assert summary["mutation_detected"], "The fixture did not detect disabled SACK-reneging recovery as expected"
