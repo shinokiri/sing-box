@@ -151,55 +151,100 @@ func TestGoKernelReceiveWindowUpdateLoss(t *testing.T) {
 }
 
 func TestGoKernelSACKReneging(t *testing.T) {
-	for _, ipv6 := range []bool{false, true} {
-		t.Run(fmt.Sprintf("ipv6=%v", ipv6), func(test *testing.T) {
-			test.Parallel()
-			fixture, traffic := newKernelTCPFixture(test, kernelStackConfig{mtu: 1500}, kernelTCPConfig{})
-			client, server := fixture.pair(test, ipv6)
-			traffic.setFilter(server, func(event kernelTCPEvent) kernelTCPAction {
-				return kernelTCPAction{drop: event.outgoing && event.sequence == 1 && event.end > event.sequence}
-			})
-			mss := int(server.effectiveMSS.Load())
-			payload := kernelPayload(8*mss, 137)
-			_, err := server.Write(payload)
-			if err != nil {
-				test.Fatal(err)
-			}
-			retained := goSackBlock{start: uint64(mss + 1), end: uint64(len(payload) + 1)}
-			traffic.await(test, server, "kernel SACK of queued out-of-order data", func(flow kernelTCPFlow) bool {
-				return slices.ContainsFunc(flow.events, func(event kernelTCPEvent) bool {
-					return !event.outgoing && slices.Contains(event.sacks, retained)
+	for _, earlyRecovery := range []bool{false, true} {
+		for _, ipv6 := range []bool{false, true} {
+			t.Run(fmt.Sprintf("early_recovery=%v/ipv6=%v", earlyRecovery, ipv6), func(test *testing.T) {
+				test.Parallel()
+				fixture, traffic := newKernelTCPFixture(test, kernelStackConfig{mtu: 1500}, kernelTCPConfig{})
+				client, server := fixture.pair(test, ipv6)
+				mss := int(server.effectiveMSS.Load())
+				payload := kernelPayload(8*mss, 137)
+				barrier := newKernelTCPBarrier(test)
+				paused := false
+				traffic.setFilter(server, func(event kernelTCPEvent) kernelTCPAction {
+					if event.outgoing && event.sequence == 1 && event.end > event.sequence {
+						return kernelTCPAction{drop: true}
+					}
+					// Let SACKs trigger loss recovery before the initial burst completes.
+					if earlyRecovery && !paused && event.outgoing && event.sequence == uint64(3*mss+1) {
+						paused = true
+						return kernelTCPAction{pause: barrier}
+					}
+					return kernelTCPAction{}
 				})
-			})
-			err = client.SetReadBuffer(512)
-			if err != nil {
-				test.Fatal(err)
-			}
-			traffic.setFilter(server, nil)
-			traffic.await(test, server, "kernel reneging on its SACK interval", func(flow kernelTCPFlow) bool {
-				return slices.ContainsFunc(flow.events, func(event kernelTCPEvent) bool {
-					return !event.outgoing && event.ack >= retained.start && event.ack < retained.end
+				written := make(chan error, 1)
+				go func() {
+					_, err := server.Write(payload)
+					written <- err
+				}()
+				if earlyRecovery {
+					select {
+					case <-barrier.entered:
+					case <-time.After(kernelTCPTimeout):
+						test.Fatal("fourth packet did not reach the controlled pause")
+					}
+					traffic.await(test, server, "first packet retransmission before resuming the fourth", func(flow kernelTCPFlow) bool {
+						attempts := 0
+						for _, event := range flow.events {
+							if event.outgoing && event.sequence == 1 && event.length > 0 {
+								attempts++
+							}
+						}
+						return attempts >= 2
+					})
+					barrier.once.Do(func() { close(barrier.resume) })
+				}
+				if err := kernelTCPResult(test, written, "write initial payload"); err != nil {
+					test.Fatal(err)
+				}
+				// Early recovery can consume the initial send credit while the first
+				// segment is still being dropped. Use a SACK interval the kernel has
+				// actually retained instead of requiring all eight segments to arrive.
+				// Two queued MSS suffice to exercise pruning after SO_RCVBUF shrinks.
+				retained := goSackBlock{start: uint64(mss + 1)}
+				traffic.await(test, server, "kernel SACK of queued out-of-order data", func(flow kernelTCPFlow) bool {
+					for _, event := range flow.events {
+						if event.outgoing {
+							continue
+						}
+						for _, block := range event.sacks {
+							if block.start == retained.start && block.end > retained.end {
+								retained.end = block.end
+							}
+						}
+					}
+					return retained.end >= retained.start+uint64(2*mss)
 				})
+				err := client.SetReadBuffer(512)
+				if err != nil {
+					test.Fatal(err)
+				}
+				traffic.setFilter(server, nil)
+				traffic.await(test, server, "kernel reneging on its SACK interval", func(flow kernelTCPFlow) bool {
+					return slices.ContainsFunc(flow.events, func(event kernelTCPEvent) bool {
+						return !event.outgoing && event.ack >= retained.start && event.ack < retained.end
+					})
+				})
+				err = client.SetReadBuffer(64 << 10)
+				if err != nil {
+					test.Fatal(err)
+				}
+				client.SetReadDeadline(time.Now().Add(4 * time.Second))
+				data := make([]byte, len(payload))
+				n, err := io.ReadFull(client, data)
+				if err != nil || !bytes.Equal(data, payload) {
+					test.Fatalf("SACK reneging: received=%d/%d: %v", n, len(payload), err)
+				}
+				err = server.CloseWrite()
+				if err != nil {
+					test.Fatal(err)
+				}
+				_, err = client.Read(data[:1])
+				if err != io.EOF {
+					test.Fatalf("stream end after SACK reneging: %v", err)
+				}
 			})
-			err = client.SetReadBuffer(64 << 10)
-			if err != nil {
-				test.Fatal(err)
-			}
-			client.SetReadDeadline(time.Now().Add(4 * time.Second))
-			data := make([]byte, len(payload))
-			n, err := io.ReadFull(client, data)
-			if err != nil || !bytes.Equal(data, payload) {
-				test.Fatalf("SACK reneging: received=%d/%d: %v", n, len(payload), err)
-			}
-			err = server.CloseWrite()
-			if err != nil {
-				test.Fatal(err)
-			}
-			_, err = client.Read(data[:1])
-			if err != io.EOF {
-				test.Fatalf("stream end after SACK reneging: %v", err)
-			}
-		})
+		}
 	}
 }
 
