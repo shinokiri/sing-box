@@ -13,8 +13,10 @@ import (
 )
 
 func TestDiagnosticSACKReneging(t *testing.T) {
-	for _, mode := range []string{"natural", "early-recovery", "gate-sacks"} {
+	for _, mode := range []string{"natural", "early-recovery", "gate-sacks", "observed-sack", "observed-sack-early-recovery"} {
 		t.Run(mode, func(modeTest *testing.T) {
+			earlyRecovery := mode == "early-recovery" || mode == "observed-sack-early-recovery"
+			observedSACK := mode == "observed-sack" || mode == "observed-sack-early-recovery"
 			for _, ipv6 := range []bool{false, true} {
 				modeTest.Run(fmt.Sprintf("ipv6=%v", ipv6), func(test *testing.T) {
 					test.Parallel()
@@ -24,9 +26,9 @@ func TestDiagnosticSACKReneging(t *testing.T) {
 						if conn == nil {
 							return
 						}
-						// Congestion hooks run on the owning engine. Copy its state
+						// Harness and congestion hooks run on the owning engine. Copy its state
 						// here rather than reading non-atomic fields from the test.
-						state := fmt.Sprintf("phase=%s state=%d cwnd=%d ssthresh=%d flight=%+v peerWindow=%d unacked=%d sent=%d buffered=%d permit=%d packetPermit=%d", phase, conn.congestionState, conn.congestionWindow, conn.slowStartThreshold, conn.flight, conn.peerWindow, conn.sendUnacked.Load(), conn.sentTail.Load(), conn.bufferedTail.Load(), conn.sendPermit.Load(), conn.sendPacketPermit.Load())
+						state := fmt.Sprintf("phase=%s state=%d cwnd=%d ssthresh=%d flight=%+v peerWindow=%d unacked=%d sent=%d buffered=%d permit=%d packetPermit=%d reductionDelivered=%d reductionOut=%d retransmits=%d reneging=%v", phase, conn.congestionState, conn.congestionWindow, conn.slowStartThreshold, conn.flight, conn.peerWindow, conn.sendUnacked.Load(), conn.sentTail.Load(), conn.bufferedTail.Load(), conn.sendPermit.Load(), conn.sendPacketPermit.Load(), conn.reductionDelivered, conn.reductionOut(), conn.retransmitAttempts, conn.sackReneging)
 						traceAccess.Lock()
 						if len(trace) == 0 || trace[len(trace)-1] != state {
 							if len(trace) == 48 {
@@ -59,7 +61,7 @@ func TestDiagnosticSACKReneging(t *testing.T) {
 						if event.outgoing && event.sequence == 1 && event.end > event.sequence {
 							return kernelTCPAction{drop: true}
 						}
-						if mode == "early-recovery" && !paused && event.outgoing && event.sequence == uint64(3*mss+1) {
+						if earlyRecovery && !paused && event.outgoing && event.sequence == uint64(3*mss+1) {
 							paused = true
 							return kernelTCPAction{pause: barrier}
 						}
@@ -70,7 +72,7 @@ func TestDiagnosticSACKReneging(t *testing.T) {
 						_, err := server.Write(payload)
 						written <- err
 					}()
-					if mode == "early-recovery" {
+					if earlyRecovery {
 						select {
 						case <-barrier.entered:
 						case <-time.After(kernelTCPTimeout):
@@ -91,11 +93,27 @@ func TestDiagnosticSACKReneging(t *testing.T) {
 						test.Fatal(err)
 					}
 					retained := goSackBlock{start: uint64(mss + 1), end: uint64(len(payload) + 1)}
+					if observedSACK {
+						retained.end = retained.start
+					}
 					traffic.await(test, server, "kernel SACK of queued out-of-order data", func(flow kernelTCPFlow) bool {
+						if observedSACK {
+							for _, event := range flow.events {
+								if !event.outgoing {
+									for _, block := range event.sacks {
+										if block.start == retained.start && block.end > retained.end {
+											retained.end = block.end
+										}
+									}
+								}
+							}
+							return retained.end-retained.start >= uint64(2*mss)
+						}
 						return slices.ContainsFunc(flow.events, func(event kernelTCPEvent) bool {
 							return !event.outgoing && slices.Contains(event.sacks, retained)
 						})
 					})
+					test.Logf("initial SACK interval=%+v MSS=%d", retained, mss)
 					if err := client.SetReadBuffer(512); err != nil {
 						test.Fatal(err)
 					}

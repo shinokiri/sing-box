@@ -87,12 +87,18 @@ subprocess.run(["go", "mod", "edit", "-modfile", str(MODFILE),
                 f"-replace=github.com/sagernet/sing-tun={UPSTREAM}"], check=True)
 save_summary()
 
-# Compile both original suites before adding any instrumentation.
-binaries = {variant: compile_binary(f"{variant}-original.test", variant)
-            for variant in ("upstream", "fork")}
-# Only a new test file is added; original production and test files stay intact.
+# Round one preserved the unchanged suites. Round two instruments only the
+# harness's existing engine-owned inspection point, leaving production intact.
 diagnostic_binaries = {}
 for variant, directory in (("upstream", UPSTREAM), ("fork", FORK)):
+    harness = directory / "stack_go_integration_tcp_test.go"
+    contents = harness.read_text()
+    anchor = "\t\tflight := conn.flight\n"
+    assert contents.count(anchor) == 1
+    harness.write_text(contents.replace(anchor,
+        '\t\tif h.config.checkpoint != nil {\n'
+        '\t\t\th.config.checkpoint("engine", conn)\n'
+        '\t\t}\n' + anchor))
     shutil.copyfile(ROOT / ".github/tun-timeout-diagnostic_test.go",
                     directory / "timeout_diagnostic_linux_test.go")
     subprocess.run(["gofmt", "-w", str(directory / "timeout_diagnostic_linux_test.go")], check=True)
@@ -109,12 +115,7 @@ assert [line for line in graphs[0] if not line.startswith("github.com/sagernet/s
 summary["other_module_versions_identical"] = True
 save_summary()
 for variant in ("upstream", "fork"):
-    run_case(binaries[variant], variant, "original-sack", "^TestGoKernelSACKReneging$", 100)
-for variant in ("upstream", "fork"):
-    run_case(binaries[variant], variant, "original-flowcontrol",
-             "^TestGoKernelFlowControl$/^mtu=65535$/^gso=false$/^mq=false$", 25)
-for variant in ("upstream", "fork"):
-    for case, count in (("natural", 30), ("early-recovery", 10), ("gate-sacks", 30)):
+    for case, count in (("early-recovery", 5), ("observed-sack", 50), ("observed-sack-early-recovery", 50)):
         run_case(diagnostic_binaries[variant], variant, case, f"^TestDiagnosticSACKReneging$/^{case}$", count)
 
 summary["completed"] = True
