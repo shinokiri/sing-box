@@ -35,7 +35,7 @@ index d90e2c7..53f3226 100644
 +internal fun cachedApkForUrl(file: File?, cachedUrl: String, requestedUrl: String): File? =
 +    file?.takeIf { cachedUrl == requestedUrl && it.isFile && it.length() > 0 }
 diff --git a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
-index ab0c1c2..eb60662 100644
+index a302977..48a4201 100644
 --- a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
 +++ b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
 @@ -1,6 +1,5 @@
@@ -55,33 +55,43 @@ index ab0c1c2..eb60662 100644
          private const val METADATA_FILENAME = "SFA-version-metadata.json"
      }
  
-@@ -25,48 +25,14 @@ class GitHubUpdateChecker : Closeable {
+@@ -25,49 +25,22 @@ class GitHubUpdateChecker : Closeable {
  
      private val json = Json { ignoreUnknownKeys = true }
  
 -    fun checkUpdate(track: UpdateTrack, githubToken: String): UpdateInfo? {
--        val releases = getReleases(githubToken)
--        var selected: ReleaseCandidate? = null
--
--        for (release in releases) {
--            if (!isReleaseInTrack(release, track)) {
--                continue
--            }
--            val metadata = runCatching { downloadMetadata(release) }.getOrNull() ?: continue
--            if (!isNewerThanCurrent(metadata.versionName)) {
--                continue
--            }
--            val currentBest = selected
--            if (currentBest == null || isBetterVersion(metadata, currentBest.metadata)) {
--                selected = ReleaseCandidate(release, metadata)
--            }
 +    fun checkUpdate(track: UpdateTrack, githubToken: String): UpdateInfo? =
 +        selectUdpflowUpdate(getUdpflowReleases(track) { getReleaseFeed(it, githubToken) }, track, BuildConfig.VERSION_CODE) { release ->
 +            runCatching { downloadMetadata(release) }.getOrNull()
++        }
++
++    private fun getReleaseFeed(url: String, githubToken: String): String {
+         val request = client.newRequest()
+-        request.setURL(
+-            when (track) {
+-                UpdateTrack.STABLE -> "$RELEASES_URL/latest"
+-                UpdateTrack.BETA -> "$RELEASES_URL?per_page=3"
+-            },
+-        )
++        request.setURL(url)
+         request.setHeader("Accept", "application/vnd.github+json")
+         val token = githubToken.trim()
+         if (token.isNotEmpty()) {
+             request.setHeader("Authorization", "Bearer $token")
          }
- 
--        val release = selected?.release ?: return null
--        val metadata = selected.metadata
+         request.setUserAgent(HTTPClient.userAgent)
+-        val content = request.execute().content.unwrap
+-        val releases = when (track) {
+-            UpdateTrack.STABLE -> listOf(json.decodeFromString<GitHubRelease>(content))
+-            UpdateTrack.BETA -> json.decodeFromString<List<GitHubRelease>>(content)
+-        }
+-        val release = releases.filter { !it.draft }.reduceOrNull { best, candidate ->
+-            if (Libbox.compareSemver(candidate.version, best.version)) candidate else best
+-        } ?: return null
+-        if (!Libbox.compareSemver(release.version, BuildConfig.VERSION_NAME)) {
+-            return null
+-        }
+-        val metadata = downloadMetadata(release) ?: return null
 -
 -        val isLegacy = Build.VERSION.SDK_INT < Build.VERSION_CODES.M
 -        val apkAsset = release.assets.find { asset ->
@@ -89,68 +99,38 @@ index ab0c1c2..eb60662 100644
 -                !asset.name.contains("play") &&
 -                asset.name.contains("legacy-android-5") == isLegacy
 -        }
--
+ 
 -        return UpdateInfo(
 -            versionCode = metadata.versionCode,
--            versionName = metadata.versionName,
+-            versionName = release.version,
 -            downloadUrl = apkAsset?.browserDownloadUrl ?: release.htmlUrl,
 -            releaseUrl = release.htmlUrl,
 -            releaseNotes = release.body,
 -            isPrerelease = release.prerelease,
 -            fileSize = apkAsset?.size ?: 0,
 -        )
--    }
--
--    private fun getReleases(githubToken: String): List<GitHubRelease> {
-+    private fun getReleaseFeed(url: String, githubToken: String): String {
-         val request = client.newRequest()
--        request.setURL(RELEASES_URL)
-+        request.setURL(url)
-         request.setHeader("Accept", "application/vnd.github.v3+json")
-         val token = githubToken.trim()
-         if (token.isNotEmpty()) {
-@@ -74,32 +40,7 @@ class GitHubUpdateChecker : Closeable {
-         }
-         request.setUserAgent(HTTPClient.userAgent)
- 
--        val response = request.execute()
--        val content = response.content.unwrap
--
--        return json.decodeFromString(content)
--    }
--
--    private fun isReleaseInTrack(release: GitHubRelease, track: UpdateTrack): Boolean {
--        if (release.draft) {
--            return false
--        }
--        return when (track) {
--            UpdateTrack.STABLE -> !release.prerelease
--            UpdateTrack.BETA -> true
--        }
--    }
--
--    private fun isNewerThanCurrent(versionName: String): Boolean = Libbox.compareSemver(versionName, BuildConfig.VERSION_NAME)
--
--    private fun isBetterVersion(version: VersionMetadata, other: VersionMetadata): Boolean {
--        if (Libbox.compareSemver(version.versionName, other.versionName)) {
--            return true
--        }
--        if (Libbox.compareSemver(other.versionName, version.versionName)) {
--            return false
--        }
--        return version.versionCode > other.versionCode
 +        return request.execute().content.unwrap
      }
-
-     private fun downloadMetadata(release: GitHubRelease): VersionMetadata? {
-@@ -144,8 +85,45 @@ class GitHubUpdateChecker : Closeable {
-         @SerialName("version_name") val versionName: String = "",
-     )
  
--    private data class ReleaseCandidate(
--        val release: GitHubRelease,
--        val metadata: VersionMetadata,
--    )
+     private fun downloadMetadata(release: GitHubRelease): VersionMetadata? {
+@@ -97,9 +70,7 @@ class GitHubUpdateChecker : Closeable {
+         val prerelease: Boolean = false,
+         @SerialName("html_url") val htmlUrl: String = "",
+         val assets: List<GitHubAsset> = emptyList(),
+-    ) {
+-        val version: String get() = tagName.removePrefix("v")
+-    }
++    )
+ 
+     @Serializable
+     data class GitHubAsset(
+@@ -111,5 +82,48 @@ class GitHubUpdateChecker : Closeable {
+     @Serializable
+     data class VersionMetadata(
+         @SerialName("version_code") val versionCode: Int = 0,
++        @SerialName("version_name") val versionName: String = "",
+     )
++
 +}
 +
 +// A stable check uses the published latest release, so its request count does
