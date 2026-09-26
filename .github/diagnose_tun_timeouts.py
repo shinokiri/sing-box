@@ -100,7 +100,7 @@ format_check = subprocess.run(["gofmt", "-d", str(fixed_file)], text=True,
 print(f"Whole-file gofmt status={format_check.returncode}; diff preserved", flush=True)
 fixed_function = source_function(fixed_file)
 # Check the changed function independently of pre-existing file formatting.
-format_probe = "package tun\n\n" + fixed_function.decode() + "\n"
+format_probe = "package tun\n\n" + fixed_function.decode().rstrip() + "\n"
 formatted = subprocess.run(["gofmt"], input=format_probe, text=True,
     stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 (RESULTS / "changed-function-gofmt.go").write_text(formatted.stdout)
