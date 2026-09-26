@@ -1,7 +1,7 @@
 # Local sing-tun patches
 
-Upstream source: v0.9.4-0.20260917142847-fbc0c3dff312, as required by the
-sing-box v1.15.0-alpha.6 (8330820fa62505f9574e4c35cd969d9af6eb7769).
+Upstream source: v0.9.6-0.20260925112405-97d11460f2ea, as required by
+sing-box v1.15.0-alpha.9 (132b38e9caaba1a1959354d518e54d2d08419afe).
 
 The fork retains bounded asynchronous first-flow routing, fixed DNS failure
 retry deadlines, writeback outside the flow-table lock, selector cancellation,
@@ -43,3 +43,10 @@ Linux kernel fixtures use keepalive probe intervals above the default 500 ms
 invalid-ACK rate limit. The netlink overrun fixture fills its socket before
 starting the reader so it deterministically exercises overflow recovery;
 production keepalive and network-monitor behavior are unchanged by these tests.
+
+The Linux SACK-reneging fixture uses an observed kernel SACK interval with at
+least two queued MSS. Requiring the whole initial burst could deadlock its
+setup when early SACKs started loss recovery while the fixture kept dropping
+the first segment. A controlled fourth-segment pause covers that ordering in
+IPv4 and IPv6. The test still requires actual kernel reneging, complete payload
+recovery, and EOF, with the existing deadlines. This changes only test setup.
