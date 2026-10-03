@@ -1,6 +1,6 @@
 # Local sing-mux patch
 
-Source: `github.com/sagernet/sing-mux` **v0.3.7-0.20260905054442-91d1502591ce**, pinned by upstream testing.
+Source: `github.com/sagernet/sing-mux` **v0.3.10-0.20260929204512-caf09fe32475**, pinned by sing-box v1.15.0-alpha.10.
 The Go sources, module files, and upstream license are copied unchanged except
 for `h2mux_conn.go` and `h2mux.go`.
 
@@ -16,7 +16,10 @@ all callers. Closing also releases an HTTP handler whose stream has not yet
 been accepted, instead of leaving it blocked on the inbound channel.
 `h2mux_test.go` covers concurrent closes and an unaccepted stream.
 
-The pinned upstream source still needs the response publication and idempotent server close fixes. The local
+Upstream now closes the server's `done` channel once and releases an unaccepted
+stream. The fork additionally closes the underlying connection once and shares
+its result across callers. The response publication fix remains local, and
+upstream's new protocol input validation is retained unchanged. The local
 module replacement lets regular Go, gomobile, and CI builds use the same fix
 without modifying the module cache or adding build-time patch commands.
 The separate `test/` module repeats the replacement because Go does not inherit
@@ -25,3 +28,9 @@ CI checks both modules' required versions against `UPSTREAM_VERSION`, so an
 upstream dependency update requires rebasing this patch before publishing.
 Remove the replacement and this directory when an upstream release includes
 the fix, keeping the regressions in `protocol/vless`.
+
+Alpha.10's test module pins the earlier `0257b84c582a` snapshot while the core
+requires `caf09fe32475`. Their difference is limited to the protocol input checks
+and HTTP/2 server-close fixes described above. After reviewing those changes,
+both fork modules use the core version. Automatic synchronization still rejects
+new, unreviewed disagreements between upstream's core and test module pins.

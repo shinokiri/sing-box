@@ -13,7 +13,6 @@ import (
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing-tun/gtcpip/header"
-	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/json/badoption"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -68,7 +67,9 @@ func TestOutboundFlowConnectTimeout(t *testing.T) {
 						})
 					}
 					require.NoError(t, err)
-					defer common.Close(outbound)
+					scope := adapter.NewScope(ctx, logger.NOP())
+					defer scope.Close()
+					require.NoError(t, scope.Start("outbound", outbound.(adapter.Lifecycle), adapter.StartStateInitialize))
 					port := outbound.(tun.Port)
 					address, _ := port.PortAddresses()
 					packet := make([]byte, header.IPv4MinimumSize+header.UDPMinimumSize+1)
@@ -77,6 +78,8 @@ func TestOutboundFlowConnectTimeout(t *testing.T) {
 					header.UDP(ip.Payload()).Encode(&header.UDPFields{SrcPort: 50000, DstPort: 443, Length: header.UDPMinimumSize + 1})
 					require.NoError(t, port.WritePackets([][]byte{packet}))
 					require.Equal(t, timeout, <-detour.elapsed, "flow setup must honor connect_timeout")
+					require.NoError(t, scope.Close())
+					require.ErrorIs(t, port.WritePackets([][]byte{packet}), net.ErrClosed, "scope shutdown must close the UDP flow port")
 				})
 			})
 		}

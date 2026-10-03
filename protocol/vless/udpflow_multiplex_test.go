@@ -62,7 +62,7 @@ func TestXUDPFlowWithTCPMultiplex(t *testing.T) {
 			})
 			require.NoError(t, err)
 			inbound := inboundRaw.(*Inbound)
-			defer inbound.Close()
+			defer inbound.listener.Close()
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
 			defer listener.Close()
@@ -85,7 +85,9 @@ func TestXUDPFlowWithTCPMultiplex(t *testing.T) {
 			})
 			require.NoError(t, err)
 			outbound := outboundRaw.(*Outbound)
-			defer outbound.Close()
+			scope := adapter.NewScope(ctx, logger.NOP())
+			defer scope.Close()
+			require.NoError(t, outbound.Start(adapter.StartStateInitialize, scope))
 			destination := M.ParseSocksaddr("203.0.113.1:443")
 			var streams []net.Conn
 			ping := func(conn net.Conn) {

@@ -253,10 +253,13 @@ func (h *Outbound) CloseIdleConnections() {
 	h.client.CloseIdleConnections()
 }
 
-func (h *Outbound) Close() error {
-	var flowErr error
-	if h.flowPort != nil {
-		flowErr = h.flowPort.Close()
+func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if stage != adapter.StartStateInitialize {
+		return nil
 	}
-	return E.Errors(flowErr, h.client.Close())
+	scope.Add(h.client.Close)
+	if h.flowPort != nil {
+		scope.Add(h.flowPort.Close)
+	}
+	return nil
 }

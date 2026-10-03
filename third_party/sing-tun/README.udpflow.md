@@ -1,7 +1,7 @@
 # Local sing-tun patches
 
-Upstream source: v0.9.6-0.20260925112405-97d11460f2ea, as required by
-sing-box v1.15.0-alpha.9 (132b38e9caaba1a1959354d518e54d2d08419afe).
+Upstream source: v0.9.7-0.20261002083955-3f8acd9da65b, as required by
+sing-box v1.15.0-alpha.10 (c992297988288565a24a6d36e2cf4d77cb835fcd).
 
 The fork retains bounded asynchronous first-flow routing, fixed DNS failure
 retry deadlines, writeback outside the flow-table lock, selector cancellation,
@@ -50,3 +50,10 @@ setup when early SACKs started loss recovery while the fixture kept dropping
 the first segment. A controlled fourth-segment pause covers that ordering in
 IPv4 and IPv6. The test still requires actual kernel reneging, complete payload
 recovery, and EOF, with the existing deadlines. This changes only test setup.
+
+The alpha.10 update retains upstream's allocation-free address checksum paths,
+combined NAT checksum updates, UDP zero-checksum correction, transport input
+validation, MSS bounds, and handling of data received after FIN. These changes
+also apply to the fork's asynchronous dispatcher; the new address-family guard
+remains ahead of flow creation. The SACK fixture and window-edge ACK regression
+remain unchanged by this update.

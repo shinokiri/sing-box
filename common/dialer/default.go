@@ -199,7 +199,10 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 	} else {
 		udpFragment = options.UDPFragmentDefault
 	}
-	if !udpFragment {
+	if udpFragment {
+		dialer.Control = control.Append(dialer.Control, control.EnableUDPFragment())
+		listenConfig.Control = control.Append(listenConfig.Control, control.EnableUDPFragment())
+	} else {
 		dialer.Control = control.Append(dialer.Control, control.DisableUDPFragment())
 		listenConfig.Control = control.Append(listenConfig.Control, control.DisableUDPFragment())
 	}
@@ -440,6 +443,15 @@ func (d *DefaultDialer) UDPListenerControl() (control.Func, bool) {
 func (d *DefaultDialer) trackConn(ctx context.Context, destination M.Socksaddr, conn net.Conn, err error) (net.Conn, error) {
 	if err != nil {
 		return conn, err
+	}
+	if nativeConn, isUDPConn := conn.(*net.UDPConn); isUDPConn {
+		var rawConn syscall.RawConn
+		rawConn, err = nativeConn.SyscallConn()
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		conn = &udpConn{Conn: conn, rawConn: rawConn}
 	}
 	if d.connectionManager != nil {
 		conn = d.connectionManager.TrackConn(conn)

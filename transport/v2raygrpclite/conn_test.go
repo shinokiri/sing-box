@@ -1,8 +1,11 @@
 package v2raygrpclite
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
+	"math"
 	"net"
 	"strings"
 	"testing"
@@ -10,6 +13,22 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestGunConnLargeDeclaredLength(t *testing.T) {
+	frame := binary.AppendUvarint(make([]byte, 6), math.MaxUint64)
+	frame = append(frame, "abc"...)
+	conn := newGunConn(bytes.NewReader(frame), io.Discard, nil)
+	defer conn.Close()
+	for _, expected := range []byte("abc") {
+		payload := make([]byte, 1)
+		n, err := conn.Read(payload)
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+		require.Equal(t, expected, payload[0])
+	}
+	_, err := conn.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF)
+}
 
 func TestLateGunConnCloseBeforeSetup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

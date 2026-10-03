@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/database64128/tfo-go/v2"
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
 	C "github.com/sagernet/sing-box/constant"
 	boxDNS "github.com/sagernet/sing-box/dns"
@@ -71,7 +72,11 @@ func TestUDPOverSnellTFODialContext(t *testing.T) {
 			}
 			transport := NewUDPRaw(logger.NOP(), boxDNS.NewTransportAdapter(C.DNSTypeUDP, "real-dns", nil),
 				transportDialer, M.ParseSocksaddr("127.0.0.53:53"))
-			defer transport.Close()
+			scope := adapter.NewScope(context.Background(), logger.NOP())
+			defer scope.Close()
+			if err := transport.Start(adapter.StartStateStart, scope); err != nil {
+				t.Fatal(err)
+			}
 			for index := 0; index < 3; index++ {
 				if index == 2 {
 					transport.Reset()
