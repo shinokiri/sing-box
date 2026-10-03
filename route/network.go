@@ -40,12 +40,12 @@ type NetworkManager struct {
 	router                  adapter.Router
 	interfaceFinder         *control.DefaultInterfaceFinder
 	networkInterfaces       common.TypedValue[[]adapter.NetworkInterface]
-	networkTFOPolicy         bool
-	networkTFOAccess         sync.Mutex
-	networkTFOState          atomic.Pointer[adapter.NetworkTFOState]
+	networkTFOPolicy        bool
+	networkTFOAccess        sync.Mutex
+	networkTFOState         atomic.Pointer[adapter.NetworkTFOState]
 	autoDetectInterface     bool
 	defaultOptions          adapter.NetworkOptions
-	autoRedirectOutputMark   uint32
+	autoRedirectOutputMark  uint32
 	bridgeInterfaceAccess   sync.Mutex
 	bridgeInterfaces        []string
 	networkMonitor          tun.NetworkUpdateMonitor
