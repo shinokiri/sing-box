@@ -68,20 +68,21 @@ func TestFakeIPKnownEmptyAfterMetadataFlush(t *testing.T) {
 func TestFakeIPReadsPersistedMappingAfterReopen(t *testing.T) {
 	for _, text := range []string{"198.18.0.21", "fc00::21"} {
 		t.Run(text, func(t *testing.T) {
-			cache := newFakeIPTestCache(t)
+			cache, scope := newFakeIPTestCacheWithScope(t)
 			address := netip.MustParseAddr(text)
 			if err := cache.FakeIPStore(address, "persisted.example"); err != nil {
 				t.Fatal(err)
 			}
-			if err := cache.Close(); err != nil {
+			if err := scope.Close(); err != nil {
 				t.Fatal(err)
 			}
 			reopened := New(context.Background(), logger.NOP(), option.CacheFileOptions{Path: cache.path, StoreFakeIP: true})
-			if err := reopened.Start(adapter.StartStateInitialize); err != nil {
+			reopenedScope := adapter.NewScope(context.Background(), logger.NOP())
+			if err := reopened.Start(adapter.StartStateInitialize, reopenedScope); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() {
-				if err := reopened.Close(); err != nil {
+				if err := reopenedScope.Close(); err != nil {
 					t.Error(err)
 				}
 			})

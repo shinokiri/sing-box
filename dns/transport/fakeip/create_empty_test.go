@@ -20,14 +20,7 @@ func newPersistentFakeIPStore(t testing.TB) (*fakeip.Store, *cachefile.CacheFile
 	cache := cachefile.New(context.Background(), logger.NOP(), option.CacheFileOptions{
 		Path: filepath.Join(t.TempDir(), "cache.db"), StoreFakeIP: true,
 	})
-	if err := cache.Start(adapter.StartStateInitialize); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := cache.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	startTestCache(t, cache)
 	ctx := service.ContextWith[adapter.CacheFile](context.Background(), cache)
 	store := fakeip.NewStore(ctx, logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("fc00::/18"))
 	if err := store.Start(); err != nil {

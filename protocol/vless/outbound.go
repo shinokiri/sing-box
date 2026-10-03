@@ -252,12 +252,20 @@ func (h *Outbound) CloseIdleConnections() {
 	}
 }
 
-func (h *Outbound) Close() error {
-	var flowErr error
-	if h.flowPort != nil {
-		flowErr = h.flowPort.Close()
+func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if stage != adapter.StartStateInitialize {
+		return nil
 	}
-	return E.Errors(flowErr, common.Close(common.PtrOrNil(h.multiplexDialer), h.transport))
+	if h.transport != nil {
+		scope.Add(h.transport.Close)
+	}
+	if h.multiplexDialer != nil {
+		scope.Add(h.multiplexDialer.Close)
+	}
+	if h.flowPort != nil {
+		scope.Add(h.flowPort.Close)
+	}
+	return nil
 }
 
 func (h *Outbound) dialServerConnection(ctx context.Context) (net.Conn, error) {

@@ -58,7 +58,11 @@ func (m *ForwardFrameMeta) completeChecksum(raw []byte) {
 	}
 	initial := binary.BigEndian.Uint16(raw[checksumAt:])
 	raw[checksumAt], raw[checksumAt+1] = 0, 0
-	binary.BigEndian.PutUint16(raw[checksumAt:], ^checksum.Checksum(raw[m.checksumStart:], initial))
+	transportChecksum := ^checksum.Checksum(raw[m.checksumStart:], initial)
+	if transportChecksum == 0 {
+		transportChecksum = 0xffff
+	}
+	binary.BigEndian.PutUint16(raw[checksumAt:], transportChecksum)
 }
 
 type flowEntry struct {
@@ -480,6 +484,9 @@ func (d *ForwardDispatcher) createFlow(packet *forwardPacket, verdict FlowVerdic
 	serverPort := clientDestinationPort
 	if verdict.Destination.Addr().IsValid() {
 		serverAddress = verdict.Destination.Addr()
+		if serverAddress.Is4() != clientDestinationAddress.Is4() {
+			return nil, createFlowUnsupported
+		}
 	}
 	if verdict.Destination.Port() != 0 && !isICMP {
 		serverPort = verdict.Destination.Port()
@@ -1046,10 +1053,10 @@ func returnICMPError(natList []*portNAT, revMap map[netip.Addr]*portNAT, parsed 
 	if flow.dnatAddress || flow.dnatPort {
 		rewriteEmbeddedDestination(&embedded, addrToTCPIP(flow.clientDestinationAddress), flow.clientDestinationPort, flow.dnatPort)
 	}
-	networkHeader := parsed.networkHeader()
-	networkHeader.SetDestinationAddr(flow.clientAddress)
-	if networkHeader.SourceAddr() == flow.serverAddress {
-		networkHeader.SetSourceAddr(flow.clientDestinationAddress)
+	sourceAddress, destinationAddress := parsed.addressSlices()
+	copy(destinationAddress, flow.clientAddress.AsSlice())
+	if parsed.source.Addr() == flow.serverAddress {
+		copy(sourceAddress, flow.clientDestinationAddress.AsSlice())
 	}
 	recomputeChecksums(parsed)
 	return flow

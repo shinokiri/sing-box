@@ -14,19 +14,26 @@ import (
 
 func newFakeIPTestCache(t testing.TB) *CacheFile {
 	t.Helper()
+	cache, _ := newFakeIPTestCacheWithScope(t)
+	return cache
+}
+
+func newFakeIPTestCacheWithScope(t testing.TB) (*CacheFile, *adapter.Scope) {
+	t.Helper()
 	cache := New(context.Background(), logger.NOP(), option.CacheFileOptions{
 		Path:        filepath.Join(t.TempDir(), "cache.db"),
 		StoreFakeIP: true,
 	})
-	if err := cache.Start(adapter.StartStateInitialize); err != nil {
+	scope := adapter.NewScope(context.Background(), logger.NOP())
+	if err := cache.Start(adapter.StartStateInitialize, scope); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := cache.Close(); err != nil {
+		if err := scope.Close(); err != nil {
 			t.Error(err)
 		}
 	})
-	return cache
+	return cache, scope
 }
 
 func TestBufferedFakeIPReassignment(t *testing.T) {

@@ -1,7 +1,7 @@
 {
   "upstream_branch": "testing",
-  "upstream_version": "1.15.0-alpha.9",
-  "upstream_commit": "132b38e9caaba1a1959354d518e54d2d08419afe",
-  "android_client_commit": "d2097bec38439a91257ffad5f620d6792391e128",
+  "upstream_version": "1.15.0-alpha.10",
+  "upstream_commit": "c992297988288565a24a6d36e2cf4d77cb835fcd",
+  "android_client_commit": "5c7b4ce969b926063737d059edf7b256c8f56ed0",
   "fork_revision": 1
 }

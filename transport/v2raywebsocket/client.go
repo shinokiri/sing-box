@@ -99,7 +99,8 @@ func (c *Client) upgrade(conn net.Conn, requestURL *url.URL, headers http.Header
 	}
 	deadlineConn.SetDeadline(time.Now().Add(C.TCPTimeout))
 	var protocols []string
-	if protocolHeader := headers.Get("Sec-WebSocket-Protocol"); protocolHeader != "" {
+	protocolHeader := headers.Get("Sec-WebSocket-Protocol")
+	if protocolHeader != "" {
 		protocols = []string{protocolHeader}
 		headers = headers.Clone()
 		headers.Del("Sec-WebSocket-Protocol")
@@ -112,7 +113,7 @@ func (c *Client) upgrade(conn net.Conn, requestURL *url.URL, headers http.Header
 	}
 	if reader != nil {
 		buffer := buf.NewSize(reader.Buffered())
-		_, err = buffer.ReadFullFrom(reader, buffer.Len())
+		_, err = buffer.ReadFullFrom(reader, buffer.FreeLen())
 		if err != nil {
 			conn.Close()
 			return nil, err

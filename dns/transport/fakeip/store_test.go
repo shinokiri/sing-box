@@ -16,19 +16,26 @@ import (
 	"github.com/sagernet/sing/service"
 )
 
+func startTestCache(t testing.TB, cache *cachefile.CacheFile) *adapter.Scope {
+	t.Helper()
+	scope := adapter.NewScope(context.Background(), logger.NOP())
+	if err := cache.Start(adapter.StartStateInitialize, scope); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := scope.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return scope
+}
+
 func TestStoreRestartsWithoutMetadata(t *testing.T) {
 	cache := cachefile.New(context.Background(), logger.NOP(), option.CacheFileOptions{
 		Path:        filepath.Join(t.TempDir(), "cache.db"),
 		StoreFakeIP: true,
 	})
-	if err := cache.Start(adapter.StartStateInitialize); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := cache.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	startTestCache(t, cache)
 	// Seed the observed disk state: an IPv4 mapping, no IPv6 bucket, and no
 	// allocator metadata. No real device cache or network connection is used.
 	oldAddress := netip.MustParseAddr("198.18.0.21")
@@ -95,14 +102,7 @@ func TestStoreRestartPreservesReservedAddresses(t *testing.T) {
 				StoreFakeIP: true,
 			}
 			cache := cachefile.New(context.Background(), logger.NOP(), options)
-			if err := cache.Start(adapter.StartStateInitialize); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := cache.Close(); err != nil {
-					t.Error(err)
-				}
-			})
+			scope := startTestCache(t, cache)
 			newStore := func() *fakeip.Store {
 				ctx := service.ContextWith[adapter.CacheFile](context.Background(), cache)
 				store := fakeip.NewStore(ctx, logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("fc00::/18"))
@@ -129,13 +129,11 @@ func TestStoreRestartPreservesReservedAddresses(t *testing.T) {
 			}
 			// Reopen the real database without Store.Close: the allocator never
 			// replaces its reservation with a graceful-shutdown checkpoint.
-			if err := cache.Close(); err != nil {
+			if err := scope.Close(); err != nil {
 				t.Fatal(err)
 			}
 			cache = cachefile.New(context.Background(), logger.NOP(), options)
-			if err := cache.Start(adapter.StartStateInitialize); err != nil {
-				t.Fatal(err)
-			}
+			startTestCache(t, cache)
 			restarted := newStore()
 			restored, err := restarted.Create("before-restart.example", isIPv6)
 			if err != nil || restored != first {

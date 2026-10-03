@@ -62,7 +62,9 @@ func TestFlowSelectorSwitch(t *testing.T) {
 					require.NoError(t, err)
 					s := outbound.(*group.Selector)
 					manager.outbounds[tag] = s
-					require.NoError(t, s.Start())
+					scope := adapter.NewScope(ctx, logger.NOP())
+					t.Cleanup(func() { require.NoError(t, scope.Close()) })
+					require.NoError(t, s.Start(adapter.StartStateStart, scope))
 					return s
 				}
 				selectedTag := "choice"

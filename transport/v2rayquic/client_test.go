@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sagernet/quic-go"
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/logger"
@@ -126,6 +127,12 @@ func TestQUICHandshakeCancellation(t *testing.T) {
 }
 
 func TestQUICEstablishedConnectionSurvivesDialCancellation(t *testing.T) {
+	t.Run("keep-idle", func(t *testing.T) { testQUICSharedConnection(t, true) })
+	t.Run("keep-session", func(t *testing.T) { testQUICSharedConnection(t, false) })
+}
+
+func testQUICSharedConnection(t *testing.T, keepIdle bool) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	certificate, err := tls.GenerateKeyPair(nil, nil, time.Now, "localhost")
@@ -179,8 +186,12 @@ func TestQUICEstablishedConnectionSurvivesDialCancellation(t *testing.T) {
 		Certificate: []string{string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Certificate[0]}))},
 	})
 	defer client.Close()
+	client.SetKeepIdleConnections(keepIdle)
 	for index := range 2 {
 		dialCtx, stopDial := context.WithTimeout(ctx, time.Second)
+		if !keepIdle {
+			dialCtx = adapter.ContextWithKeepSession(dialCtx)
+		}
 		conn, err := client.DialContext(dialCtx)
 		stopDial()
 		require.NoError(t, err)
@@ -195,10 +206,10 @@ func TestQUICEstablishedConnectionSurvivesDialCancellation(t *testing.T) {
 		require.NoError(t, conn.Close())
 	}
 	require.NoError(t, testResult(t, serverResult))
-	require.NoError(t, client.Close())
+	client.CloseIdleConnections()
 	select {
 	case <-detourContext.Done():
 	case <-time.After(time.Second):
-		t.Fatal("closing the QUIC client did not release its detour context")
+		t.Fatal("closing the idle QUIC connection did not release its detour context")
 	}
 }
