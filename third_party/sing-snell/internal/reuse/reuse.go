@@ -74,8 +74,10 @@ func (p *Pool[S]) Take() (session S, found bool, closed bool) {
 	var expired []S
 	now := time.Now()
 	if !closed {
-		for element := p.entries.Front(); element != nil; {
-			next := element.Next()
+		// Prefer a recently used idle connection to preserve warm TCP state.
+		// Continue scanning after selection so older expired entries are closed.
+		for element := p.entries.Back(); element != nil; {
+			next := element.Prev()
 			entry := element.Value
 			state := State(entry.session.ReuseState().Load())
 			if state == StateClosed {
