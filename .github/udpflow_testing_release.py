@@ -109,6 +109,7 @@ def publish():
     notes.write_text(
         f"基于上游 [testing `{state['upstream_commit'][:7]}`](https://github.com/{UPSTREAM}/commit/{state['upstream_commit']}) 的开发快照，包含现有 UDP flow 修复。\n\n"
         "Android 16+（API 36）ARM64 签名 APK，沿用本仓库签名；versionCode 递增，可覆盖安装。此 Release 标记为预发布，客户端可选择测试更新通道。\n\n"
+        "改进 Snell 空闲连接复用：优先选择最近归还且已就绪的连接，减少连续请求轮流使用小接收窗口连接的情况。继续跳过等待中的连接并清理过期项；连接池容量和过期时间保持不变，不增加预热流量或保活任务。全新连接仍需由手机内核逐步增大接收窗口。\n\n"
         "改进节点测速显示：手动测速立即隐藏本轮旧延迟，区分等待、测试中、成功和失败；整批任务完成后再恢复按钮，重复请求复用正在进行的任务。内部历史记录继续用于自动选择节点。覆盖排队、部分完成、重复请求、后台测速交接和界面状态回归测试。\n\n"
         "保留 Android 蜂窝网络自动停用 TCP Fast Open 的修复：tcp_fast_open 仍使用布尔值；启用时在蜂窝数据下改用普通 TCP，已识别的非蜂窝网络按配置恢复。\n\n"
         "修复 FakeIP 元数据缺失时的缓存重置、跨写缓冲层的正反向映射错配，以及地址重分配时误删已迁移域名的问题。真正的存储重置错误会阻止启动，避免继续使用不一致映射。\n\n"
@@ -120,7 +121,7 @@ def publish():
         "修复 UDP DNS 经 Snell 与 TCP Fast Open 转发时，在首包发送前提前取消建连上下文、导致解析超时的问题。连接上下文保留至连接退役，关闭、失效、重置与失败时仍释放资源；覆盖真实 Snell UDP 解析、连接复用及重置、上下文清理和进行中建连的取消。\n\n"
         "修复 Android 自动启动 VPN 时与内核初始化之间的竞态：启动入口共同等待一次后台初始化完成，避免提前使用未设置的控制接口目录；在等待前及时建立前台通知，启动失败原因同步写入系统日志。覆盖初始化等待、并发启动、失败传播及等待者取消的回归测试。\n\n"
         f"Core: `{state['commit']}`\n\nAndroid client: `{state['android_client_commit']}`（含本仓库更新补丁）\n\n"
-        "这是上游 testing 开发版本。Android 真机切网、长期运行、RTT 和耗电尚未实测。\n"
+        "这是上游 testing 开发版本。Snell 连接池选择已通过独立客户端在 Android 真机上的定向对照测试；本次 APK 安装后的日常使用、切网、长期运行和耗电尚未实测。\n"
     )
     assets = sorted(str(path) for path in Path("dist/android").iterdir() if path.is_file())
     if release:
