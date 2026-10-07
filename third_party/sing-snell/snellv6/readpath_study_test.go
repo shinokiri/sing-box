@@ -22,6 +22,7 @@ import (
 var studyBufferSize = flag.Int("study-buffer-size", 4096, "read buffer size for the isolated comparison")
 var studyPattern = flag.String("study-pattern", "fixed", "fixed, alternating or bursts record sizes")
 var studyDelivery = flag.String("study-delivery", "batch", "batch, channel-gated single, or TCP request/response; memory uses record boundaries for either single mode")
+var studyFrontHeadroom = flag.Int("study-front-headroom", 0, "writable header space required by the destination")
 var studyPolicies = []string{"baseline", "scratch", "buffered", "combined", "coalesced", "coalesced_buffered", "adaptive"}
 var studySharedFactory func(string, io.Reader, *Profile) (studyRecordReader, func(cipher.AEAD))
 var studyPSK = []byte("public snell readpath test fixture, not a server credential")
@@ -237,6 +238,7 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                         input = counted
                     }
                     reader, reset := studyReader(policy, input, profile)
+                    reader.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: *studyFrontHeadroom})
                     defer closeStudyReader(reader)
                     b.SetBytes(int64(totalPlain/len(payloads)))
                     b.ReportAllocs()

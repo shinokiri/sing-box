@@ -34,9 +34,10 @@ func sharedWire(t testing.TB, psk []byte, payloads [][]byte) ([]byte, *Profile) 
 }
 
 func TestStudySharedRetainedViewsAndHeadroom(t *testing.T) {
+	for _, bounded := range []bool{false, true} {
 	for profileID := range 8 {
-		for _, room := range []int{0, 32, 256} {
-			t.Run(fmt.Sprintf("profile%d/room%d", profileID, room), func(t *testing.T) {
+		for _, room := range []int{0, 32, 72, 256} {
+			t.Run(fmt.Sprintf("bounded%t/profile%d/room%d", bounded, profileID, room), func(t *testing.T) {
 				psk := []byte(fmt.Sprintf("public shared receive fixture %d", profileID))
 				var payloads [][]byte
 				for i := range 80 {
@@ -47,6 +48,7 @@ func TestStudySharedRetainedViewsAndHeadroom(t *testing.T) {
 				wire, profile := sharedWire(t, psk, payloads)
 				beforeBytes, beforeBlocks := buf.StudySharedStorage()
 				r := newSharedShapedReader(bytes.NewReader(wire), psk, profile)
+				if bounded { r.enableBounded() }
 				r.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: room, RearHeadroom: room/2})
 				var retained []*buf.Buffer
 				var wants [][]byte
@@ -80,6 +82,7 @@ func TestStudySharedRetainedViewsAndHeadroom(t *testing.T) {
 				if beforeBytes != afterBytes || beforeBlocks != afterBlocks { t.Fatal("shared storage leaked") }
 			})
 		}
+	}
 	}
 }
 

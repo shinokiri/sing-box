@@ -45,6 +45,7 @@ type sharedShapedReader struct {
 	peakCapacity int
 	bounded bool
 	readAhead int
+	viewFence int
 }
 
 func (r *sharedShapedReader) enableBounded() {
@@ -68,7 +69,7 @@ func sharedCapacity(required int) int {
 func (r *sharedShapedReader) capacityFor(required int) int {
 	if !r.bounded { return sharedCapacity(required) }
 	// Round modestly instead of doubling a nearly 64 KiB record to 128 KiB.
-	return (max(required, r.readAhead) + 4095) &^ 4095
+	return (max(required+r.readWaitOptions.FrontHeadroom, r.readAhead) + 4095) &^ 4095
 }
 
 // ensure waits for only the current protocol field/record, never a full block.
@@ -76,31 +77,53 @@ func (r *sharedShapedReader) capacityFor(required int) int {
 // views are immutable from the receiver's perspective; only unconsumed bytes
 // may move when the block ends or grows. No prediction uses the preceding frame.
 func (r *sharedShapedReader) ensure(required int) error {
+	front := 0
+	if r.bounded { front = r.readWaitOptions.FrontHeadroom }
 	if r.block == nil {
 		r.block = buf.NewSize(r.capacityFor(required))
+		r.block.Resize(0, front)
+		r.position = front
+		r.viewFence = 0
 		r.peakCapacity = max(r.peakCapacity, r.block.Cap())
 	}
 	available := r.block.Len() - r.position
 	if available >= required { return nil }
-	if available == 0 && r.position > 0 && !r.block.HasSharedViews() {
-		r.block.Resize(0, 0)
-		r.position = 0
+	if available == 0 && r.position > 0 {
+		if !r.block.HasSharedViews() && r.block.Cap() >= front {
+			r.block.Resize(0, front)
+			r.position = front
+			r.viewFence = 0
+		} else if r.bounded {
+			// Start a new owned region before consuming the next header. Keep
+			// known useful capacity so a retained previous frame does not force
+			// prefetched large payloads to relocate once their size is known.
+			capacity := max(r.block.Cap(), r.capacityFor(required))
+			r.block.Release()
+			r.block = buf.NewSize(capacity)
+			r.block.Resize(0, front)
+			r.position = front
+			r.viewFence = 0
+			r.peakCapacity = max(r.peakCapacity, capacity)
+		}
 	}
 	minimum := required
-	if r.bounded { minimum = max(required, r.readAhead) }
+	if r.bounded { minimum = max(required+front, r.readAhead) }
 	if r.block.Cap() - r.position < required || r.block.Cap() < minimum {
 		if !r.block.HasSharedViews() && r.block.Cap() >= minimum {
-			copy(r.block.Bytes(), r.block.Bytes()[r.position:])
-			r.block.Resize(0, available)
+			tail := r.block.Bytes()[r.position:]
+			r.block.Resize(0, front+available)
+			copy(r.block.Bytes()[front:], tail)
 		} else {
 			next := buf.NewSize(max(r.block.Cap(), r.capacityFor(required)))
+			next.Resize(0, front)
 			next.Write(r.block.Bytes()[r.position:])
 			r.block.Release()
 			r.block = next
 			r.peakCapacity = max(r.peakCapacity, next.Cap())
 		}
 		r.copiedBytes += uint64(available)
-		r.position = 0
+		r.position = front
+		r.viewFence = 0
 	}
 	emptyReads := 0
 	for r.block.Len() - r.position < required {
@@ -179,10 +202,20 @@ func (r *sharedShapedReader) read() (*buf.Buffer, error) {
 	// Header/padding and the used authentication tag are now private writable
 	// headroom. Never expose the following frame as writable rear headroom.
 	share := !r.bounded || (payloadLen > 2048 && payloadLen >= r.block.Cap()/8)
-	if share && r.readWaitOptions.FrontHeadroom <= headLen+paddingLen && r.readWaitOptions.RearHeadroom <= snell.AEADTagLen {
-		body := r.block.SharedSlice(start, r.position)
-		body.Advance(headLen+paddingLen)
+	viewStart := start
+	payloadStart := start + headLen + paddingLen
+	if r.bounded && share {
+		// Unpublished/fully released preceding bytes can supply writable
+		// packet headroom. Never borrow bytes owned by an earlier live view.
+		if !r.block.HasSharedViews() { r.viewFence = 0 }
+		viewStart = payloadStart - r.readWaitOptions.FrontHeadroom
+		if viewStart < r.viewFence { share = false }
+	}
+	if share && viewStart >= 0 && r.readWaitOptions.FrontHeadroom <= payloadStart-viewStart && r.readWaitOptions.RearHeadroom <= snell.AEADTagLen {
+		body := r.block.SharedSlice(viewStart, r.position)
+		body.Advance(payloadStart-viewStart)
 		body.Truncate(payloadLen)
+		r.viewFence = r.position
 		r.sharedFrames++
 		return body, nil
 	}

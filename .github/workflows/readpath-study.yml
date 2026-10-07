@@ -30,12 +30,12 @@ jobs:
           set -o pipefail
           go -C .study-deps/sing test -race -count=3 ./common/buf | tee shared-buffer-tests.txt
           go -C third_party/sing-snell test -tags=shared_receive_study -race -count=3 -timeout=180s ./... | tee protocol-tests.txt
-          go -C third_party/sing-snell test -tags=shared_receive_study -run '^TestStudy(Shared|Retained|Bounded)' -v ./snellv6 -args -study-block-size=65536 -study-shared-read-ahead=65536 | tee retention-tests.txt
+          go -C third_party/sing-snell test -tags=shared_receive_study -run '^TestStudy(Shared|Retained|Bounded)' -v ./snellv6 -args -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee retention-tests.txt
       - name: Same-host comparison
         run: |
           set -o pipefail
-          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/.+/(baseline|coalesced_buffered|shared|bounded)$' -benchmem -benchtime=150ms -count=3 -args -study-block-size=65536 -study-shared-read-ahead=65536 | tee shared-bench.txt
-          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/(64|1440|65535)/(baseline|coalesced_buffered|bounded)$' -benchmem -benchtime=150ms -count=3 -args -study-delivery=request -study-block-size=65536 -study-shared-read-ahead=65536 | tee single-bench.txt
+          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/.+/(baseline|coalesced_buffered|shared|bounded)$' -benchmem -benchtime=150ms -count=3 -args -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee shared-bench.txt
+          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/(64|1440|65535)/(baseline|coalesced_buffered|bounded)$' -benchmem -benchtime=150ms -count=3 -args -study-delivery=request -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee single-bench.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
