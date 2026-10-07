@@ -137,73 +137,119 @@ func TestWritePathStudyEquivalent(t *testing.T) {
 	}
 }
 
+func studyVariants() []bool {
+ variants := []bool{false, true}
+ if os.Getenv("STUDY_REVERSE") == "true" { variants = []bool{true, false} }
+ return variants
+}
+
 func BenchmarkWritePathStudy(b *testing.B) {
-	variants := []bool{false, true}
-	if os.Getenv("STUDY_REVERSE") == "true" {
-		variants = []bool{true, false}
+ for _, size := range []int{64, 1440, 16384, 65535} {
+  for _, cold := range []bool{false, true} {
+   for _, vector := range studyVariants() {
+    b.Run(fmt.Sprintf("bytes%d/cold%t/vector%t", size, cold, vector), func(b *testing.B) {
+     benchmarkWritePath(b, 0, size, cold, vector, false)
+    })
+   }
+  }
+ }
+}
+
+func BenchmarkWritePathReaderSized(b *testing.B) {
+ profiles := map[uint64]int{}
+ for id := range 64 {
+  profile := NewProfile([]byte(fmt.Sprintf("public writepath fixture %d", id)))
+  policy := uint64(profile.chunkPolicy)
+  if _, exists := profiles[policy]; !exists { profiles[policy] = id }
+  if len(profiles) == 3 { break }
+ }
+ if len(profiles) != 3 { b.Fatal("missing shape policy") }
+ for policy := range uint64(3) {
+  id := profiles[policy]
+  for _, size := range []int{64, 1440, 0} {
+   for _, cold := range []bool{false, true} {
+    for _, vector := range studyVariants() {
+     b.Run(fmt.Sprintf("policy%d-profile%d/payload%d/cold%t/vector%t", policy, id, size, cold, vector), func(b *testing.B) {
+      benchmarkWritePath(b, id, size, cold, vector, true)
+     })
+    }
+   }
+  }
+ }
+}
+
+func benchmarkWritePath(b *testing.B, profileID, size int, cold, vector, readerSized bool) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		b.Fatal(err)
 	}
-	for _, size := range []int{64, 1440, 16384, 65535} {
-		for _, cold := range []bool{false, true} {
-			for _, vector := range variants {
-				b.Run(fmt.Sprintf("bytes%d/cold%t/vector%t", size, cold, vector), func(b *testing.B) {
-					listener, err := net.Listen("tcp4", "127.0.0.1:0")
-					if err != nil {
-						b.Fatal(err)
-					}
-					done := make(chan error, 1)
-					go func() {
-						peer, err := listener.Accept()
-						if err == nil {
-							_, err = io.Copy(io.Discard, peer)
-							peer.Close()
-						}
-						done <- err
-					}()
-					conn, err := net.Dial("tcp4", listener.Addr().String())
-					if err != nil {
-						listener.Close()
-						b.Fatal(err)
-					}
-					b.Cleanup(func() {
-						conn.Close()
-						listener.Close()
-						if err := <-done; err != nil {
-							b.Error(err)
-						}
-					})
-					writer, _ := studyWriter(b, conn, 0)
-					vectorWriter := bufio.NewVectorisedWriter(conn)
-					data := bytes.Repeat([]byte{0x6d}, size)
-					if !cold {
-						for range 64 {
-							if err := writer.WriteBuffer(studyPayload(writer, data)); err != nil {
-								b.Fatal(err)
-							}
-						}
-					}
-					b.ReportAllocs()
-					b.SetBytes(int64(size))
-					b.ResetTimer()
-					for range b.N {
-						if cold {
-							writer.seq, writer.chunkSize, writer.lastWriteUnix = 0, 0, 0
-							writer.saltSent = false
-							clear(writer.nonce)
-						}
-						buffer := studyPayload(writer, data)
-						var err error
-						if vector {
-							err = studyWriteBufferVector(writer, buffer, vectorWriter)
-						} else {
-							err = writer.WriteBuffer(buffer)
-						}
-						if err != nil {
-							b.Fatal(err)
-						}
-					}
-					b.StopTimer()
-				})
+	done := make(chan error, 1)
+	go func() {
+		peer, err := listener.Accept()
+		if err == nil {
+			_, err = io.Copy(io.Discard, peer)
+			peer.Close()
+		}
+		done <- err
+	}()
+	conn, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		listener.Close()
+		b.Fatal(err)
+	}
+	b.Cleanup(func() {
+		conn.Close()
+		listener.Close()
+		if err := <-done; err != nil {
+			b.Error(err)
+		}
+	})
+	writer, _ := studyWriter(b, conn, profileID)
+	vectorWriter := bufio.NewVectorisedWriter(conn)
+	options := N.ReadWaitOptions{FrontHeadroom: writer.FrontHeadroom(), RearHeadroom: writer.RearHeadroom(), MTU: writer.WriterMTU(), IncreaseBuffer: true}
+	probe := options.NewBuffer()
+	actualCapacity := probe.FreeLen()
+	probe.Release()
+	if readerSized {
+		if size == 0 { size = actualCapacity } else { size = min(size, actualCapacity) }
+	}
+	data := bytes.Repeat([]byte{0x6d}, size)
+	makePayload := func() *buf.Buffer {
+		if !readerSized { return studyPayload(writer, data) }
+		buffer := options.NewBuffer()
+		buffer.Write(data)
+		options.PostReturn(buffer)
+		return buffer
+	}
+	if !cold {
+		for range 64 {
+			if err := writer.WriteBuffer(makePayload()); err != nil {
+				b.Fatal(err)
 			}
 		}
 	}
+	b.ReportAllocs()
+	b.SetBytes(int64(size))
+	b.ResetTimer()
+	for range b.N {
+		if cold {
+			writer.seq, writer.chunkSize, writer.lastWriteUnix = 0, 0, 0
+			writer.saltSent = false
+			clear(writer.nonce)
+		}
+		buffer := makePayload()
+		var err error
+		if vector {
+			err = studyWriteBufferVector(writer, buffer, vectorWriter)
+		} else {
+			err = writer.WriteBuffer(buffer)
+		}
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(size), "payload-B/op")
+	b.ReportMetric(float64(actualCapacity), "reader-cap-B")
+	b.ReportMetric(float64(writer.profile.chunkPolicy), "chunk-policy")
 }

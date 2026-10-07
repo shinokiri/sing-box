@@ -31,10 +31,10 @@ jobs:
           for round in 0 1 2; do
             reverse=false
             if [ "$round" = 1 ]; then reverse=true; fi
-            STUDY_REVERSE="$reverse" go -C third_party/sing-snell test -run '^$' -bench '^BenchmarkWritePathStudy$' -benchmem -benchtime=300ms -count=1 ./snellv6 | tee "writepath-results/round-$round.txt"
+            STUDY_REVERSE="$reverse" go -C third_party/sing-snell test -run '^$' -bench '^BenchmarkWritePathReaderSized$' -benchmem -benchtime=300ms -count=1 ./snellv6 | tee "writepath-results/round-$round.txt"
           done
           for variant in false true; do
-            go -C third_party/sing-snell test -run '^$' -bench "^BenchmarkWritePathStudy/bytes65535/coldfalse/vector${variant}$" -benchtime=2s -cpuprofile="${RUNNER_TEMP}/writepath-${variant}.cpu" ./snellv6 > "writepath-results/profile-${variant}-bench.txt"
+            go -C third_party/sing-snell test -run '^$' -bench "^BenchmarkWritePathReaderSized/policy1-profile[0-9]+/payload0/coldfalse/vector${variant}$" -benchtime=2s -cpuprofile="${RUNNER_TEMP}/writepath-${variant}.cpu" ./snellv6 > "writepath-results/profile-${variant}-bench.txt"
             go tool pprof -top "${RUNNER_TEMP}/writepath-${variant}.cpu" > "writepath-results/profile-${variant}-top.txt"
           done
       - uses: actions/upload-artifact@v4
