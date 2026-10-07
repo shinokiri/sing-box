@@ -1,45 +1,44 @@
-name: Snell shared receive integration
+name: Snell write path study
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  verify:
+  measure:
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
+    env:
+      GOMAXPROCS: '2'
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.8'
           cache: false
-      - name: Format and synchronize the standalone module
+      - name: Test wire equivalence and measure full local TCP writes
         run: |
-          gofmt -w third_party/sing/common/buf/{buffer,shared_buffer,shared_buffer_test}.go third_party/sing-snell/snellv6/{receive*.go,client.go,reuse.go} third_party/sing-tun/receive_view_integration_test.go
-          go -C third_party/sing-snell mod tidy
-      - name: Test shared ownership and response lifetimes
-        run: |
-          set -o pipefail
-          go -C third_party/sing test -race -count=3 ./common/buf | tee buffer-tests.txt
-          go -C third_party/sing-snell test -race -count=3 -timeout=180s ./... | tee response-tests.txt
-          go -C third_party/sing-snell test -tags=owned_receive -race -count=3 -timeout=180s ./... | tee ownership-control-tests.txt
-          go test -race -count=3 -timeout=180s ./protocol/snell | tee session-tests.txt
-          go test -race -count=3 -run '^TestSharedReceiveTransmitStore$' github.com/sagernet/sing-tun | tee transmit-tests.txt
-          sh .github/check_local_patches.sh
+          set -euo pipefail
+          mkdir -p writepath-results
+          git rev-parse HEAD > writepath-results/source-commit.txt
+          lscpu > writepath-results/cpu.txt
+          gofmt -w third_party/sing-snell/snellv6/writepath_study_test.go
+          cp third_party/sing-snell/snellv6/writepath_study_test.go writepath-results/
+          go -C third_party/sing-snell test -race -count=3 -run '^TestWritePathStudy' -v ./snellv6 | tee writepath-results/tests.txt
+          for round in 0 1 2; do
+            reverse=false
+            if [ "$round" = 1 ]; then reverse=true; fi
+            STUDY_REVERSE="$reverse" go -C third_party/sing-snell test -run '^$' -bench '^BenchmarkWritePathStudy$' -benchmem -benchtime=300ms -count=1 ./snellv6 | tee "writepath-results/round-$round.txt"
+          done
+          for variant in false true; do
+            go -C third_party/sing-snell test -run '^$' -bench "^BenchmarkWritePathStudy/bytes65535/coldfalse/vector${variant}$" -benchtime=2s -cpuprofile="${RUNNER_TEMP}/writepath-${variant}.cpu" ./snellv6 > "writepath-results/profile-${variant}-bench.txt"
+            go tool pprof -top "${RUNNER_TEMP}/writepath-${variant}.cpu" > "writepath-results/profile-${variant}-top.txt"
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: integrated-receive-${{ matrix.os }}
-          path: |
-            *tests.txt
-            third_party/sing/common/buf/buffer.go
-            third_party/sing/common/buf/shared_buffer*.go
-            third_party/sing-snell/go.mod
-            third_party/sing-snell/go.sum
-            third_party/sing-snell/snellv6/receive*.go
-            third_party/sing-snell/snellv6/client.go
-            third_party/sing-snell/snellv6/reuse.go
-            third_party/sing-tun/receive_view_integration_test.go
+          name: writepath-${{ matrix.os }}
+          path: writepath-results/
