@@ -12,6 +12,9 @@ replace github.com/sagernet/sing-tun => ../third_party/sing-tun
 
 replace github.com/sagernet/sing-snell => ../third_party/sing-snell
 
+// Keep independently owned buffer views local for bounded Snell receive batching.
+replace github.com/sagernet/sing => ../third_party/sing
+
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/docker/docker v27.3.1+incompatible
