@@ -138,44 +138,52 @@ func TestWritePathStudyEquivalent(t *testing.T) {
 }
 
 func studyVariants() []bool {
- variants := []bool{false, true}
- if os.Getenv("STUDY_REVERSE") == "true" { variants = []bool{true, false} }
- return variants
+	variants := []bool{false, true}
+	if os.Getenv("STUDY_REVERSE") == "true" {
+		variants = []bool{true, false}
+	}
+	return variants
 }
 
 func BenchmarkWritePathStudy(b *testing.B) {
- for _, size := range []int{64, 1440, 16384, 65535} {
-  for _, cold := range []bool{false, true} {
-   for _, vector := range studyVariants() {
-    b.Run(fmt.Sprintf("bytes%d/cold%t/vector%t", size, cold, vector), func(b *testing.B) {
-     benchmarkWritePath(b, 0, size, cold, vector, false)
-    })
-   }
-  }
- }
+	for _, size := range []int{64, 1440, 16384, 65535} {
+		for _, cold := range []bool{false, true} {
+			for _, vector := range studyVariants() {
+				b.Run(fmt.Sprintf("bytes%d/cold%t/vector%t", size, cold, vector), func(b *testing.B) {
+					benchmarkWritePath(b, 0, size, cold, vector, false)
+				})
+			}
+		}
+	}
 }
 
 func BenchmarkWritePathReaderSized(b *testing.B) {
- profiles := map[uint64]int{}
- for id := range 64 {
-  profile := NewProfile([]byte(fmt.Sprintf("public writepath fixture %d", id)))
-  policy := uint64(profile.chunkPolicy)
-  if _, exists := profiles[policy]; !exists { profiles[policy] = id }
-  if len(profiles) == 3 { break }
- }
- if len(profiles) != 3 { b.Fatal("missing shape policy") }
- for policy := range uint64(3) {
-  id := profiles[policy]
-  for _, size := range []int{64, 1440, 0} {
-   for _, cold := range []bool{false, true} {
-    for _, vector := range studyVariants() {
-     b.Run(fmt.Sprintf("policy%d-profile%d/payload%d/cold%t/vector%t", policy, id, size, cold, vector), func(b *testing.B) {
-      benchmarkWritePath(b, id, size, cold, vector, true)
-     })
-    }
-   }
-  }
- }
+	profiles := map[uint64]int{}
+	for id := range 64 {
+		profile := NewProfile([]byte(fmt.Sprintf("public writepath fixture %d", id)))
+		policy := uint64(profile.chunkPolicy)
+		if _, exists := profiles[policy]; !exists {
+			profiles[policy] = id
+		}
+		if len(profiles) == 3 {
+			break
+		}
+	}
+	if len(profiles) != 3 {
+		b.Fatal("missing shape policy")
+	}
+	for policy := range uint64(3) {
+		id := profiles[policy]
+		for _, size := range []int{64, 1440, 0} {
+			for _, cold := range []bool{false, true} {
+				for _, vector := range studyVariants() {
+					b.Run(fmt.Sprintf("policy%d-profile%d/payload%d/cold%t/vector%t", policy, id, size, cold, vector), func(b *testing.B) {
+						benchmarkWritePath(b, id, size, cold, vector, true)
+					})
+				}
+			}
+		}
+	}
 }
 
 func benchmarkWritePath(b *testing.B, profileID, size int, cold, vector, readerSized bool) {
@@ -211,11 +219,17 @@ func benchmarkWritePath(b *testing.B, profileID, size int, cold, vector, readerS
 	actualCapacity := probe.FreeLen()
 	probe.Release()
 	if readerSized {
-		if size == 0 { size = actualCapacity } else { size = min(size, actualCapacity) }
+		if size == 0 {
+			size = actualCapacity
+		} else {
+			size = min(size, actualCapacity)
+		}
 	}
 	data := bytes.Repeat([]byte{0x6d}, size)
 	makePayload := func() *buf.Buffer {
-		if !readerSized { return studyPayload(writer, data) }
+		if !readerSized {
+			return studyPayload(writer, data)
+		}
 		buffer := options.NewBuffer()
 		buffer.Write(data)
 		options.PostReturn(buffer)
