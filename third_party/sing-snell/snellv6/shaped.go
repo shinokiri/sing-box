@@ -1,6 +1,7 @@
 package snellv6
 
 import (
+	standardbufio "bufio"
 	"crypto/cipher"
 	"encoding/binary"
 	"io"
@@ -356,15 +357,26 @@ func (w *shapedWriter) Upstream() any {
 
 type shapedReader struct {
 	baseReader
+	input   *standardbufio.Reader
 	psk     []byte
 	profile *Profile
 	cipher  cipher.AEAD
 	nonce   []byte
 	seq     uint32
+	head    []byte
 }
 
+// Keep read-ahead on the physical reader across logical EOF/reuse boundaries.
+// A small buffer coalesces prefix, padding and payload reads without waiting
+// for another record, while larger payload reads can still bypass it.
 func newShapedReader(upstream io.Reader, psk []byte, profile *Profile) *shapedReader {
-	r := &shapedReader{psk: psk, profile: profile, nonce: make([]byte, snell.NonceLen)}
+	r := &shapedReader{
+		psk:     psk,
+		profile: profile,
+		nonce:   make([]byte, snell.NonceLen),
+		head:    make([]byte, profile.recordPrefixMax+snell.HeaderCipherLen),
+		input:   standardbufio.NewReaderSize(upstream, 1024),
+	}
 	r.upstream = upstream
 	r.readFunc = r.read
 	return r
@@ -373,7 +385,7 @@ func newShapedReader(upstream io.Reader, psk []byte, profile *Profile) *shapedRe
 func (r *shapedReader) read() (*buf.Buffer, error) {
 	if r.cipher == nil {
 		block := make([]byte, r.profile.saltBlockLen)
-		_, err := io.ReadFull(r.upstream, block)
+		_, err := io.ReadFull(r.input, block)
 		if err != nil {
 			return nil, err
 		}
@@ -386,35 +398,31 @@ func (r *shapedReader) read() (*buf.Buffer, error) {
 	}
 
 	prefixLen := r.profile.recordPrefixLen(r.seq)
-	head := buf.NewSize(prefixLen + snell.HeaderCipherLen)
-	_, err := head.ReadFullFrom(r.upstream, prefixLen+snell.HeaderCipherLen)
+	head := r.head[:prefixLen+snell.HeaderCipherLen]
+	_, err := io.ReadFull(r.input, head)
 	if err != nil {
-		head.Release()
 		return nil, err
 	}
-	prefix := head.To(prefixLen)
-	headerCipher := head.Range(prefixLen, prefixLen+snell.HeaderCipherLen)
+	prefix := head[:prefixLen]
+	headerCipher := head[prefixLen:]
 	_, err = r.cipher.Open(headerCipher[:0], r.nonce, headerCipher, prefix)
 	if err != nil {
-		head.Release()
 		return nil, E.Cause(err, "open shaped header")
 	}
 	snell.IncreaseNonce(r.nonce)
 	if headerCipher[0] != snell.HeaderVersion {
-		head.Release()
 		return nil, E.Extend(snell.ErrBadVersion, headerCipher[0])
 	}
 	// Surge 6.7.0 (11520): FUN_100013abc: default-shaped reader ignores the two reserved header bytes.
 	paddingLen := int(binary.BigEndian.Uint16(headerCipher[3:5]))
 	payloadLen := int(binary.BigEndian.Uint16(headerCipher[5:7]))
-	head.Release()
 	seq := r.seq
 	r.seq++
 
 	if payloadLen == 0 {
 		if paddingLen > 0 {
 			discard := buf.NewSize(paddingLen)
-			_, err = discard.ReadFullFrom(r.upstream, paddingLen)
+			_, err = discard.ReadFullFrom(r.input, paddingLen)
 			discard.Release()
 			if err != nil {
 				return nil, err
@@ -426,14 +434,14 @@ func (r *shapedReader) read() (*buf.Buffer, error) {
 	var padding *buf.Buffer
 	if paddingLen > 0 {
 		padding = buf.NewSize(paddingLen)
-		_, err = padding.ReadFullFrom(r.upstream, paddingLen)
+		_, err = padding.ReadFullFrom(r.input, paddingLen)
 		if err != nil {
 			padding.Release()
 			return nil, err
 		}
 	}
 	body := r.readWaitOptions.NewBufferSize(payloadLen + snell.AEADTagLen)
-	_, err = body.ReadFullFrom(r.upstream, payloadLen+snell.AEADTagLen)
+	_, err = body.ReadFullFrom(r.input, payloadLen+snell.AEADTagLen)
 	if err != nil {
 		if padding != nil {
 			padding.Release()

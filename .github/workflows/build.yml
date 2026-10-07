@@ -88,6 +88,7 @@ jobs:
         run: |
           urltest_format_status=0
           gofmt -d adapter/outbound.go common/urltest/urltest.go protocol/snell/urltest.go protocol/snell/urltest_test.go third_party/sing-snell/snellv6/reuse.go third_party/sing-snell/snellv6/urltest.go || urltest_format_status=$?
+          test -z "$(gofmt -l third_party/sing-snell/snellv6/shaped.go third_party/sing-snell/snellv6/shaped_reader_test.go)"
           go test -race -count=3 -run '^TestURLTest' -v ./protocol/snell
           go test -race github.com/sagernet/sing-snell/...
           exit "$urltest_format_status"
