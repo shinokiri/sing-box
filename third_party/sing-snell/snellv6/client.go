@@ -85,6 +85,7 @@ type clientConn struct {
 	destination M.Socksaddr
 
 	access          sync.Mutex
+	receive         receiveLifecycle
 	reader          reuse.RecordReader
 	writer          reuse.RecordWriter
 	readWaitOptions N.ReadWaitOptions
@@ -153,12 +154,13 @@ func (c *clientConn) readResponse() error {
 	if c.reader != nil {
 		return nil
 	}
-	reader, record, err := readFirstRecord(c.Conn, c.client.mode, c.client.psk, c.client.profile, c.readWaitOptions)
+	reader, record, err := readFirstResponse(c.Conn, c.client.mode, c.client.psk, c.client.profile, c.readWaitOptions)
 	if err != nil {
 		return E.Cause(err, "read reply")
 	}
 	cached, err := reuse.ParseReply(record)
 	if err != nil {
+		releaseResponseReader(reader)
 		return err
 	}
 	reader.SetCache(cached)
@@ -167,6 +169,8 @@ func (c *clientConn) readResponse() error {
 }
 
 func (c *clientConn) Read(p []byte) (int, error) {
+	if !c.receive.begin() { return 0, net.ErrClosed }
+	defer c.receive.end(c.releaseReader)
 	err := c.readResponse()
 	if err != nil {
 		return 0, err
@@ -175,6 +179,8 @@ func (c *clientConn) Read(p []byte) (int, error) {
 }
 
 func (c *clientConn) ReadBuffer(buffer *buf.Buffer) error {
+	if !c.receive.begin() { return net.ErrClosed }
+	defer c.receive.end(c.releaseReader)
 	err := c.readResponse()
 	if err != nil {
 		return err
@@ -275,6 +281,8 @@ func (c *clientConn) CloseWrite() error {
 }
 
 func (c *clientConn) InitializeReadWaiter(options N.ReadWaitOptions) (needCopy bool) {
+	if !c.receive.begin() { return false }
+	defer c.receive.end(c.releaseReader)
 	c.readWaitOptions = options
 	if c.reader != nil {
 		c.reader.InitializeReadWaiter(options)
@@ -283,6 +291,8 @@ func (c *clientConn) InitializeReadWaiter(options N.ReadWaitOptions) (needCopy b
 }
 
 func (c *clientConn) WaitReadBuffer() (*buf.Buffer, error) {
+	if !c.receive.begin() { return nil, net.ErrClosed }
+	defer c.receive.end(c.releaseReader)
 	err := c.readResponse()
 	if err != nil {
 		return nil, err
@@ -359,3 +369,12 @@ var (
 	_ N.EarlyWriter            = (*clientConn)(nil)
 	_ N.WriteCloser            = (*clientConn)(nil)
 )
+
+func (c *clientConn) releaseReader() {
+    releaseResponseReader(c.reader)
+}
+
+func (c *clientConn) Close() error {
+    c.receive.close(c.releaseReader)
+    return c.Conn.Close()
+}

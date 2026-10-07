@@ -24,7 +24,7 @@ var studyPattern = flag.String("study-pattern", "fixed", "fixed, alternating or 
 var studyDelivery = flag.String("study-delivery", "batch", "batch, channel-gated single, or TCP request/response; memory uses record boundaries for either single mode")
 var studyFrontHeadroom = flag.Int("study-front-headroom", 0, "writable header space required by the destination")
 var studyRetainRecords = flag.Int("study-retain-records", 0, "records kept by a simulated delayed consumer")
-var studyPolicies = []string{"baseline", "scratch", "buffered", "combined", "coalesced", "coalesced_buffered", "adaptive"}
+var studyPolicies = []string{"baseline", "scratch", "buffered", "combined", "coalesced", "coalesced_buffered", "adaptive", "integrated"}
 var studySharedFactory func(string, io.Reader, *Profile) (studyRecordReader, func(cipher.AEAD))
 var studyPSK = []byte("public snell readpath test fixture, not a server credential")
 
@@ -37,6 +37,10 @@ type studyRecordReader interface {
 }
 
 func studyReader(policy string, input io.Reader, profile *Profile) (studyRecordReader, func(cipher.AEAD)) {
+    if policy == "integrated" {
+        r := newBufferedShapedReader(input, studyPSK, profile)
+        return r, func(aead cipher.AEAD) { r.cipher = aead; clear(r.nonce); r.seq = 0 }
+    }
     if policy == "shared" || policy == "bounded" || policy == "detached" { return studySharedFactory(policy, input, profile) }
     if policy == "buffered" || policy == "combined" || policy == "coalesced_buffered" {
         input = bufio.NewReaderSize(input, *studyBufferSize)
@@ -62,6 +66,7 @@ func studyReader(policy string, input io.Reader, profile *Profile) (studyRecordR
 func closeStudyReader(r studyRecordReader) {
     r.ReleaseCache()
     if owned, ok := r.(interface{ releaseStudyStorage() }); ok { owned.releaseStudyStorage() }
+    if owned, ok := r.(interface{ releaseReceive() }); ok { owned.releaseReceive() }
 }
 
 func studyWire(t testing.TB, payloads [][]byte, withSalt bool) ([]byte, []int, cipher.AEAD, *Profile) {

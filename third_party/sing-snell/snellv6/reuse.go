@@ -108,6 +108,7 @@ type reuseSession struct {
 
 	state    atomic.Uint32
 	keepOnce atomic.Bool
+	receive receiveLifecycle
 	reader   reuse.RecordReader
 	writer   reuse.RecordWriter
 
@@ -170,6 +171,7 @@ func (s *reuseSession) Close() error {
 	if s.urlTest != nil {
 		s.urlTest.signalReady()
 	}
+	s.receive.close(s.releaseReader)
 	return s.Conn.Close()
 }
 
@@ -199,9 +201,9 @@ func (s *reuseSession) startDrain() {
 }
 
 func (s *reuseSession) drain() {
-	if s.urlTest == nil {
-		defer s.client.pool.DrainDone()
-	}
+    if s.urlTest == nil { defer s.client.pool.DrainDone() }
+    if !s.receive.begin() { return }
+    defer s.receive.end(s.releaseReader)
 	var discarded int
 	for {
 		record, err := s.reader.NextRecord()
@@ -249,7 +251,7 @@ func (c *reuseConn) readResponse() error {
 	var record *buf.Buffer
 	var err error
 	if c.session.reader == nil {
-		c.session.reader, record, err = readFirstRecord(c.session.Conn, c.session.client.mode, c.session.client.psk, c.session.client.profile, c.readWaitOptions)
+		c.session.reader, record, err = readFirstResponse(c.session.Conn, c.session.client.mode, c.session.client.psk, c.session.client.profile, c.readWaitOptions)
 	} else {
 		record, err = c.session.reader.ReadRecord()
 	}
@@ -266,6 +268,8 @@ func (c *reuseConn) readResponse() error {
 }
 
 func (c *reuseConn) Read(p []byte) (int, error) {
+	if !c.session.receive.begin() { return 0, net.ErrClosed }
+	defer c.session.receive.end(c.session.releaseReader)
 	if c.closed.Load() {
 		return 0, net.ErrClosed
 	}
@@ -306,6 +310,8 @@ func (c *reuseConn) Read(p []byte) (int, error) {
 }
 
 func (c *reuseConn) ReadBuffer(buffer *buf.Buffer) error {
+	if !c.session.receive.begin() { return net.ErrClosed }
+	defer c.session.receive.end(c.session.releaseReader)
 	if c.closed.Load() {
 		return net.ErrClosed
 	}
@@ -568,6 +574,8 @@ type reuseReadWaiter struct {
 }
 
 func (w *reuseReadWaiter) InitializeReadWaiter(options N.ReadWaitOptions) (needCopy bool) {
+	if !w.conn.session.receive.begin() { return false }
+	defer w.conn.session.receive.end(w.conn.session.releaseReader)
 	w.conn.readWaitOptions = options
 	if w.conn.session.reader != nil {
 		w.conn.session.reader.InitializeReadWaiter(options)
@@ -576,6 +584,8 @@ func (w *reuseReadWaiter) InitializeReadWaiter(options N.ReadWaitOptions) (needC
 }
 
 func (w *reuseReadWaiter) WaitReadBuffer() (*buf.Buffer, error) {
+	if !w.conn.session.receive.begin() { return nil, net.ErrClosed }
+	defer w.conn.session.receive.end(w.conn.session.releaseReader)
 	if w.conn.closed.Load() {
 		return nil, net.ErrClosed
 	}
@@ -1077,3 +1087,7 @@ var (
 	_ N.VectorisedWriter       = (*serverReuseVectorisedWriter[struct{}])(nil)
 	_ N.WriteCloser            = (*serverReuseConn[struct{}])(nil)
 )
+
+func (s *reuseSession) releaseReader() {
+    releaseResponseReader(s.reader)
+}

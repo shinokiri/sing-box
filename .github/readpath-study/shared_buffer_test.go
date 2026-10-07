@@ -51,3 +51,46 @@ func TestStudySharedConcurrentRelease(t *testing.T) {
 	afterBytes, afterBlocks := StudySharedStorage()
 	if beforeBytes != afterBytes || beforeBlocks != afterBlocks { t.Fatal("storage leaked") }
 }
+
+func TestStudySharedBufferOperations(t *testing.T) {
+	for _, pooled := range []bool{false, true} {
+		beforeBytes, beforeBlocks := StudySharedStorage()
+		var owner *Buffer
+		if pooled { owner = NewSize(4096); owner.Extend(4096) } else { owner = As(make([]byte, 4096)) }
+		copy(owner.Bytes()[128:384], bytes.Repeat([]byte{0x51}, 256))
+		view := owner.SharedSlice(128, 384)
+		owner.Release()
+		view.Advance(72)
+		view.Truncate(64)
+		clone := view.ToOwned()
+		if clone.Start() != view.Start() || clone.FreeLen() != view.FreeLen() || !bytes.Equal(clone.Bytes(), view.Bytes()) { t.Fatal("ToOwned lost layout or bytes") }
+		view.Reserve(16)
+		view.OverCap(16)
+		view.Reset()
+		if view.Cap() != 256 || cap(view.Bytes()) != 256 { t.Fatal("reset escaped view") }
+		view.Write(bytes.Repeat([]byte{0x62}, 256))
+		if clone.Byte(0) != 0x51 { t.Fatal("ToOwned still shared payload") }
+		view.Release()
+		clone.Release()
+		afterBytes, afterBlocks := StudySharedStorage()
+		if beforeBytes != afterBytes || beforeBlocks != afterBlocks { t.Fatal("nonstandard lifetime leaked") }
+	}
+}
+
+func TestStudySharedRangeRejectsEscape(t *testing.T) {
+	owner := NewSize(4096)
+	defer owner.Release()
+	view := owner.SharedSlice(100, 200)
+	defer view.Release()
+	for _, action := range []func(){
+		func() { view.OverCap(1) },
+		func() { view.SharedSlice(-1, 5) },
+		func() { view.SharedSlice(0, 101) },
+		func() { view.SharedSlice(10, 9) },
+	} {
+		func() {
+			defer func() { if recover() == nil { t.Error("out-of-range view operation succeeded") } }()
+			action()
+		}()
+	}
+}

@@ -23,7 +23,7 @@ jobs:
           python3 .github/readpath-study/prepare.py
           go -C third_party/sing-snell mod edit -require=github.com/sagernet/sing@v0.9.7-0.20260929150544-6f21f2425a95
           python3 .github/readpath-study/prepare_shared.py
-          gofmt -w third_party/sing-snell/snellv6/readpath*test.go
+          gofmt -w third_party/sing-snell/snellv6/{readpath*test.go,receive*.go,client.go,reuse.go} third_party/sing-tun/receive_view_integration_test.go
           go -C third_party/sing-snell mod tidy
       - name: Ownership, protocol, cancellation, and race tests
         run: |
@@ -31,11 +31,17 @@ jobs:
           go -C .study-deps/sing test -race -count=3 ./common/buf | tee shared-buffer-tests.txt
           go -C third_party/sing-snell test -tags=shared_receive_study -race -count=3 -timeout=180s ./... | tee protocol-tests.txt
           go -C third_party/sing-snell test -tags=shared_receive_study -run '^TestStudy(Shared|Retained|Bounded)' -v ./snellv6 -args -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee retention-tests.txt
+      - name: Test actual Snell sessions and Go TCP transmit ownership
+        run: |
+          set -o pipefail
+          go mod edit -replace=github.com/sagernet/sing=./.study-deps/sing
+          go test -race -count=3 -timeout=180s ./protocol/snell | tee session-integration-tests.txt
+          go test -race -tags=shared_receive_study -count=3 -run '^TestSharedReceiveTransmitStore$' github.com/sagernet/sing-tun | tee tcp-integration-tests.txt
       - name: Same-host comparison
         run: |
           set -o pipefail
-          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/.+/(baseline|coalesced_buffered|shared|bounded|detached)$' -benchmem -benchtime=150ms -count=3 -args -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee shared-bench.txt
-          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/(64|1440|65535)/(baseline|coalesced_buffered|bounded|detached)$' -benchmem -benchtime=150ms -count=3 -args -study-delivery=request -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee single-bench.txt
+          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/.+/(baseline|coalesced_buffered|bounded|detached|integrated)$' -benchmem -benchtime=150ms -count=3 -args -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee shared-bench.txt
+          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/(64|1440|65535)/(baseline|coalesced_buffered|bounded|detached|integrated)$' -benchmem -benchtime=150ms -count=3 -args -study-delivery=request -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee single-bench.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -45,6 +51,10 @@ jobs:
             shared-bench.txt
             single-bench.txt
             third_party/sing-snell/snellv6/readpath*test.go
+            third_party/sing-snell/snellv6/receive*.go
+            third_party/sing-snell/snellv6/client.go
+            third_party/sing-snell/snellv6/reuse.go
+            third_party/sing-tun/receive_view_integration_test.go
             .study-deps/sing/common/buf/shared_buffer*.go
           include-hidden-files: true
   android:
@@ -68,9 +78,9 @@ jobs:
           python3 .github/readpath-study/prepare.py
           go -C third_party/sing-snell mod edit -require=github.com/sagernet/sing@v0.9.7-0.20260929150544-6f21f2425a95
           go -C third_party/sing-snell mod tidy
-          gofmt -w third_party/sing-snell/snellv6/readpath*test.go
+          gofmt -w third_party/sing-snell/snellv6/{readpath*test.go,receive*.go,client.go,reuse.go} third_party/sing-tun/receive_view_integration_test.go
           export CC="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
-          CGO_ENABLED=1 GOOS=android GOARCH=arm64 go -C third_party/sing-snell test -c ./snellv6 -ldflags='-s -w' -o "$PWD/snell-control-arm64"
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 go -C third_party/sing-snell test -tags=owned_receive -c ./snellv6 -ldflags='-s -w' -o "$PWD/snell-control-arm64"
           python3 .github/readpath-study/prepare_shared.py
           CGO_ENABLED=1 GOOS=android GOARCH=arm64 go -C third_party/sing-snell test -tags=shared_receive_study -c ./snellv6 -ldflags='-s -w' -o "$PWD/snell-shared-arm64"
           sha256sum snell-*-arm64 > SHA256SUMS
