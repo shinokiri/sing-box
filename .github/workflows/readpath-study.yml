@@ -30,11 +30,13 @@ jobs:
           go -C third_party/sing-snell mod edit -require=github.com/sagernet/sing@v0.9.7-0.20260929150544-6f21f2425a95
           go -C third_party/sing-snell mod tidy
       - name: Verify protocol behavior and race safety
-        run: go -C third_party/sing-snell test -race -count=3 -timeout=180s ./...
+        run: |
+          go -C third_party/sing-snell test -race -count=3 -timeout=180s ./...
+          go -C third_party/sing-snell test -race -count=3 ./snellv6 -args -study-buffer-size=1024
       - name: Measure all variants without WAN traffic
         run: |
           set -o pipefail
-          go -C third_party/sing-snell test ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$' -benchmem -benchtime=300ms -count=5 | tee readpath-bench.txt
+          go -C third_party/sing-snell test ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$' -benchmem -benchtime=150ms -count=3 -args -study-buffer-size=1024 | tee readpath-bench.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
