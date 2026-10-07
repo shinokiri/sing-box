@@ -12,7 +12,7 @@ import tempfile
 from udpflow_release import CLIENT, MANIFEST, UPSTREAM, api, git, properties
 
 ANDROID = "SagerNet/sing-box-for-android"
-MODULES = ("sing-mux", "sing-tun", "sing-snell")
+MODULES = ("sing", "sing-mux", "sing-tun", "sing-snell")
 VERSION = re.compile(r"([1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-(alpha|beta|rc)\.(0|[1-9]\d*)")
 
 
