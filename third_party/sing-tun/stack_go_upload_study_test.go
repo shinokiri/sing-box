@@ -321,18 +321,23 @@ type uploadStudyScalar struct {
 func TestGoUploadSmallPaired(t *testing.T) {
 	const pairs = 2000
 	type result struct {
-		Profile int `json:"profile"`
-		Size int `json:"size"`
-		Control bool `json:"control"`
-		Before []int64 `json:"before_ns"`
-		After []int64 `json:"after_ns"`
+		Profile int     `json:"profile"`
+		Size    int     `json:"size"`
+		Control bool    `json:"control"`
+		Before  []int64 `json:"before_ns"`
+		After   []int64 `json:"after_ns"`
 	}
 	var results []result
 	defer func() {
 		if path := os.Getenv("UPLOAD_STUDY_PAIRED_OUTPUT"); path != "" {
 			data, err := json.Marshal(results)
-			if err != nil { t.Error(err); return }
-			if err := os.WriteFile(path, data, 0600); err != nil { t.Error(err) }
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Error(err)
+			}
 		}
 	}()
 	for _, profileID := range []int{2, 0, 1} {
@@ -340,21 +345,29 @@ func TestGoUploadSmallPaired(t *testing.T) {
 			for _, control := range []bool{true, false} {
 				t.Run(fmt.Sprintf("profile%d/size%d/control%v", profileID, size, control), func(t *testing.T) {
 					client, server, _ := uploadStudySnellPair(t, profileID)
-					const warmSize = 640<<10
+					const warmSize = 640 << 10
 					done := make(chan error, 1)
 					go func() {
 						_, err := io.CopyN(io.Discard, server, warmSize)
-						if err == nil { _, err = server.Write([]byte{1}) }
+						if err == nil {
+							_, err = server.Write([]byte{1})
+						}
 						message := make([]byte, size)
 						for i := 0; i < 2*pairs && err == nil; i++ {
 							_, err = io.ReadFull(server, message)
-							if err == nil { _, err = server.Write([]byte{1}) }
+							if err == nil {
+								_, err = server.Write([]byte{1})
+							}
 						}
 						done <- err
 					}()
-					if _, err := client.Write(make([]byte, warmSize)); err != nil { t.Fatal(err) }
+					if _, err := client.Write(make([]byte, warmSize)); err != nil {
+						t.Fatal(err)
+					}
 					ack := make([]byte, 1)
-					if _, err := io.ReadFull(client, ack); err != nil { t.Fatal(err) }
+					if _, err := io.ReadFull(client, ack); err != nil {
+						t.Fatal(err)
+					}
 					writer := bufio.NewExtendedWriter(client)
 					vector, _ := bufio.CreateVectorisedWriter(client)
 					options := N.NewReadWaitOptions(nil, writer)
@@ -362,23 +375,32 @@ func TestGoUploadSmallPaired(t *testing.T) {
 					source := newGoReadWaitFixture(t, bytes.Repeat([]byte{42}, size))
 					waiter, _ := source.CreateVectorisedReadWaiter()
 					waiter.InitializeReadWaiter(options)
-					r := result{Profile:profileID, Size:size, Control:control, Before:make([]int64,pairs), After:make([]int64,pairs)}
+					r := result{Profile: profileID, Size: size, Control: control, Before: make([]int64, pairs), After: make([]int64, pairs)}
 					for i := range pairs {
 						for j := range 2 {
-							label := (i+j)%2
+							label := (i + j) % 2
 							source.consumedTail.Store(1)
 							start := time.Now()
-							uploadStudySend(t, source, waiter, writer, vector, size, !control && label==1)
-							if _, err := io.ReadFull(client, ack); err != nil { t.Fatal(err) }
+							uploadStudySend(t, source, waiter, writer, vector, size, !control && label == 1)
+							if _, err := io.ReadFull(client, ack); err != nil {
+								t.Fatal(err)
+							}
 							elapsed := time.Since(start).Nanoseconds()
-							if label==0 { r.Before[i]=elapsed } else { r.After[i]=elapsed }
+							if label == 0 {
+								r.Before[i] = elapsed
+							} else {
+								r.After[i] = elapsed
+							}
 						}
 					}
-					if err := <-done; err != nil { t.Fatal(err) }
+					if err := <-done; err != nil {
+						t.Fatal(err)
+					}
 					before, after := slices.Clone(r.Before), slices.Clone(r.After)
-					slices.Sort(before); slices.Sort(after)
-					t.Logf("paired-rtt-ns n=%d before-p50=%d after-p50=%d before-p95=%d after-p95=%d", pairs,before[pairs/2],after[pairs/2],before[pairs*95/100],after[pairs*95/100])
-					results=append(results,r)
+					slices.Sort(before)
+					slices.Sort(after)
+					t.Logf("paired-rtt-ns n=%d before-p50=%d after-p50=%d before-p95=%d after-p95=%d", pairs, before[pairs/2], after[pairs/2], before[pairs*95/100], after[pairs*95/100])
+					results = append(results, r)
 				})
 			}
 		}
