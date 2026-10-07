@@ -89,6 +89,11 @@ jobs:
           test -z "$(gofmt -l third_party/sing/common/buf/{buffer,shared_buffer,shared_buffer_test}.go third_party/sing-snell/snellv6/receive*.go third_party/sing-tun/receive_view_integration_test.go)"
           go test -race -count=3 github.com/sagernet/sing/common/buf
           go test -race -count=3 -run '^TestSharedReceiveTransmitStore$' github.com/sagernet/sing-tun
+      - name: Test ready upload batching and scalar copy fallback
+        run: |
+          test -z "$(gofmt -l third_party/sing/common/bufio/copy_direct.go third_party/sing-tun/stack_go_read_wait*.go)"
+          go test -race -count=3 github.com/sagernet/sing/common/bufio
+          go test -race -count=3 -run '^TestGoReadWaitBatch' github.com/sagernet/sing-tun
       - name: Test Snell URLTest session handoff
         run: |
           urltest_format_status=0
@@ -100,6 +105,8 @@ jobs:
         run: |
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build github.com/sagernet/sing-snell/...
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build github.com/sagernet/sing-snell/...
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build github.com/sagernet/sing-tun
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build github.com/sagernet/sing-tun
       - name: Test URLTest progress and task lifecycle
         run: go test -race -count=3 -timeout=180s ./common/urltest ./protocol/group ./daemon
       - name: Test Android platform TCP Fast Open
