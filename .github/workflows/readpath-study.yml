@@ -1,0 +1,41 @@
+name: Snell readpath study
+on:
+  push:
+    branches: [codex/snell-readpath-study]
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.8'
+          cache: false
+      - name: Generate unchanged installed reader and match release dependencies
+        run: |
+          python3 .github/readpath-study/prepare.py
+          gofmt -w third_party/sing-snell/snellv6/readpath*test.go third_party/sing-snell/snellv6/shaped.go
+          go -C third_party/sing-snell mod edit -require=github.com/sagernet/sing@v0.9.7-0.20260929150544-6f21f2425a95
+          go -C third_party/sing-snell mod tidy
+      - name: Verify protocol behavior and race safety
+        run: go -C third_party/sing-snell test -race -count=3 -timeout=180s ./...
+      - name: Measure all variants without WAN traffic
+        run: |
+          set -o pipefail
+          go -C third_party/sing-snell test ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$' -benchmem -benchtime=300ms -count=5 | tee readpath-bench.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: readpath-${{ matrix.os }}
+          path: |
+            readpath-bench.txt
+            third_party/sing-snell/snellv6/readpath*test.go
+            third_party/sing-snell/snellv6/shaped.go
