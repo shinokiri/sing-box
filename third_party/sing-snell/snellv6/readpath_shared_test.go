@@ -18,9 +18,10 @@ var studyBlockSize = flag.Int("study-block-size", 4096, "initial shared receive 
 var studySharedReadAhead = flag.Int("study-shared-read-ahead", 4096, "maximum extra small-field receive window")
 
 func init() {
-	studyPolicies = append(studyPolicies, "shared")
-	studySharedFactory = func(input io.Reader, profile *Profile) (studyRecordReader, func(cipher.AEAD)) {
+	studyPolicies = append(studyPolicies, "shared", "bounded")
+	studySharedFactory = func(policy string, input io.Reader, profile *Profile) (studyRecordReader, func(cipher.AEAD)) {
 		r := newSharedShapedReader(input, studyPSK, profile)
+		if policy == "bounded" { r.enableBounded() }
 		return r, func(aead cipher.AEAD) { r.cipher = aead; clear(r.nonce); r.seq = 0 }
 	}
 }
@@ -42,6 +43,13 @@ type sharedShapedReader struct {
 	sharedFrames uint64
 	copiedFrames uint64
 	peakCapacity int
+	bounded bool
+	readAhead int
+}
+
+func (r *sharedShapedReader) enableBounded() {
+	r.bounded = true
+	r.readAhead = min(4096, max(256, *studySharedReadAhead))
 }
 
 func newSharedShapedReader(input io.Reader, psk []byte, profile *Profile) *sharedShapedReader {
@@ -57,13 +65,19 @@ func sharedCapacity(required int) int {
 	return size
 }
 
+func (r *sharedShapedReader) capacityFor(required int) int {
+	if !r.bounded { return sharedCapacity(required) }
+	// Round modestly instead of doubling a nearly 64 KiB record to 128 KiB.
+	return (max(required, r.readAhead) + 4095) &^ 4095
+}
+
 // ensure waits for only the current protocol field/record, never a full block.
 // It reads already-available following records when space permits. Published
 // views are immutable from the receiver's perspective; only unconsumed bytes
 // may move when the block ends or grows. No prediction uses the preceding frame.
 func (r *sharedShapedReader) ensure(required int) error {
 	if r.block == nil {
-		r.block = buf.NewSize(sharedCapacity(required))
+		r.block = buf.NewSize(r.capacityFor(required))
 		r.peakCapacity = max(r.peakCapacity, r.block.Cap())
 	}
 	available := r.block.Len() - r.position
@@ -72,12 +86,14 @@ func (r *sharedShapedReader) ensure(required int) error {
 		r.block.Resize(0, 0)
 		r.position = 0
 	}
-	if r.block.Cap() - r.position < required {
-		if !r.block.HasSharedViews() && r.block.Cap() >= required {
+	minimum := required
+	if r.bounded { minimum = max(required, r.readAhead) }
+	if r.block.Cap() - r.position < required || r.block.Cap() < minimum {
+		if !r.block.HasSharedViews() && r.block.Cap() >= minimum {
 			copy(r.block.Bytes(), r.block.Bytes()[r.position:])
 			r.block.Resize(0, available)
 		} else {
-			next := buf.NewSize(max(r.block.Cap(), sharedCapacity(required)))
+			next := buf.NewSize(max(r.block.Cap(), r.capacityFor(required)))
 			next.Write(r.block.Bytes()[r.position:])
 			r.block.Release()
 			r.block = next
@@ -97,11 +113,19 @@ func (r *sharedShapedReader) ensure(required int) error {
 		// A known large record is read exactly to its end, allowing a drained
 		// block to reset without moving the next record. Small fields/records
 		// can still batch whatever is currently available, without waiting.
-		if required <= *studySharedReadAhead { limit = max(limit, *studySharedReadAhead) }
+		window := *studySharedReadAhead
+		if r.bounded { window = r.readAhead }
+		prefetch := required <= window
+		if prefetch { limit = max(limit, window) }
 		space := r.block.FreeBytes()
 		space = space[:min(len(space), limit)]
 		n, err := r.upstream.Read(space)
 		r.block.Extend(n)
+		// Only a filled, substantial prefetch region grows the future window.
+		// Short isolated replies stay small. No timer, RTT or Wi-Fi state is used.
+		if r.bounded && prefetch && len(space) >= window/2 && n == len(space) {
+			r.readAhead = min(max(256, *studySharedReadAhead), window*4)
+		}
 		if err != nil { r.pendingErr = err }
 		if n == 0 && err == nil {
 			emptyReads++
@@ -141,6 +165,7 @@ func (r *sharedShapedReader) read() (*buf.Buffer, error) {
 	r.position += frameLen
 	if payloadLen == 0 {
 		r.releaseDrainedBlock()
+		if r.bounded { r.readAhead = min(4096, max(256, *studySharedReadAhead)) }
 		return nil, io.EOF
 	}
 	frame := r.block.Bytes()[start:r.position]
@@ -153,7 +178,8 @@ func (r *sharedShapedReader) read() (*buf.Buffer, error) {
 	snell.IncreaseNonce(r.nonce)
 	// Header/padding and the used authentication tag are now private writable
 	// headroom. Never expose the following frame as writable rear headroom.
-	if r.readWaitOptions.FrontHeadroom <= headLen+paddingLen && r.readWaitOptions.RearHeadroom <= snell.AEADTagLen {
+	share := !r.bounded || (payloadLen > 2048 && payloadLen >= r.block.Cap()/8)
+	if share && r.readWaitOptions.FrontHeadroom <= headLen+paddingLen && r.readWaitOptions.RearHeadroom <= snell.AEADTagLen {
 		body := r.block.SharedSlice(start, r.position)
 		body.Advance(headLen+paddingLen)
 		body.Truncate(payloadLen)

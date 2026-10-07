@@ -21,9 +21,9 @@ import (
 // No traffic pacing, socket window or delay settings are involved.
 var studyBufferSize = flag.Int("study-buffer-size", 4096, "read buffer size for the isolated comparison")
 var studyPattern = flag.String("study-pattern", "fixed", "fixed, alternating or bursts record sizes")
-var studyDelivery = flag.String("study-delivery", "batch", "batch or gated single-record delivery")
+var studyDelivery = flag.String("study-delivery", "batch", "batch, channel-gated single, or TCP request/response; memory uses record boundaries for either single mode")
 var studyPolicies = []string{"baseline", "scratch", "buffered", "combined", "coalesced", "coalesced_buffered", "adaptive"}
-var studySharedFactory func(io.Reader, *Profile) (studyRecordReader, func(cipher.AEAD))
+var studySharedFactory func(string, io.Reader, *Profile) (studyRecordReader, func(cipher.AEAD))
 var studyPSK = []byte("public snell readpath test fixture, not a server credential")
 
 type studyRecordReader interface {
@@ -35,7 +35,7 @@ type studyRecordReader interface {
 }
 
 func studyReader(policy string, input io.Reader, profile *Profile) (studyRecordReader, func(cipher.AEAD)) {
-    if policy == "shared" { return studySharedFactory(input, profile) }
+    if policy == "shared" || policy == "bounded" { return studySharedFactory(policy, input, profile) }
     if policy == "buffered" || policy == "combined" || policy == "coalesced_buffered" {
         input = bufio.NewReaderSize(input, *studyBufferSize)
     }
@@ -184,11 +184,16 @@ func TestStudyShapedDoesNotWaitForNextRecord(t *testing.T) {
     }
 }
 
-type studyCyclicReader struct { wire []byte; offset int; calls uint64 }
+type studyCyclicReader struct { wire []byte; offset int; calls uint64; ends []int; frame int }
 func (r *studyCyclicReader) Read(p []byte) (int, error) {
     r.calls++
-    if r.offset == len(r.wire) { r.offset = 0 }
-    n := copy(p, r.wire[r.offset:])
+    if r.offset == len(r.wire) { r.offset = 0; r.frame = 0 }
+    end := len(r.wire)
+    if len(r.ends) > 0 {
+        for r.offset == r.ends[r.frame] { r.frame++ }
+        end = r.ends[r.frame]
+    }
+    n := copy(p, r.wire[r.offset:end])
     r.offset += n
     return n, nil
 }
@@ -210,6 +215,7 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                     }
                     wire, ends, aead, profile := studyWire(b, payloads, false)
                     cyclic := &studyCyclicReader{wire: wire}
+                    if *studyDelivery != "batch" { cyclic.ends = ends }
                     var input io.Reader = cyclic
                     var receiver, sender *net.TCPConn
                     var counted *studyCountingReader
@@ -235,15 +241,20 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                     b.SetBytes(int64(totalPlain/len(payloads)))
                     b.ReportAllocs()
                     b.ResetTimer()
+                    cpuStart := studyProcessCPU()
                     if transport == "tcp" {
                         go func() {
-                            if *studyDelivery == "single" {
+                            if *studyDelivery == "single" || *studyDelivery == "request" {
+                                var request [1]byte
                                 for i := 0; i < b.N; i++ {
+                                    if *studyDelivery == "request" {
+                                        if _, err := io.ReadFull(sender, request[:]); err != nil { done <- err; return }
+                                    }
                                     index := i % 32
                                     start := 0
                                     if index > 0 { start = ends[index-1] }
                                     if _, err := sender.Write(wire[start:ends[index]]); err != nil { done <- err; return }
-                                    <-acknowledged
+                                    if *studyDelivery == "single" { <-acknowledged }
                                 }
                                 done <- nil
                                 return
@@ -256,14 +267,19 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                             done <- nil
                         }()
                     }
+                    var request [1]byte
                     for i := 0; i < b.N; i++ {
                         if i % 32 == 0 { reset(aead) }
+                        if transport == "tcp" && *studyDelivery == "request" {
+                            if _, err := receiver.Write(request[:]); err != nil { b.Fatal(err) }
+                        }
                         body, err := reader.ReadRecord()
                         if err != nil { b.Fatal(err) }
                         if body.Len() != len(payloads[i%32]) { b.Fatal("wrong record size") }
                         body.Release()
                         if transport == "tcp" && *studyDelivery == "single" { acknowledged <- struct{}{} }
                     }
+                    cpuElapsed := studyProcessCPU() - cpuStart
                     b.StopTimer()
                     calls := cyclic.calls
                     if transport == "tcp" {
@@ -271,6 +287,7 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                         calls = counted.calls
                     }
                     b.ReportMetric(float64(calls)/float64(b.N), "reads/record")
+                    if cpuElapsed > 0 { b.ReportMetric(float64(cpuElapsed)/float64(b.N), "process-cpu-ns/record") }
                     if tracked, ok := reader.(interface{ studyMetrics() (uint64, int) }); ok {
                         copied, capacity := tracked.studyMetrics()
                         b.ReportMetric(float64(copied)/float64(b.N), "copied-B/record")

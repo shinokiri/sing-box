@@ -153,7 +153,7 @@ func TestStudySharedLogicalEOFReleasesDrainedBlock(t *testing.T) {
 func TestStudyRetainedBackingComparison(t *testing.T) {
 	for _, pattern := range []string{"small", "large", "alternating"} {
 		for _, delay := range []int{0, 1, 32} {
-			for _, policy := range []string{"baseline", "shared"} {
+			for _, policy := range []string{"baseline", "shared", "bounded"} {
 				t.Run(fmt.Sprintf("%s/retained%d/%s", pattern, delay, policy), func(t *testing.T) {
 					var payloads [][]byte
 					for i := range 96 {
@@ -167,9 +167,16 @@ func TestStudyRetainedBackingComparison(t *testing.T) {
 					var held []*buf.Buffer
 					var peakRetained, peakDuringRead int64
 					measure := func() int64 {
-						if policy == "shared" { bytes, _ := buf.StudySharedStorage(); return bytes-beforeBytes }
 						var bytes int64
-						for _, body := range held { bytes += int64(cap(body.Bytes())+body.Start()) }
+						if policy != "baseline" {
+							bytes, _ = buf.StudySharedStorage()
+							bytes -= beforeBytes
+							owner := r.(*sharedShapedReader).block
+							if owner != nil && !owner.StudyUsesSharedStorage() { bytes += int64(cap(owner.Bytes())+owner.Start()) }
+						}
+						for _, body := range held {
+							if !body.StudyUsesSharedStorage() { bytes += int64(cap(body.Bytes())+body.Start()) }
+						}
 						return bytes
 					}
 					for range payloads {
@@ -189,6 +196,36 @@ func TestStudyRetainedBackingComparison(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestStudyBoundedSmallRetentionAndLargeCapacity(t *testing.T) {
+	beforeBytes, beforeBlocks := buf.StudySharedStorage()
+	payloads := [][]byte{bytes.Repeat([]byte{0x51}, 65535)}
+	for i := range 32 { payloads = append(payloads, bytes.Repeat([]byte{byte(i)}, 64)) }
+	payloads = append(payloads, nil)
+	wire, _, _, profile := studyWire(t, payloads, true)
+	r := newSharedShapedReader(bytes.NewReader(wire), studyPSK, profile)
+	r.enableBounded()
+	defer r.releaseStudyStorage()
+	large, err := r.ReadRecord()
+	if err != nil { t.Fatal(err) }
+	if r.peakCapacity > 73728 { t.Fatalf("large record over-reserved: %d", r.peakCapacity) }
+	large.Release()
+	var held []*buf.Buffer
+	for range 32 {
+		body, err := r.ReadRecord()
+		if err != nil { t.Fatal(err) }
+		if body.StudyUsesSharedStorage() { t.Fatal("small payload pinned shared receive storage") }
+		held = append(held, body)
+	}
+	if _, err := r.ReadRecord(); !errors.Is(err, io.EOF) { t.Fatal(err) }
+	if r.block != nil { t.Fatal("drained logical EOF kept receive block") }
+	for i, body := range held {
+		if !bytes.Equal(body.Bytes(), payloads[i+1]) { t.Fatal("retained small payload changed") }
+		body.Release()
+	}
+	afterBytes, afterBlocks := buf.StudySharedStorage()
+	if beforeBytes != afterBytes || beforeBlocks != afterBlocks { t.Fatal("storage leaked") }
 }
 
 // Report backing memory held by delayed consumers separately from B/op. This

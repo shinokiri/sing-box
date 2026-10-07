@@ -47,3 +47,5 @@ func (b *Buffer) HasSharedViews() bool {
 func StudySharedStorage() (bytes, blocks int64) {
 	return studySharedBytes.Load(), studySharedBlocks.Load()
 }
+
+func (b *Buffer) StudyUsesSharedStorage() bool { return b.shared != nil }
