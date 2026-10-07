@@ -20,6 +20,7 @@ import (
 // These variants isolate header scratch reuse from ordinary buffered reads.
 // No traffic pacing, socket window or delay settings are involved.
 var studyBufferSize = flag.Int("study-buffer-size", 4096, "read buffer size for the isolated comparison")
+var studyPattern = flag.String("study-pattern", "fixed", "fixed, alternating or bursts record sizes")
 var studyPolicies = []string{"baseline", "scratch", "buffered", "combined", "coalesced", "coalesced_buffered", "adaptive"}
 var studyPSK = []byte("public snell readpath test fixture, not a server credential")
 
@@ -183,12 +184,18 @@ type studyCountingReader struct { io.Reader; calls uint64 }
 func (r *studyCountingReader) Read(p []byte) (int, error) { r.calls++; return r.Reader.Read(p) }
 
 func BenchmarkStudyShapedRead(b *testing.B) {
-    for _, size := range []int{64, 1440, 16384, 65535} {
+    for _, size := range []int{64, 1440, 4096, 8192, 16384, 65535} {
         for _, transport := range []string{"memory", "tcp"} {
             for _, policy := range studyPolicies {
                 b.Run(fmt.Sprintf("%s/%d/%s", transport, size, policy), func(b *testing.B) {
                     payloads := make([][]byte, 32)
-                    for i := range payloads { payloads[i] = bytes.Repeat([]byte{byte(i)}, size) }
+                    totalPlain := 0
+                    for i := range payloads {
+                        recordSize := size
+                        if (*studyPattern == "alternating" && i%2 == 1) || (*studyPattern == "bursts" && i >= 16) { recordSize = 64 }
+                        payloads[i] = bytes.Repeat([]byte{byte(i)}, recordSize)
+                        totalPlain += recordSize
+                    }
                     wire, ends, aead, profile := studyWire(b, payloads, false)
                     cyclic := &studyCyclicReader{wire: wire}
                     var input io.Reader = cyclic
@@ -211,7 +218,7 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                         input = counted
                     }
                     reader, reset := studyReader(policy, input, profile)
-                    b.SetBytes(int64(size))
+                    b.SetBytes(int64(totalPlain/len(payloads)))
                     b.ReportAllocs()
                     b.ResetTimer()
                     if transport == "tcp" {
@@ -228,7 +235,7 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                         if i % 32 == 0 { reset(aead) }
                         body, err := reader.ReadRecord()
                         if err != nil { b.Fatal(err) }
-                        if body.Len() != size { b.Fatal("wrong record size") }
+                        if body.Len() != len(payloads[i%32]) { b.Fatal("wrong record size") }
                         body.Release()
                     }
                     b.StopTimer()

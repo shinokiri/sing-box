@@ -60,7 +60,7 @@ func (r *coalescedShapedReader) read() (*buf.Buffer, error) {
 
 	prefixLen := r.profile.recordPrefixLen(r.seq)
 	head := r.head[:prefixLen+snell.HeaderCipherLen]
-    if r.controller != nil && r.previousPayload >= r.controller.capacity {
+    if r.controller != nil && r.previousPayload >= 2*r.controller.capacity {
         r.controller.maximum = len(head)
     }
 	_, err := io.ReadFull(r.upstream, head)
