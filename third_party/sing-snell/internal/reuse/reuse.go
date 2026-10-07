@@ -38,6 +38,19 @@ type Session interface {
 	ReuseState() *atomic.Uint32
 }
 
+// A receive threshold is a window-growth hint, not the currently advertised
+// receive window. Sessions without a usable hint retain recency-based behavior.
+type receiveThresholdSession interface {
+	ReceiveThreshold() (uint32, bool)
+}
+
+func receiveThreshold(session Session) (uint32, bool) {
+	if measured, ok := session.(receiveThresholdSession); ok {
+		return measured.ReceiveThreshold()
+	}
+	return 0, false
+}
+
 type poolEntry[S Session] struct {
 	session S
 	time    time.Time
@@ -73,9 +86,12 @@ func (p *Pool[S]) Take() (session S, found bool, closed bool) {
 	closed = p.closed
 	var expired []S
 	now := time.Now()
-	if !closed {
-		// Prefer a recently used idle connection to preserve warm TCP state.
-		// Continue scanning after selection so older expired entries are closed.
+	for !closed && !found {
+		var selected *list.Element[*poolEntry[S]]
+		var threshold uint32
+		var measured bool
+		// Among comparable ready sockets, preserve receive-window growth.
+		// Equal or unavailable hints retain the recent-first ordering.
 		for element := p.entries.Back(); element != nil; {
 			next := element.Prev()
 			entry := element.Value
@@ -91,15 +107,22 @@ func (p *Pool[S]) Take() (session S, found bool, closed bool) {
 				element = next
 				continue
 			}
-			if !found && state == StateReady && entry.session.ReuseState().CompareAndSwap(uint32(StateReady), uint32(StateActive)) {
-				session = entry.session
-				found = true
-				p.entries.Remove(element)
-				element = next
-				continue
+			if state == StateReady {
+				value, available := receiveThreshold(entry.session)
+				if selected == nil || (measured && available && value > threshold) {
+					selected, threshold, measured = element, value, available
+				}
 			}
 			element = next
 		}
+		if selected == nil {
+			break
+		}
+		if selected.Value.session.ReuseState().CompareAndSwap(uint32(StateReady), uint32(StateActive)) {
+			session, found = selected.Value.session, true
+			p.entries.Remove(selected)
+		}
+		// Close may race with sampling. Rescan after a failed reservation.
 	}
 	p.access.Unlock()
 	for _, expiredSession := range expired {
@@ -111,7 +134,7 @@ func (p *Pool[S]) Take() (session S, found bool, closed bool) {
 func (p *Pool[S]) MoveToPool(session S, state State, drain bool) bool {
 	p.access.Lock()
 	closed := p.closed
-	var expired []S
+	var retired []S
 	now := time.Now()
 	if !closed {
 		for element := p.entries.Front(); element != nil; {
@@ -125,7 +148,7 @@ func (p *Pool[S]) MoveToPool(session S, state State, drain bool) bool {
 			}
 			if now.Sub(entry.time) > PoolMaxAge {
 				p.entries.Remove(element)
-				expired = append(expired, entry.session)
+				retired = append(retired, entry.session)
 				element = next
 				continue
 			}
@@ -133,20 +156,47 @@ func (p *Pool[S]) MoveToPool(session S, state State, drain bool) bool {
 		}
 	}
 	var added bool
-	if !closed && p.stop != nil && p.entries.Len() < PoolSize {
-		p.entries.PushBack(&poolEntry[S]{session: session, time: now})
-		if state == StateWaiting && drain {
-			p.drainWg.Add(1)
+	if !closed && p.stop != nil && State(session.ReuseState().Load()) != StateClosed {
+		admit := true
+		if p.entries.Len() >= PoolSize {
+			// Replace the smallest measured hint, oldest first on a tie.
+			// If comparison is unavailable, keep the existing full-pool policy.
+			value, available := receiveThreshold(session)
+			var victim *list.Element[*poolEntry[S]]
+			var smallest uint32
+			if available {
+				for element := p.entries.Front(); element != nil; element = element.Next() {
+					current, known := receiveThreshold(element.Value.session)
+					if !known {
+						victim = nil
+						break
+					}
+					if victim == nil || current < smallest {
+						victim, smallest = element, current
+					}
+				}
+			}
+			admit = victim != nil && value >= smallest
+			if admit {
+				p.entries.Remove(victim)
+				retired = append(retired, victim.Value.session)
+			}
 		}
-		added = true
-		if !p.ticking {
-			p.ticking = true
-			go p.ExpireLoop()
+		if admit {
+			p.entries.PushBack(&poolEntry[S]{session: session, time: now})
+			if state == StateWaiting && drain {
+				p.drainWg.Add(1)
+			}
+			added = true
+			if !p.ticking {
+				p.ticking = true
+				go p.ExpireLoop()
+			}
 		}
 	}
 	p.access.Unlock()
-	for _, expiredSession := range expired {
-		expiredSession.Close()
+	for _, retiredSession := range retired {
+		retiredSession.Close()
 	}
 	if !added {
 		session.Close()
