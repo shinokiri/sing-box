@@ -34,8 +34,8 @@ jobs:
       - name: Same-host comparison
         run: |
           set -o pipefail
-          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/.+/(baseline|coalesced_buffered|shared|bounded)$' -benchmem -benchtime=150ms -count=3 -args -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee shared-bench.txt
-          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/(64|1440|65535)/(baseline|coalesced_buffered|bounded)$' -benchmem -benchtime=150ms -count=3 -args -study-delivery=request -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee single-bench.txt
+          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/.+/(baseline|coalesced_buffered|shared|bounded|detached)$' -benchmem -benchtime=150ms -count=3 -args -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee shared-bench.txt
+          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/(64|1440|65535)/(baseline|coalesced_buffered|bounded|detached)$' -benchmem -benchtime=150ms -count=3 -args -study-delivery=request -study-block-size=65536 -study-shared-read-ahead=65536 -study-front-headroom=72 | tee single-bench.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:

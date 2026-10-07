@@ -34,10 +34,10 @@ func sharedWire(t testing.TB, psk []byte, payloads [][]byte) ([]byte, *Profile) 
 }
 
 func TestStudySharedRetainedViewsAndHeadroom(t *testing.T) {
-	for _, bounded := range []bool{false, true} {
+	for _, policy := range []string{"shared", "bounded", "detached"} {
 	for profileID := range 8 {
 		for _, room := range []int{0, 32, 72, 256} {
-			t.Run(fmt.Sprintf("bounded%t/profile%d/room%d", bounded, profileID, room), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/profile%d/room%d", policy, profileID, room), func(t *testing.T) {
 				psk := []byte(fmt.Sprintf("public shared receive fixture %d", profileID))
 				var payloads [][]byte
 				for i := range 80 {
@@ -48,7 +48,8 @@ func TestStudySharedRetainedViewsAndHeadroom(t *testing.T) {
 				wire, profile := sharedWire(t, psk, payloads)
 				beforeBytes, beforeBlocks := buf.StudySharedStorage()
 				r := newSharedShapedReader(bytes.NewReader(wire), psk, profile)
-				if bounded { r.enableBounded() }
+				if policy != "shared" { r.enableBounded() }
+				r.detached = policy == "detached"
 				r.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: room, RearHeadroom: room/2})
 				var retained []*buf.Buffer
 				var wants [][]byte
@@ -156,7 +157,7 @@ func TestStudySharedLogicalEOFReleasesDrainedBlock(t *testing.T) {
 func TestStudyRetainedBackingComparison(t *testing.T) {
 	for _, pattern := range []string{"small", "large", "alternating"} {
 		for _, delay := range []int{0, 1, 32} {
-			for _, policy := range []string{"baseline", "shared", "bounded"} {
+			for _, policy := range []string{"baseline", "shared", "bounded", "detached"} {
 				t.Run(fmt.Sprintf("%s/retained%d/%s", pattern, delay, policy), func(t *testing.T) {
 					var payloads [][]byte
 					for i := range 96 {
@@ -167,6 +168,7 @@ func TestStudyRetainedBackingComparison(t *testing.T) {
 					wire, _, _, profile := studyWire(t, payloads, true)
 					beforeBytes, beforeBlocks := buf.StudySharedStorage()
 					r, _ := studyReader(policy, bytes.NewReader(wire), profile)
+					r.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: *studyFrontHeadroom})
 					var held []*buf.Buffer
 					var peakRetained, peakDuringRead int64
 					measure := func() int64 {

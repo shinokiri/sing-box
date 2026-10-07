@@ -23,6 +23,7 @@ var studyBufferSize = flag.Int("study-buffer-size", 4096, "read buffer size for 
 var studyPattern = flag.String("study-pattern", "fixed", "fixed, alternating or bursts record sizes")
 var studyDelivery = flag.String("study-delivery", "batch", "batch, channel-gated single, or TCP request/response; memory uses record boundaries for either single mode")
 var studyFrontHeadroom = flag.Int("study-front-headroom", 0, "writable header space required by the destination")
+var studyRetainRecords = flag.Int("study-retain-records", 0, "records kept by a simulated delayed consumer")
 var studyPolicies = []string{"baseline", "scratch", "buffered", "combined", "coalesced", "coalesced_buffered", "adaptive"}
 var studySharedFactory func(string, io.Reader, *Profile) (studyRecordReader, func(cipher.AEAD))
 var studyPSK = []byte("public snell readpath test fixture, not a server credential")
@@ -36,7 +37,7 @@ type studyRecordReader interface {
 }
 
 func studyReader(policy string, input io.Reader, profile *Profile) (studyRecordReader, func(cipher.AEAD)) {
-    if policy == "shared" || policy == "bounded" { return studySharedFactory(policy, input, profile) }
+    if policy == "shared" || policy == "bounded" || policy == "detached" { return studySharedFactory(policy, input, profile) }
     if policy == "buffered" || policy == "combined" || policy == "coalesced_buffered" {
         input = bufio.NewReaderSize(input, *studyBufferSize)
     }
@@ -240,6 +241,7 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                     reader, reset := studyReader(policy, input, profile)
                     reader.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: *studyFrontHeadroom})
                     defer closeStudyReader(reader)
+                    held := make([]*buf.Buffer, max(0, *studyRetainRecords))
                     b.SetBytes(int64(totalPlain/len(payloads)))
                     b.ReportAllocs()
                     b.ResetTimer()
@@ -278,9 +280,14 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                         body, err := reader.ReadRecord()
                         if err != nil { b.Fatal(err) }
                         if body.Len() != len(payloads[i%32]) { b.Fatal("wrong record size") }
-                        body.Release()
+                        if len(held) > 0 {
+                            slot := i % len(held)
+                            held[slot].Release()
+                            held[slot] = body
+                        } else { body.Release() }
                         if transport == "tcp" && *studyDelivery == "single" { acknowledged <- struct{}{} }
                     }
+                    for _, body := range held { body.Release() }
                     cpuElapsed := studyProcessCPU() - cpuStart
                     b.StopTimer()
                     calls := cyclic.calls

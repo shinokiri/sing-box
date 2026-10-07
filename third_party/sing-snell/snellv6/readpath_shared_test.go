@@ -18,10 +18,11 @@ var studyBlockSize = flag.Int("study-block-size", 4096, "initial shared receive 
 var studySharedReadAhead = flag.Int("study-shared-read-ahead", 4096, "maximum extra small-field receive window")
 
 func init() {
-	studyPolicies = append(studyPolicies, "shared", "bounded")
+	studyPolicies = append(studyPolicies, "shared", "bounded", "detached")
 	studySharedFactory = func(policy string, input io.Reader, profile *Profile) (studyRecordReader, func(cipher.AEAD)) {
 		r := newSharedShapedReader(input, studyPSK, profile)
-		if policy == "bounded" { r.enableBounded() }
+		if policy != "shared" { r.enableBounded() }
+		r.detached = policy == "detached"
 		return r, func(aead cipher.AEAD) { r.cipher = aead; clear(r.nonce); r.seq = 0 }
 	}
 }
@@ -46,6 +47,9 @@ type sharedShapedReader struct {
 	bounded bool
 	readAhead int
 	viewFence int
+	detached bool
+	transferCapacity int
+	transferredFrames uint64
 }
 
 func (r *sharedShapedReader) enableBounded() {
@@ -80,7 +84,8 @@ func (r *sharedShapedReader) ensure(required int) error {
 	front := 0
 	if r.bounded { front = r.readWaitOptions.FrontHeadroom }
 	if r.block == nil {
-		r.block = buf.NewSize(r.capacityFor(required))
+		if r.pendingErr != nil { return r.pendingErr }
+		r.block = buf.NewSize(max(r.capacityFor(required), r.transferCapacity))
 		r.block.Resize(0, front)
 		r.position = front
 		r.viewFence = 0
@@ -189,6 +194,7 @@ func (r *sharedShapedReader) read() (*buf.Buffer, error) {
 	if payloadLen == 0 {
 		r.releaseDrainedBlock()
 		if r.bounded { r.readAhead = min(4096, max(256, *studySharedReadAhead)) }
+		r.transferCapacity = 0
 		return nil, io.EOF
 	}
 	frame := r.block.Bytes()[start:r.position]
@@ -201,9 +207,22 @@ func (r *sharedShapedReader) read() (*buf.Buffer, error) {
 	snell.IncreaseNonce(r.nonce)
 	// Header/padding and the used authentication tag are now private writable
 	// headroom. Never expose the following frame as writable rear headroom.
-	share := !r.bounded || (payloadLen > 2048 && payloadLen >= r.block.Cap()/8)
-	viewStart := start
 	payloadStart := start + headLen + paddingLen
+	if r.detached && r.position == r.block.Len() && payloadLen > 2048 && payloadLen >= r.block.Cap()/4 &&
+		payloadStart >= r.readWaitOptions.FrontHeadroom && r.block.Cap()-(payloadStart+payloadLen) >= r.readWaitOptions.RearHeadroom {
+		// Transfer the existing Buffer itself. There are no shared views in
+		// this variant, and no unread bytes remain in the receive block.
+		body := r.block
+		r.transferCapacity = body.Cap()
+		r.block = nil
+		r.position = 0
+		r.viewFence = 0
+		body.Resize(payloadStart, payloadLen)
+		r.transferredFrames++
+		return body, nil
+	}
+	share := !r.detached && (!r.bounded || (payloadLen > 2048 && payloadLen >= r.block.Cap()/8))
+	viewStart := start
 	if r.bounded && share {
 		// Unpublished/fully released preceding bytes can supply writable
 		// packet headroom. Never borrow bytes owned by an earlier live view.
