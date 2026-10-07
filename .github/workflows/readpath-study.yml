@@ -77,6 +77,8 @@ jobs:
           GOOS: linux
           GOARCH: arm64
         run: |
+          gofmt -w third_party/sing-tun/stack_go_upload_study_test.go
+          GOMAXPROCS=2 go test -tags upload_batch_study -run '^TestGoUploadSmallPaired$' -count=1 -timeout=120s github.com/sagernet/sing-tun
           go test -c -tags upload_batch_study -o upload-batch-arm64.test github.com/sagernet/sing-tun
           sha256sum upload-batch-arm64.test > upload-batch-arm64.sha256
           git rev-parse HEAD > source-commit.txt
@@ -87,3 +89,4 @@ jobs:
             upload-batch-arm64.test
             upload-batch-arm64.sha256
             source-commit.txt
+            third_party/sing-tun/stack_go_upload_study_test.go
