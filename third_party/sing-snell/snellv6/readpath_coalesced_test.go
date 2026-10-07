@@ -9,8 +9,22 @@ import (
     E "github.com/sagernet/sing/common/exceptions"
 )
 
+// Limit header read-ahead after a large frame; body reads stay unrestricted.
+// Keep bufio's own short-read/error handling and buffered bytes intact.
+type adaptiveShapedInput struct {
+    io.Reader
+    capacity int
+    maximum int
+}
+func (r *adaptiveShapedInput) Read(p []byte) (int, error) {
+    if r.maximum > 0 && len(p) > r.maximum { p = p[:r.maximum] }
+    return r.Reader.Read(p)
+}
+
 type coalescedShapedReader struct {
 	baseReader
+    controller *adaptiveShapedInput
+    previousPayload int
 	psk     []byte
 	profile *Profile
 	cipher  cipher.AEAD
@@ -46,7 +60,11 @@ func (r *coalescedShapedReader) read() (*buf.Buffer, error) {
 
 	prefixLen := r.profile.recordPrefixLen(r.seq)
 	head := r.head[:prefixLen+snell.HeaderCipherLen]
+    if r.controller != nil && r.previousPayload >= r.controller.capacity {
+        r.controller.maximum = len(head)
+    }
 	_, err := io.ReadFull(r.upstream, head)
+    if r.controller != nil { r.controller.maximum = 0 }
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +81,7 @@ func (r *coalescedShapedReader) read() (*buf.Buffer, error) {
 	// Surge 6.7.0 (11520): FUN_100013abc: default-shaped reader ignores the two reserved header bytes.
 	paddingLen := int(binary.BigEndian.Uint16(headerCipher[3:5]))
 	payloadLen := int(binary.BigEndian.Uint16(headerCipher[5:7]))
+    r.previousPayload = payloadLen
 	seq := r.seq
 	r.seq++
 

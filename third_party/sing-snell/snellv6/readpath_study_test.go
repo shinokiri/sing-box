@@ -20,7 +20,7 @@ import (
 // These variants isolate header scratch reuse from ordinary buffered reads.
 // No traffic pacing, socket window or delay settings are involved.
 var studyBufferSize = flag.Int("study-buffer-size", 4096, "read buffer size for the isolated comparison")
-var studyPolicies = []string{"baseline", "scratch", "buffered", "combined", "coalesced", "coalesced_buffered"}
+var studyPolicies = []string{"baseline", "scratch", "buffered", "combined", "coalesced", "coalesced_buffered", "adaptive"}
 var studyPSK = []byte("public snell readpath test fixture, not a server credential")
 
 type studyRecordReader interface {
@@ -37,6 +37,12 @@ func studyReader(policy string, input io.Reader, profile *Profile) (studyRecordR
     }
     if policy == "baseline" || policy == "buffered" {
         r := newBaselineShapedReader(input, studyPSK, profile)
+        return r, func(aead cipher.AEAD) { r.cipher = aead; clear(r.nonce); r.seq = 0 }
+    }
+    if policy == "adaptive" {
+        source := &adaptiveShapedInput{Reader: input, capacity: *studyBufferSize}
+        r := newCoalescedShapedReader(bufio.NewReaderSize(source, *studyBufferSize), studyPSK, profile)
+        r.controller = source
         return r, func(aead cipher.AEAD) { r.cipher = aead; clear(r.nonce); r.seq = 0 }
     }
     if policy == "coalesced" || policy == "coalesced_buffered" {
