@@ -169,7 +169,9 @@ func (c *clientConn) readResponse() error {
 }
 
 func (c *clientConn) Read(p []byte) (int, error) {
-	if !c.receive.begin() { return 0, net.ErrClosed }
+	if !c.receive.begin() {
+		return 0, net.ErrClosed
+	}
 	defer c.receive.end(c.releaseReader)
 	err := c.readResponse()
 	if err != nil {
@@ -179,7 +181,9 @@ func (c *clientConn) Read(p []byte) (int, error) {
 }
 
 func (c *clientConn) ReadBuffer(buffer *buf.Buffer) error {
-	if !c.receive.begin() { return net.ErrClosed }
+	if !c.receive.begin() {
+		return net.ErrClosed
+	}
 	defer c.receive.end(c.releaseReader)
 	err := c.readResponse()
 	if err != nil {
@@ -281,7 +285,9 @@ func (c *clientConn) CloseWrite() error {
 }
 
 func (c *clientConn) InitializeReadWaiter(options N.ReadWaitOptions) (needCopy bool) {
-	if !c.receive.begin() { return false }
+	if !c.receive.begin() {
+		return false
+	}
 	defer c.receive.end(c.releaseReader)
 	c.readWaitOptions = options
 	if c.reader != nil {
@@ -291,7 +297,9 @@ func (c *clientConn) InitializeReadWaiter(options N.ReadWaitOptions) (needCopy b
 }
 
 func (c *clientConn) WaitReadBuffer() (*buf.Buffer, error) {
-	if !c.receive.begin() { return nil, net.ErrClosed }
+	if !c.receive.begin() {
+		return nil, net.ErrClosed
+	}
 	defer c.receive.end(c.releaseReader)
 	err := c.readResponse()
 	if err != nil {
@@ -371,10 +379,10 @@ var (
 )
 
 func (c *clientConn) releaseReader() {
-    releaseResponseReader(c.reader)
+	releaseResponseReader(c.reader)
 }
 
 func (c *clientConn) Close() error {
-    c.receive.close(c.releaseReader)
-    return c.Conn.Close()
+	c.receive.close(c.releaseReader)
+	return c.Conn.Close()
 }

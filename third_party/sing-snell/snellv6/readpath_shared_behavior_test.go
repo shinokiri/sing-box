@@ -155,19 +155,22 @@ func TestStudySharedLogicalEOFReleasesDrainedBlock(t *testing.T) {
 }
 
 func TestStudyRetainedBackingComparison(t *testing.T) {
-	for _, pattern := range []string{"small", "large", "alternating"} {
+	for _, pattern := range []string{"small", "large", "alternating", "medium-isolated"} {
 		for _, delay := range []int{0, 1, 32} {
-			for _, policy := range []string{"baseline", "shared", "bounded", "detached"} {
+			for _, policy := range []string{"baseline", "shared", "bounded", "detached", "integrated"} {
 				t.Run(fmt.Sprintf("%s/retained%d/%s", pattern, delay, policy), func(t *testing.T) {
 					var payloads [][]byte
 					for i := range 96 {
 						size := 64
 						if pattern == "large" || (pattern == "alternating" && i%2 == 0) { size = 65535 }
+                        if pattern == "medium-isolated" { size = 16384 }
 						payloads = append(payloads, bytes.Repeat([]byte{byte(i)}, size))
 					}
-					wire, _, _, profile := studyWire(t, payloads, true)
+					wire, ends, _, profile := studyWire(t, payloads, true)
 					beforeBytes, beforeBlocks := buf.StudySharedStorage()
-					r, _ := studyReader(policy, bytes.NewReader(wire), profile)
+					var input io.Reader = bytes.NewReader(wire)
+                    if pattern == "medium-isolated" { input = &studyCyclicReader{wire: wire, ends: ends} }
+                    r, _ := studyReader(policy, input, profile)
 					r.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: *studyFrontHeadroom})
 					var held []*buf.Buffer
 					var peakRetained, peakDuringRead int64
@@ -176,7 +179,8 @@ func TestStudyRetainedBackingComparison(t *testing.T) {
 						if policy != "baseline" {
 							bytes, _ = buf.StudySharedStorage()
 							bytes -= beforeBytes
-							owner := r.(*sharedShapedReader).block
+							var owner *buf.Buffer
+                            if integrated, ok := r.(*bufferedShapedReader); ok { owner = integrated.block } else { owner = r.(*sharedShapedReader).block }
 							if owner != nil && !owner.StudyUsesSharedStorage() { bytes += int64(cap(owner.Bytes())+owner.Start()) }
 						}
 						for _, body := range held {

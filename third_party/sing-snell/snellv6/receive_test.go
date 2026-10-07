@@ -22,7 +22,9 @@ func receiveWire(t testing.TB, psk []byte, payloads [][]byte) ([]byte, *Profile)
 	t.Helper()
 	salt := bytes.Repeat([]byte{0x35}, snell.SaltLen)
 	aead, err := snell.NewAEAD(snell.DeriveKey(psk, salt))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	profile := NewProfile(psk)
 	w := newShapedWriter(io.Discard, profile, salt, aead, make([]byte, snell.NonceLen))
 	var wire []byte
@@ -43,35 +45,49 @@ func TestBufferedResponseRetainedHeadroomAndReuse(t *testing.T) {
 				for i := range 80 {
 					size := []int{64, 1440, 16384, 65535, 7}[i%5]
 					payloads = append(payloads, bytes.Repeat([]byte{byte(i)}, size))
-					if i%10 == 9 { payloads = append(payloads, nil) }
+					if i%10 == 9 {
+						payloads = append(payloads, nil)
+					}
 				}
 				wire, profile := receiveWire(t, psk, payloads)
 				r := newBufferedShapedReader(bytes.NewReader(wire), psk, profile)
 				defer r.releaseReceive()
-				r.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: room, RearHeadroom: room/2})
+				r.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: room, RearHeadroom: room / 2})
 				var held []*buf.Buffer
 				var wants [][]byte
 				for _, want := range payloads {
 					body, err := r.WaitReadBuffer()
 					if want == nil {
-						if !errors.Is(err, io.EOF) { t.Fatal(err) }
+						if !errors.Is(err, io.EOF) {
+							t.Fatal(err)
+						}
 						continue
 					}
-					if err != nil { t.Fatal(err) }
-					if !bytes.Equal(body.Bytes(), want) { t.Fatal("payload mismatch") }
-					if body.Start() < room || body.FreeLen() < room/2 { t.Fatal("missing writable room") }
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(body.Bytes(), want) {
+						t.Fatal("payload mismatch")
+					}
+					if body.Start() < room || body.FreeLen() < room/2 {
+						t.Fatal("missing writable room")
+					}
 					clear(body.ExtendHeader(room))
 					body.Advance(room)
-					clear(body.Extend(room/2))
+					clear(body.Extend(room / 2))
 					body.Truncate(len(want))
 					held = append(held, body)
 					wants = append(wants, want)
 				}
 				r.releaseReceive()
-				if r.block != nil || r.cache != nil { t.Fatal("reader retained memory after close") }
+				if r.block != nil || r.cache != nil {
+					t.Fatal("reader retained memory after close")
+				}
 				var wg sync.WaitGroup
 				for i, body := range held {
-					if !bytes.Equal(body.Bytes(), wants[i]) { t.Fatal("a later read or close changed held data") }
+					if !bytes.Equal(body.Bytes(), wants[i]) {
+						t.Fatal("a later read or close changed held data")
+					}
 					wg.Add(1)
 					go func() { defer wg.Done(); body.Release() }()
 				}
@@ -93,7 +109,9 @@ func TestResponseLifecycleCloseRace(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				if life.begin() { life.end(release) }
+				if life.begin() {
+					life.end(release)
+				}
 			}()
 		}
 		for range 2 {
@@ -102,19 +120,32 @@ func TestResponseLifecycleCloseRace(t *testing.T) {
 		}
 		close(start)
 		wg.Wait()
-		if released.Load() != 1 || life.begin() { t.Fatal("close did not release exactly once or accepted a late read") }
+		if released.Load() != 1 || life.begin() {
+			t.Fatal("close did not release exactly once or accepted a late read")
+		}
 	}
 }
 
-type receiveNotifyConn struct { net.Conn; reads chan struct{} }
+type receiveNotifyConn struct {
+	net.Conn
+	reads chan struct{}
+}
+
 func (c *receiveNotifyConn) Read(p []byte) (int, error) {
-	select { case c.reads <- struct{}{}: default: }
+	select {
+	case c.reads <- struct{}{}:
+	default:
+	}
 	return c.Conn.Read(p)
 }
 
 func receiveAwait(t *testing.T, signal <-chan struct{}) {
 	t.Helper()
-	select { case <-signal: case <-time.After(3*time.Second): t.Fatal("read never started") }
+	select {
+	case <-signal:
+	case <-time.After(3 * time.Second):
+		t.Fatal("read never started")
+	}
 }
 
 func TestResponseCloseDuringRead(t *testing.T) {
@@ -123,7 +154,9 @@ func TestResponseCloseDuringRead(t *testing.T) {
 			t.Run(fmt.Sprintf("reuse%v/reply%v", reused, firstReply), func(t *testing.T) {
 				psk := []byte("public close lifetime fixture")
 				client, err := NewClient(ClientOptions{PSK: psk, Reuse: reused})
-				if err != nil { t.Fatal(err) }
+				if err != nil {
+					t.Fatal(err)
+				}
 				defer client.Close()
 				source, sink := net.Pipe()
 				defer sink.Close()
@@ -135,7 +168,9 @@ func TestResponseCloseDuringRead(t *testing.T) {
 					session := client.newReuseSession(raw)
 					session.state.Store(uint32(reuse.StateActive))
 					conn, err := session.DialConn(M.Socksaddr{})
-					if err != nil { t.Fatal(err) }
+					if err != nil {
+						t.Fatal(err)
+					}
 					waiter = &reuseReadWaiter{conn: conn.(*reuseConn)}
 					physical = session
 					reader = func() reuse.RecordReader { return session.reader }
@@ -153,39 +188,62 @@ func TestResponseCloseDuringRead(t *testing.T) {
 					wire, _ := receiveWire(t, psk, [][]byte{payload})
 					go func() { _, _ = sink.Write(wire) }()
 					held, err = waiter.WaitReadBuffer()
-					if err != nil { t.Fatal(err) }
+					if err != nil {
+						t.Fatal(err)
+					}
 					defer held.Release()
-					for len(raw.reads) > 0 { <-raw.reads }
+					for len(raw.reads) > 0 {
+						<-raw.reads
+					}
 				}
 				done := make(chan error, 1)
-				go func() { body, err := waiter.WaitReadBuffer(); if body != nil { body.Release() }; done <- err }()
+				go func() {
+					body, err := waiter.WaitReadBuffer()
+					if body != nil {
+						body.Release()
+					}
+					done <- err
+				}()
 				receiveAwait(t, raw.reads)
 				physical.Close()
 				select {
-				case err := <-done: if err == nil { t.Fatal("closed transport returned a record") }
-				case <-time.After(3*time.Second): t.Fatal("close did not unblock read")
+				case err := <-done:
+					if err == nil {
+						t.Fatal("closed transport returned a record")
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatal("close did not unblock read")
 				}
-				if r, ok := reader().(*bufferedShapedReader); ok && (r.block != nil || r.cache != nil) { t.Fatal("close retained receive storage") }
-				if held != nil && !bytes.Equal(held.Bytes(), want) { t.Fatal("close invalidated returned payload") }
-				if _, err := waiter.WaitReadBuffer(); !errors.Is(err, net.ErrClosed) { t.Fatalf("late read: %v", err) }
+				if r, ok := reader().(*bufferedShapedReader); ok && (r.block != nil || r.cache != nil) {
+					t.Fatal("close retained receive storage")
+				}
+				if held != nil && !bytes.Equal(held.Bytes(), want) {
+					t.Fatal("close invalidated returned payload")
+				}
+				if _, err := waiter.WaitReadBuffer(); !errors.Is(err, net.ErrClosed) {
+					t.Fatalf("late read: %v", err)
+				}
 			})
 		}
 	}
 }
 
-type receiveMemoryConn struct { io.Reader }
-func (*receiveMemoryConn) Write(p []byte) (int, error) { return len(p), nil }
-func (*receiveMemoryConn) Close() error { return nil }
-func (*receiveMemoryConn) LocalAddr() net.Addr { return &net.TCPAddr{} }
-func (*receiveMemoryConn) RemoteAddr() net.Addr { return &net.TCPAddr{} }
-func (*receiveMemoryConn) SetDeadline(time.Time) error { return nil }
-func (*receiveMemoryConn) SetReadDeadline(time.Time) error { return nil }
+type receiveMemoryConn struct{ io.Reader }
+
+func (*receiveMemoryConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (*receiveMemoryConn) Close() error                     { return nil }
+func (*receiveMemoryConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (*receiveMemoryConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (*receiveMemoryConn) SetDeadline(time.Time) error      { return nil }
+func (*receiveMemoryConn) SetReadDeadline(time.Time) error  { return nil }
 func (*receiveMemoryConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestResponseSessionReusesPrefetchedReply(t *testing.T) {
 	psk := []byte("public reused response fixture")
 	client, err := NewClient(ClientOptions{PSK: psk, Reuse: true})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 	wire, _ := receiveWire(t, psk, [][]byte{{snell.ReplyTunnel, 1}, nil, {snell.ReplyTunnel, 2}, nil})
 	session := client.newReuseSession(&receiveMemoryConn{Reader: bytes.NewReader(wire)})
@@ -195,21 +253,35 @@ func TestResponseSessionReusesPrefetchedReply(t *testing.T) {
 	defer func() { buf.ReleaseMulti(held) }()
 	for _, expected := range []byte{1, 2} {
 		conn, err := session.DialConn(M.Socksaddr{})
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 		w := &reuseReadWaiter{conn: conn.(*reuseConn)}
 		w.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: 72})
 		body, err := w.WaitReadBuffer()
-		if err != nil || body.Len() != 1 || body.Byte(0) != expected { t.Fatalf("reply %d: %v", expected, err) }
+		if err != nil || body.Len() != 1 || body.Byte(0) != expected {
+			t.Fatalf("reply %d: %v", expected, err)
+		}
 		held = append(held, body)
-		if _, err := w.WaitReadBuffer(); !errors.Is(err, io.EOF) { t.Fatal(err) }
-		if err := conn.Close(); err != nil { t.Fatal(err) }
+		if _, err := w.WaitReadBuffer(); !errors.Is(err, io.EOF) {
+			t.Fatal(err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
 		if expected == 1 {
 			next, found, closed := client.pool.Take()
-			if next != session || !found || closed { t.Fatal("session was not returned for reuse") }
+			if next != session || !found || closed {
+				t.Fatal("session was not returned for reuse")
+			}
 		}
 	}
 	session.Close()
-	for i, body := range held { if body.Byte(0) != byte(i+1) { t.Fatal("reuse changed an older payload") } }
+	for i, body := range held {
+		if body.Byte(0) != byte(i+1) {
+			t.Fatal("reuse changed an older payload")
+		}
+	}
 }
 
 func TestBufferedResponseEOFAndNoProgress(t *testing.T) {
@@ -219,21 +291,174 @@ func TestBufferedResponseEOFAndNoProgress(t *testing.T) {
 	defer r.releaseReceive()
 	for _, want := range [][]byte{[]byte("one"), nil, []byte("two"), nil} {
 		body, err := r.ReadRecord()
-		if want == nil { if !errors.Is(err, io.EOF) { t.Fatal(err) }; continue }
-		if err != nil || !bytes.Equal(body.Bytes(), want) { t.Fatalf("data with EOF: %v", err) }
+		if want == nil {
+			if !errors.Is(err, io.EOF) {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err != nil || !bytes.Equal(body.Bytes(), want) {
+			t.Fatalf("data with EOF: %v", err)
+		}
 		body.Release()
 	}
-	if r.block != nil { t.Fatal("drained EOF retained storage") }
+	if r.block != nil {
+		t.Fatal("drained EOF retained storage")
+	}
 	stalled := newBufferedShapedReader(receiveNoProgress{}, psk, profile)
 	defer stalled.releaseReceive()
-	if _, err := stalled.ReadRecord(); !errors.Is(err, io.ErrNoProgress) { t.Fatal(err) }
+	if _, err := stalled.ReadRecord(); !errors.Is(err, io.ErrNoProgress) {
+		t.Fatal(err)
+	}
 }
 
-type receiveDataEOF struct { data []byte }
+type receiveDataEOF struct{ data []byte }
+
 func (r *receiveDataEOF) Read(p []byte) (int, error) {
-	n := copy(p, r.data); r.data = r.data[n:]
-	if len(r.data) == 0 { return n, io.EOF }
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	if len(r.data) == 0 {
+		return n, io.EOF
+	}
 	return n, nil
 }
+
 type receiveNoProgress struct{}
+
 func (receiveNoProgress) Read([]byte) (int, error) { return 0, nil }
+
+type receiveDiscardWriteConn struct{ *receiveNotifyConn }
+
+func (*receiveDiscardWriteConn) Write(p []byte) (int, error) { return len(p), nil }
+
+func TestResponsePoolCloseDuringDrain(t *testing.T) {
+	psk := []byte("public drain lifetime fixture")
+	client, err := NewClient(ClientOptions{PSK: psk, Reuse: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	source, sink := net.Pipe()
+	defer sink.Close()
+	raw := &receiveDiscardWriteConn{&receiveNotifyConn{Conn: source, reads: make(chan struct{}, 8)}}
+	session := client.newReuseSession(raw)
+	session.state.Store(uint32(reuse.StateActive))
+	defer session.Close()
+	conn, err := session.DialConn(M.Socksaddr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter := &reuseReadWaiter{conn: conn.(*reuseConn)}
+	waiter.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: 72})
+	want := bytes.Repeat([]byte{0x52}, 8192)
+	wire, _ := receiveWire(t, psk, [][]byte{append([]byte{snell.ReplyTunnel}, want...)})
+	go func() { _, _ = sink.Write(wire) }()
+	held, err := waiter.WaitReadBuffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+	reader := session.reader.(*bufferedShapedReader)
+	for len(raw.reads) > 0 {
+		<-raw.reads
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	receiveAwait(t, raw.reads)
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reader.block != nil || reader.cache != nil {
+		t.Fatal("pool close returned before drain cleanup")
+	}
+	if !bytes.Equal(held.Bytes(), want) {
+		t.Fatal("drain close invalidated older data")
+	}
+}
+
+type receiveFragment struct {
+	io.Reader
+	limit int
+}
+
+func TestBufferedResponseDoesNotPinWarmBlockForLoneReply(t *testing.T) {
+	psk := []byte("public isolated response fixture")
+	for _, size := range []int{8192, 16384} {
+		want := bytes.Repeat([]byte{0x59}, size)
+		wire, profile := receiveWire(t, psk, [][]byte{want})
+		reader := newBufferedShapedReader(bytes.NewReader(wire), psk, profile)
+		// Model a receive window already expanded by an earlier busy burst.
+		reader.readAhead = receiveMaxWindow
+		reader.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: 72})
+		body, err := reader.WaitReadBuffer()
+		if err != nil {
+			reader.releaseReceive()
+			t.Fatal(err)
+		}
+		if body.RawCap() >= receiveMaxWindow || receiveHasViews(body) {
+			body.Release()
+			reader.releaseReceive()
+			t.Fatal("isolated response pinned the entire warmed-up receive block")
+		}
+		reader.releaseReceive()
+		if !bytes.Equal(body.Bytes(), want) {
+			body.Release()
+			t.Fatal("reader close changed the isolated response")
+		}
+		body.Release()
+	}
+}
+
+func (r receiveFragment) Read(p []byte) (int, error) { return r.Reader.Read(p[:min(len(p), r.limit)]) }
+
+func TestBufferedResponseFragmentationAndErrors(t *testing.T) {
+	psk := []byte("public fragmented response fixture")
+	payload := bytes.Repeat([]byte{0x61}, 65535)
+	wire, profile := receiveWire(t, psk, [][]byte{payload, nil})
+	for _, fragment := range []int{1, 7, 4096, len(wire)} {
+		reader := newBufferedShapedReader(receiveFragment{bytes.NewReader(wire), fragment}, psk, profile)
+		var got bytes.Buffer
+		scratch := make([]byte, 17)
+		for {
+			n, err := reader.Read(scratch)
+			got.Write(scratch[:n])
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				reader.releaseReceive()
+				t.Fatal(err)
+			}
+		}
+		reader.releaseReceive()
+		if !bytes.Equal(got.Bytes(), payload) {
+			t.Fatal("fragmented partial reads changed data")
+		}
+	}
+	shortWire, profile := receiveWire(t, psk, [][]byte{[]byte("authenticated short response")})
+	for cut := range len(shortWire) {
+		reader := newBufferedShapedReader(bytes.NewReader(shortWire[:cut]), psk, profile)
+		body, err := reader.ReadRecord()
+		if body != nil {
+			body.Release()
+		}
+		reader.releaseReceive()
+		if err == nil {
+			t.Fatalf("accepted truncation at %d", cut)
+		}
+	}
+	for _, offset := range []int{profile.saltBlockLen, profile.saltBlockLen + profile.recordPrefixLen(0), len(shortWire) - 1} {
+		corrupt := bytes.Clone(shortWire)
+		corrupt[offset] ^= 0x80
+		reader := newBufferedShapedReader(bytes.NewReader(corrupt), psk, profile)
+		body, err := reader.ReadRecord()
+		if body != nil {
+			body.Release()
+		}
+		reader.releaseReceive()
+		if err == nil {
+			t.Fatal("accepted unauthenticated response")
+		}
+	}
+}

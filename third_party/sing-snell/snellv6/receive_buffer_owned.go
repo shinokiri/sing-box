@@ -8,5 +8,5 @@ import "github.com/sagernet/sing/common/buf"
 // using the unchanged common buffer dependency.
 const receiveSharing = false
 
-func receiveHasViews(*buf.Buffer) bool { return false }
+func receiveHasViews(*buf.Buffer) bool               { return false }
 func receiveSlice(*buf.Buffer, int, int) *buf.Buffer { panic("shared receive disabled") }
