@@ -22,6 +22,7 @@ import (
 var studyBufferSize = flag.Int("study-buffer-size", 4096, "read buffer size for the isolated comparison")
 var studyPattern = flag.String("study-pattern", "fixed", "fixed, alternating or bursts record sizes")
 var studyPolicies = []string{"baseline", "scratch", "buffered", "combined", "coalesced", "coalesced_buffered", "adaptive"}
+var studySharedFactory func(io.Reader, *Profile) (studyRecordReader, func(cipher.AEAD))
 var studyPSK = []byte("public snell readpath test fixture, not a server credential")
 
 type studyRecordReader interface {
@@ -33,6 +34,7 @@ type studyRecordReader interface {
 }
 
 func studyReader(policy string, input io.Reader, profile *Profile) (studyRecordReader, func(cipher.AEAD)) {
+    if policy == "shared" { return studySharedFactory(input, profile) }
     if policy == "buffered" || policy == "combined" || policy == "coalesced_buffered" {
         input = bufio.NewReaderSize(input, *studyBufferSize)
     }
@@ -52,6 +54,11 @@ func studyReader(policy string, input io.Reader, profile *Profile) (studyRecordR
     }
     r := newShapedReader(input, studyPSK, profile)
     return r, func(aead cipher.AEAD) { r.cipher = aead; clear(r.nonce); r.seq = 0 }
+}
+
+func closeStudyReader(r studyRecordReader) {
+    r.ReleaseCache()
+    if owned, ok := r.(interface{ releaseStudyStorage() }); ok { owned.releaseStudyStorage() }
 }
 
 func studyWire(t testing.TB, payloads [][]byte, withSalt bool) ([]byte, []int, cipher.AEAD, *Profile) {
@@ -84,6 +91,7 @@ func TestStudyShapedFragmentedAndReusedRecords(t *testing.T) {
         for _, fragment := range []int{1, 7, 4096, len(wire)} {
             t.Run(fmt.Sprintf("%s/%d", policy, fragment), func(t *testing.T) {
                 r, _ := studyReader(policy, studyFragmentReader{bytes.NewReader(wire), fragment}, profile)
+                defer closeStudyReader(r)
                 r.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: 32, RearHeadroom: 16})
                 for _, want := range payloads {
                     record, err := r.WaitReadBuffer()
@@ -109,7 +117,7 @@ func TestStudyShapedPartialReads(t *testing.T) {
     for _, policy := range studyPolicies {
         t.Run(policy, func(t *testing.T) {
             r, _ := studyReader(policy, bytes.NewReader(wire), profile)
-            defer r.ReleaseCache()
+            defer closeStudyReader(r)
             var got bytes.Buffer
             scratch := make([]byte, 17)
             for {
@@ -131,6 +139,7 @@ func TestStudyShapedTruncationAndAuthentication(t *testing.T) {
                 r, _ := studyReader(policy, bytes.NewReader(wire[:cut]), profile)
                 body, err := r.ReadRecord()
                 if body != nil { body.Release() }
+                closeStudyReader(r)
                 if err == nil { t.Fatalf("accepted truncation at %d", cut) }
             }
             // The prefix is authenticated as header AAD; the header and payload
@@ -141,6 +150,7 @@ func TestStudyShapedTruncationAndAuthentication(t *testing.T) {
                 r, _ := studyReader(policy, bytes.NewReader(corrupt), profile)
                 body, err := r.ReadRecord()
                 if body != nil { body.Release() }
+                closeStudyReader(r)
                 if err == nil { t.Fatalf("accepted corruption at %d", offset) }
             }
         })
@@ -160,6 +170,7 @@ func TestStudyShapedDoesNotWaitForNextRecord(t *testing.T) {
             go func() {
                 body, err := r.ReadRecord()
                 if body != nil { body.Release() }
+                closeStudyReader(r)
                 done <- err
             }()
             select {
@@ -218,6 +229,7 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                         input = counted
                     }
                     reader, reset := studyReader(policy, input, profile)
+                    defer closeStudyReader(reader)
                     b.SetBytes(int64(totalPlain/len(payloads)))
                     b.ReportAllocs()
                     b.ResetTimer()
@@ -245,6 +257,11 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                         calls = counted.calls
                     }
                     b.ReportMetric(float64(calls)/float64(b.N), "reads/record")
+                    if tracked, ok := reader.(interface{ studyMetrics() (uint64, int) }); ok {
+                        copied, capacity := tracked.studyMetrics()
+                        b.ReportMetric(float64(copied)/float64(b.N), "copied-B/record")
+                        b.ReportMetric(float64(capacity), "block-cap-B")
+                    }
                 })
             }
         }

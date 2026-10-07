@@ -1,15 +1,10 @@
-name: Snell readpath study
+name: Snell shared receive study
 on:
   workflow_dispatch:
-    inputs:
-      android_only:
-        type: boolean
-        default: false
 permissions:
   contents: read
 jobs:
-  measure:
-    if: ${{ !inputs.android_only }}
+  native:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,31 +18,34 @@ jobs:
         with:
           go-version: '1.26.8'
           cache: false
-      - name: Generate unchanged installed reader and match release dependencies
+      - name: Prepare isolated shared-buffer dependency
         run: |
           python3 .github/readpath-study/prepare.py
-          gofmt -w third_party/sing-snell/snellv6/readpath*test.go third_party/sing-snell/snellv6/shaped.go
           go -C third_party/sing-snell mod edit -require=github.com/sagernet/sing@v0.9.7-0.20260929150544-6f21f2425a95
+          python3 .github/readpath-study/prepare_shared.py
+          gofmt -w third_party/sing-snell/snellv6/readpath*test.go
           go -C third_party/sing-snell mod tidy
-      - name: Verify protocol behavior and race safety
-        run: |
-          go -C third_party/sing-snell test -race -count=3 -timeout=180s ./...
-          go -C third_party/sing-snell test -race -count=3 ./snellv6 -args -study-buffer-size=1024
-      - name: Measure all variants without WAN traffic
+      - name: Ownership, protocol, cancellation, and race tests
         run: |
           set -o pipefail
-          go -C third_party/sing-snell test ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$' -benchmem -benchtime=150ms -count=3 -args -study-buffer-size=1024 | tee readpath-bench.txt
+          go -C .study-deps/sing test -race -count=3 ./common/buf | tee shared-buffer-tests.txt
+          go -C third_party/sing-snell test -tags=shared_receive_study -race -count=3 -timeout=180s ./... | tee protocol-tests.txt
+          go -C third_party/sing-snell test -tags=shared_receive_study -run '^TestStudyShared' -v ./snellv6 | tee retention-tests.txt
+      - name: Same-host comparison
+        run: |
+          set -o pipefail
+          go -C third_party/sing-snell test -tags=shared_receive_study ./snellv6 -run '^$' -bench '^BenchmarkStudyShapedRead$/(memory|tcp)/.+/(baseline|combined|coalesced_buffered|shared)$' -benchmem -benchtime=150ms -count=3 | tee shared-bench.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: readpath-${{ matrix.os }}
+          name: shared-receive-${{ matrix.os }}
           path: |
-            readpath-bench.txt
-            third_party/sing-snell/snellv6/readpath*test.go
-            third_party/sing-snell/snellv6/shaped.go
-
+            *tests.txt
+            shared-bench.txt
+            third_party/sing-snell/snellv6/readpath_shared*test.go
+            .study-deps/sing/common/buf/shared_buffer*.go
+          include-hidden-files: true
   android:
-    if: ${{ inputs.android_only }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
@@ -61,22 +59,25 @@ jobs:
         id: ndk
         with:
           ndk-version: r29
-      - name: Build standalone Android comparison executable
+      - name: Build shared prototype and unchanged dependency control
         env:
           NDK_PATH: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           python3 .github/readpath-study/prepare.py
-          gofmt -w third_party/sing-snell/snellv6/readpath*test.go third_party/sing-snell/snellv6/shaped.go
           go -C third_party/sing-snell mod edit -require=github.com/sagernet/sing@v0.9.7-0.20260929150544-6f21f2425a95
           go -C third_party/sing-snell mod tidy
-          CC="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" CGO_ENABLED=1 GOOS=android GOARCH=arm64 go -C third_party/sing-snell test -c ./snellv6 -ldflags='-s -w' -o "$PWD/snell-readpath-arm64"
-          sha256sum snell-readpath-arm64 > SHA256SUMS
+          gofmt -w third_party/sing-snell/snellv6/readpath*test.go
+          export CC="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 go -C third_party/sing-snell test -c ./snellv6 -ldflags='-s -w' -o "$PWD/snell-control-arm64"
+          python3 .github/readpath-study/prepare_shared.py
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 go -C third_party/sing-snell test -tags=shared_receive_study -c ./snellv6 -ldflags='-s -w' -o "$PWD/snell-shared-arm64"
+          sha256sum snell-*-arm64 > SHA256SUMS
           git rev-parse HEAD > source-commit.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: readpath-android-arm64
+          name: shared-receive-android-arm64
           path: |
-            snell-readpath-arm64
+            snell-*-arm64
             SHA256SUMS
             source-commit.txt
           compression-level: 0
