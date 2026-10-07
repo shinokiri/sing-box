@@ -139,7 +139,10 @@ func (r *sharedShapedReader) read() (*buf.Buffer, error) {
 	if err := r.ensure(frameLen); err != nil { return nil, err }
 	start := r.position
 	r.position += frameLen
-	if payloadLen == 0 { return nil, io.EOF }
+	if payloadLen == 0 {
+		r.releaseDrainedBlock()
+		return nil, io.EOF
+	}
 	frame := r.block.Bytes()[start:r.position]
 	padding := frame[headLen:headLen+paddingLen]
 	payload := frame[headLen+paddingLen:]
@@ -167,6 +170,10 @@ func (r *sharedShapedReader) read() (*buf.Buffer, error) {
 
 func (r *sharedShapedReader) ReleaseCache() {
 	r.baseReader.ReleaseCache()
+	r.releaseDrainedBlock()
+}
+
+func (r *sharedShapedReader) releaseDrainedBlock() {
 	// Releasing a logical connection must not discard prefetched next-session
 	// bytes. A drained receive block may be released without touching its views.
 	if r.block != nil && r.position == r.block.Len() {

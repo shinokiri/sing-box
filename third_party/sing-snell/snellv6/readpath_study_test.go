@@ -21,6 +21,7 @@ import (
 // No traffic pacing, socket window or delay settings are involved.
 var studyBufferSize = flag.Int("study-buffer-size", 4096, "read buffer size for the isolated comparison")
 var studyPattern = flag.String("study-pattern", "fixed", "fixed, alternating or bursts record sizes")
+var studyDelivery = flag.String("study-delivery", "batch", "batch or gated single-record delivery")
 var studyPolicies = []string{"baseline", "scratch", "buffered", "combined", "coalesced", "coalesced_buffered", "adaptive"}
 var studySharedFactory func(io.Reader, *Profile) (studyRecordReader, func(cipher.AEAD))
 var studyPSK = []byte("public snell readpath test fixture, not a server credential")
@@ -213,6 +214,7 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                     var receiver, sender *net.TCPConn
                     var counted *studyCountingReader
                     done := make(chan error, 1)
+                    acknowledged := make(chan struct{})
                     if transport == "tcp" {
                         listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127,0,0,1)})
                         if err != nil { b.Fatal(err) }
@@ -235,6 +237,17 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                     b.ResetTimer()
                     if transport == "tcp" {
                         go func() {
+                            if *studyDelivery == "single" {
+                                for i := 0; i < b.N; i++ {
+                                    index := i % 32
+                                    start := 0
+                                    if index > 0 { start = ends[index-1] }
+                                    if _, err := sender.Write(wire[start:ends[index]]); err != nil { done <- err; return }
+                                    <-acknowledged
+                                }
+                                done <- nil
+                                return
+                            }
                             for left := b.N; left > 0; {
                                 count := min(left, 32)
                                 if _, err := sender.Write(wire[:ends[count-1]]); err != nil { done <- err; return }
@@ -249,6 +262,7 @@ func BenchmarkStudyShapedRead(b *testing.B) {
                         if err != nil { b.Fatal(err) }
                         if body.Len() != len(payloads[i%32]) { b.Fatal("wrong record size") }
                         body.Release()
+                        if transport == "tcp" && *studyDelivery == "single" { acknowledged <- struct{}{} }
                     }
                     b.StopTimer()
                     calls := cyclic.calls

@@ -137,6 +137,60 @@ func TestStudySharedCancelAndQuiescedClose(t *testing.T) {
 	if beforeBytes != afterBytes || beforeBlocks != afterBlocks { t.Fatal("close leaked storage") }
 }
 
+func TestStudySharedLogicalEOFReleasesDrainedBlock(t *testing.T) {
+	beforeBytes, beforeBlocks := buf.StudySharedStorage()
+	wire, _, _, profile := studyWire(t, [][]byte{bytes.Repeat([]byte{0x72}, 65535), nil}, true)
+	r := newSharedShapedReader(bytes.NewReader(wire), studyPSK, profile)
+	defer r.releaseStudyStorage()
+	body, err := r.ReadRecord()
+	if err != nil { t.Fatal(err) }
+	body.Release()
+	if _, err := r.ReadRecord(); !errors.Is(err, io.EOF) { t.Fatal(err) }
+	afterBytes, afterBlocks := buf.StudySharedStorage()
+	if beforeBytes != afterBytes || beforeBlocks != afterBlocks || r.block != nil { t.Fatal("drained logical EOF retained backing storage") }
+}
+
+func TestStudyRetainedBackingComparison(t *testing.T) {
+	for _, pattern := range []string{"small", "large", "alternating"} {
+		for _, delay := range []int{0, 1, 32} {
+			for _, policy := range []string{"baseline", "shared"} {
+				t.Run(fmt.Sprintf("%s/retained%d/%s", pattern, delay, policy), func(t *testing.T) {
+					var payloads [][]byte
+					for i := range 96 {
+						size := 64
+						if pattern == "large" || (pattern == "alternating" && i%2 == 0) { size = 65535 }
+						payloads = append(payloads, bytes.Repeat([]byte{byte(i)}, size))
+					}
+					wire, _, _, profile := studyWire(t, payloads, true)
+					beforeBytes, beforeBlocks := buf.StudySharedStorage()
+					r, _ := studyReader(policy, bytes.NewReader(wire), profile)
+					var held []*buf.Buffer
+					var peakRetained, peakDuringRead int64
+					measure := func() int64 {
+						if policy == "shared" { bytes, _ := buf.StudySharedStorage(); return bytes-beforeBytes }
+						var bytes int64
+						for _, body := range held { bytes += int64(cap(body.Bytes())+body.Start()) }
+						return bytes
+					}
+					for range payloads {
+						body, err := r.ReadRecord()
+						if err != nil { t.Fatal(err) }
+						held = append(held, body)
+						peakDuringRead = max(peakDuringRead, measure())
+						if len(held) > delay { held[0].Release(); held = held[1:] }
+						peakRetained = max(peakRetained, measure())
+					}
+					closeStudyReader(r)
+					for _, b := range held { b.Release() }
+					afterBytes, afterBlocks := buf.StudySharedStorage()
+					if beforeBytes != afterBytes || beforeBlocks != afterBlocks { t.Fatal("comparison leaked shared storage") }
+					t.Logf("backing-reserved-between-reads=%d peak-backing-at-read-return=%d", peakRetained, peakDuringRead)
+				})
+			}
+		}
+	}
+}
+
 // Report backing memory held by delayed consumers separately from B/op. This
 // deliberately measures the cost hidden by immediate-release throughput loops.
 func TestStudySharedRetentionAccounting(t *testing.T) {
