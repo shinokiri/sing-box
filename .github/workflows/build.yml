@@ -84,6 +84,11 @@ jobs:
             android-arm64-api36-go-${{ steps.source.outputs.go_version }}-ndk-r29-
       - name: Check local patches against both module requirements
         run: sh .github/check_local_patches.sh
+      - name: Test shared buffer ownership and bounded responses
+        run: |
+          test -z "$(gofmt -l third_party/sing/common/buf/{buffer,shared_buffer,shared_buffer_test}.go third_party/sing-snell/snellv6/receive*.go third_party/sing-tun/receive_view_integration_test.go)"
+          go test -race -count=3 github.com/sagernet/sing/common/buf
+          go test -race -count=3 -run '^TestSharedReceiveTransmitStore$' github.com/sagernet/sing-tun
       - name: Test Snell URLTest session handoff
         run: |
           urltest_format_status=0

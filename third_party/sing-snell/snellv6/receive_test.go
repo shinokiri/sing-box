@@ -327,74 +327,138 @@ type receiveNoProgress struct{}
 
 func (receiveNoProgress) Read([]byte) (int, error) { return 0, nil }
 
-type receiveDiscardWriteConn struct { *receiveNotifyConn }
+type receiveDiscardWriteConn struct{ *receiveNotifyConn }
+
 func (*receiveDiscardWriteConn) Write(p []byte) (int, error) { return len(p), nil }
 
 func TestResponsePoolCloseDuringDrain(t *testing.T) {
-    psk := []byte("public drain lifetime fixture")
-    client, err := NewClient(ClientOptions{PSK: psk, Reuse: true})
-    if err != nil { t.Fatal(err) }
-    defer client.Close()
-    source, sink := net.Pipe()
-    defer sink.Close()
-    raw := &receiveDiscardWriteConn{&receiveNotifyConn{Conn: source, reads: make(chan struct{}, 8)}}
-    session := client.newReuseSession(raw)
-    session.state.Store(uint32(reuse.StateActive))
-    defer session.Close()
-    conn, err := session.DialConn(M.Socksaddr{})
-    if err != nil { t.Fatal(err) }
-    waiter := &reuseReadWaiter{conn: conn.(*reuseConn)}
-    waiter.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: 72})
-    want := bytes.Repeat([]byte{0x52}, 8192)
-    wire, _ := receiveWire(t, psk, [][]byte{append([]byte{snell.ReplyTunnel}, want...)})
-    go func() { _, _ = sink.Write(wire) }()
-    held, err := waiter.WaitReadBuffer()
-    if err != nil { t.Fatal(err) }
-    defer held.Release()
-    reader := session.reader.(*bufferedShapedReader)
-    for len(raw.reads) > 0 { <-raw.reads }
-    if err := conn.Close(); err != nil { t.Fatal(err) }
-    receiveAwait(t, raw.reads)
-    if err := client.Close(); err != nil { t.Fatal(err) }
-    if reader.block != nil || reader.cache != nil { t.Fatal("pool close returned before drain cleanup") }
-    if !bytes.Equal(held.Bytes(), want) { t.Fatal("drain close invalidated older data") }
+	psk := []byte("public drain lifetime fixture")
+	client, err := NewClient(ClientOptions{PSK: psk, Reuse: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	source, sink := net.Pipe()
+	defer sink.Close()
+	raw := &receiveDiscardWriteConn{&receiveNotifyConn{Conn: source, reads: make(chan struct{}, 8)}}
+	session := client.newReuseSession(raw)
+	session.state.Store(uint32(reuse.StateActive))
+	defer session.Close()
+	conn, err := session.DialConn(M.Socksaddr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter := &reuseReadWaiter{conn: conn.(*reuseConn)}
+	waiter.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: 72})
+	want := bytes.Repeat([]byte{0x52}, 8192)
+	wire, _ := receiveWire(t, psk, [][]byte{append([]byte{snell.ReplyTunnel}, want...)})
+	go func() { _, _ = sink.Write(wire) }()
+	held, err := waiter.WaitReadBuffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+	reader := session.reader.(*bufferedShapedReader)
+	for len(raw.reads) > 0 {
+		<-raw.reads
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	receiveAwait(t, raw.reads)
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reader.block != nil || reader.cache != nil {
+		t.Fatal("pool close returned before drain cleanup")
+	}
+	if !bytes.Equal(held.Bytes(), want) {
+		t.Fatal("drain close invalidated older data")
+	}
 }
 
-type receiveFragment struct { io.Reader; limit int }
+type receiveFragment struct {
+	io.Reader
+	limit int
+}
+
+func TestBufferedResponseDoesNotPinWarmBlockForLoneReply(t *testing.T) {
+	psk := []byte("public isolated response fixture")
+	for _, size := range []int{8192, 16384} {
+		want := bytes.Repeat([]byte{0x59}, size)
+		wire, profile := receiveWire(t, psk, [][]byte{want})
+		reader := newBufferedShapedReader(bytes.NewReader(wire), psk, profile)
+		// Model a receive window already expanded by an earlier busy burst.
+		reader.readAhead = receiveMaxWindow
+		reader.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: 72})
+		body, err := reader.WaitReadBuffer()
+		if err != nil {
+			reader.releaseReceive()
+			t.Fatal(err)
+		}
+		if body.RawCap() >= receiveMaxWindow || receiveHasViews(body) {
+			body.Release()
+			reader.releaseReceive()
+			t.Fatal("isolated response pinned the entire warmed-up receive block")
+		}
+		reader.releaseReceive()
+		if !bytes.Equal(body.Bytes(), want) {
+			body.Release()
+			t.Fatal("reader close changed the isolated response")
+		}
+		body.Release()
+	}
+}
+
 func (r receiveFragment) Read(p []byte) (int, error) { return r.Reader.Read(p[:min(len(p), r.limit)]) }
 
 func TestBufferedResponseFragmentationAndErrors(t *testing.T) {
-    psk := []byte("public fragmented response fixture")
-    payload := bytes.Repeat([]byte{0x61}, 65535)
-    wire, profile := receiveWire(t, psk, [][]byte{payload, nil})
-    for _, fragment := range []int{1, 7, 4096, len(wire)} {
-        reader := newBufferedShapedReader(receiveFragment{bytes.NewReader(wire), fragment}, psk, profile)
-        var got bytes.Buffer
-        scratch := make([]byte, 17)
-        for {
-            n, err := reader.Read(scratch)
-            got.Write(scratch[:n])
-            if errors.Is(err, io.EOF) { break }
-            if err != nil { reader.releaseReceive(); t.Fatal(err) }
-        }
-        reader.releaseReceive()
-        if !bytes.Equal(got.Bytes(), payload) { t.Fatal("fragmented partial reads changed data") }
-    }
-    shortWire, profile := receiveWire(t, psk, [][]byte{[]byte("authenticated short response")})
-    for cut := range len(shortWire) {
-        reader := newBufferedShapedReader(bytes.NewReader(shortWire[:cut]), psk, profile)
-        body, err := reader.ReadRecord()
-        if body != nil { body.Release() }
-        reader.releaseReceive()
-        if err == nil { t.Fatalf("accepted truncation at %d", cut) }
-    }
-    for _, offset := range []int{profile.saltBlockLen, profile.saltBlockLen+profile.recordPrefixLen(0), len(shortWire)-1} {
-        corrupt := bytes.Clone(shortWire)
-        corrupt[offset] ^= 0x80
-        reader := newBufferedShapedReader(bytes.NewReader(corrupt), psk, profile)
-        body, err := reader.ReadRecord()
-        if body != nil { body.Release() }
-        reader.releaseReceive()
-        if err == nil { t.Fatal("accepted unauthenticated response") }
-    }
+	psk := []byte("public fragmented response fixture")
+	payload := bytes.Repeat([]byte{0x61}, 65535)
+	wire, profile := receiveWire(t, psk, [][]byte{payload, nil})
+	for _, fragment := range []int{1, 7, 4096, len(wire)} {
+		reader := newBufferedShapedReader(receiveFragment{bytes.NewReader(wire), fragment}, psk, profile)
+		var got bytes.Buffer
+		scratch := make([]byte, 17)
+		for {
+			n, err := reader.Read(scratch)
+			got.Write(scratch[:n])
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				reader.releaseReceive()
+				t.Fatal(err)
+			}
+		}
+		reader.releaseReceive()
+		if !bytes.Equal(got.Bytes(), payload) {
+			t.Fatal("fragmented partial reads changed data")
+		}
+	}
+	shortWire, profile := receiveWire(t, psk, [][]byte{[]byte("authenticated short response")})
+	for cut := range len(shortWire) {
+		reader := newBufferedShapedReader(bytes.NewReader(shortWire[:cut]), psk, profile)
+		body, err := reader.ReadRecord()
+		if body != nil {
+			body.Release()
+		}
+		reader.releaseReceive()
+		if err == nil {
+			t.Fatalf("accepted truncation at %d", cut)
+		}
+	}
+	for _, offset := range []int{profile.saltBlockLen, profile.saltBlockLen + profile.recordPrefixLen(0), len(shortWire) - 1} {
+		corrupt := bytes.Clone(shortWire)
+		corrupt[offset] ^= 0x80
+		reader := newBufferedShapedReader(bytes.NewReader(corrupt), psk, profile)
+		body, err := reader.ReadRecord()
+		if body != nil {
+			body.Release()
+		}
+		reader.releaseReceive()
+		if err == nil {
+			t.Fatal("accepted unauthenticated response")
+		}
+	}
 }

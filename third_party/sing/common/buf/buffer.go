@@ -19,7 +19,7 @@ type Buffer struct {
 	capacity int
 	refs     atomic.Int32
 	managed  bool
-	shared *sharedBufferStorage
+	shared   *sharedBufferStorage
 }
 
 func New() *Buffer {
@@ -305,14 +305,14 @@ func (b *Buffer) Release() {
 	if b.refs.Load() > 0 {
 		return
 	}
-    if b.shared != nil {
-        storage := b.shared
-        *b = Buffer{}
-        if storage.refs.Add(-1) == 0 && storage.pooled {
-            common.Must(Put(storage.data))
-        }
-        return
-    }
+	if b.shared != nil {
+		storage := b.shared
+		*b = Buffer{}
+		if storage.refs.Add(-1) == 0 && storage.pooled {
+			common.Must(Put(storage.data))
+		}
+		return
+	}
 	common.Must(Put(b.data))
 	*b = Buffer{}
 }

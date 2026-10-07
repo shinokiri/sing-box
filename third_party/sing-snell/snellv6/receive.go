@@ -249,7 +249,11 @@ func (r *bufferedShapedReader) read() (*buf.Buffer, error) {
 	}
 	snell.IncreaseNonce(r.nonce)
 	payloadStart := start + headLen + paddingLen
-	if !receiveHasViews(r.block) && r.position == r.block.Len() && payloadLen > 2048 && payloadLen >= r.block.Cap()/4 &&
+	drained := r.position == r.block.Len()
+	hasViews := receiveHasViews(r.block)
+	// A lone response should not retain a large warmed-up receive block.
+	// Sharing remains useful when other records already occupy that block.
+	if !hasViews && drained && payloadLen > 2048 && payloadLen >= r.block.Cap()/2 &&
 		payloadStart >= r.readWaitOptions.FrontHeadroom && r.block.Cap()-(payloadStart+payloadLen) >= r.readWaitOptions.RearHeadroom {
 		body := r.block
 		r.transferCapacity = body.Cap()
@@ -259,7 +263,7 @@ func (r *bufferedShapedReader) read() (*buf.Buffer, error) {
 		body.Resize(payloadStart, payloadLen)
 		return body, nil
 	}
-	if receiveSharing && payloadLen > 2048 && payloadLen >= r.block.Cap()/8 && r.readWaitOptions.RearHeadroom <= snell.AEADTagLen {
+	if receiveSharing && (!drained || hasViews) && payloadLen > 2048 && payloadLen >= r.block.Cap()/8 && r.readWaitOptions.RearHeadroom <= snell.AEADTagLen {
 		if !receiveHasViews(r.block) {
 			r.viewFence = 0
 		}
