@@ -1,4 +1,4 @@
-name: Snell shared receive integration
+name: Go TUN ready upload batch study
 on:
   workflow_dispatch:
 permissions:
@@ -10,36 +10,47 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
+    env:
+      GOMAXPROCS: '2'
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.8'
           cache: false
-      - name: Format and synchronize the standalone module
+      - name: Record platform and format study sources
         run: |
-          gofmt -w third_party/sing/common/buf/{buffer,shared_buffer,shared_buffer_test}.go third_party/sing-snell/snellv6/{receive*.go,client.go,reuse.go} third_party/sing-tun/receive_view_integration_test.go
-          go -C third_party/sing-snell mod tidy
-      - name: Test shared ownership and response lifetimes
+          go version | tee platform.txt
+          uname -a | tee -a platform.txt
+          lscpu | tee -a platform.txt
+          git rev-parse HEAD | tee source-commit.txt
+          gofmt -w third_party/sing-tun/stack_go_read_wait*.go third_party/sing-tun/stack_go_upload_study_test.go
+          git diff --stat
+      - name: Validate ready batches and ownership under race detection
         run: |
           set -o pipefail
-          go -C third_party/sing test -race -count=3 ./common/buf | tee buffer-tests.txt
-          go -C third_party/sing-snell test -race -count=3 -timeout=180s ./... | tee response-tests.txt
-          go -C third_party/sing-snell test -tags=owned_receive -race -count=3 -timeout=180s ./... | tee ownership-control-tests.txt
-          go test -race -count=3 -timeout=180s ./protocol/snell | tee session-tests.txt
-          go test -race -count=3 -run '^TestSharedReceiveTransmitStore$' github.com/sagernet/sing-tun | tee transmit-tests.txt
-          sh .github/check_local_patches.sh
+          go test -race -count=3 -timeout=120s -run '^TestGoReadWaitBatch' -v github.com/sagernet/sing-tun | tee tests-reader.txt
+      - name: Validate kernel TCP and Snell decode including post-bulk small messages
+        run: |
+          set -o pipefail
+          go test -race -exec 'sudo -E' -tags upload_batch_study -count=2 -timeout=240s -run '^TestGoKernel(ReadWaitBatch|UploadBatchSnell)' -v github.com/sagernet/sing-tun | tee tests-kernel-snell.txt
+      - name: Compare ready backlog and small message round trips
+        run: |
+          set -o pipefail
+          for round in 1 2 3; do
+            export UPLOAD_STUDY_REVERSE=$((round % 2))
+            go test -tags upload_batch_study -run '^TestGoUploadSmallRoundTrip$' -count=1 -timeout=120s -v github.com/sagernet/sing-tun | tee "latency-${round}.txt"
+            go test -tags upload_batch_study -run '^$' -bench '^BenchmarkGoUploadReadySnell$' -benchtime=250ms -count=1 -benchmem -timeout=240s github.com/sagernet/sing-tun | tee "bench-${round}.txt"
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: integrated-receive-${{ matrix.os }}
+          name: upload-batch-${{ matrix.os }}
           path: |
-            *tests.txt
-            third_party/sing/common/buf/buffer.go
-            third_party/sing/common/buf/shared_buffer*.go
-            third_party/sing-snell/go.mod
-            third_party/sing-snell/go.sum
-            third_party/sing-snell/snellv6/receive*.go
-            third_party/sing-snell/snellv6/client.go
-            third_party/sing-snell/snellv6/reuse.go
-            third_party/sing-tun/receive_view_integration_test.go
+            platform.txt
+            source-commit.txt
+            tests-*.txt
+            latency-*.txt
+            bench-*.txt
+            third_party/sing-tun/stack_go_read_wait*.go
+            third_party/sing-tun/stack_go_upload_study_test.go
