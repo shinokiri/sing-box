@@ -61,13 +61,13 @@ func copyWaitWithPool(session *CopySession, destination N.ExtendedWriter, source
 			} else {
 				vectorisedReadWaiter.InitializeReadWaiter(options)
 			}
-			n, err = copyWaitVectorisedWithPool(session, vectorisedWriter, vectorisedReadWaiter, n)
+			n, err = copyWaitVectorisedWithPool(session, destination, vectorisedWriter, vectorisedReadWaiter, n)
 			return
 		}
 	}
 }
 
-func copyWaitVectorisedWithPool(session *CopySession, vectorisedWriter N.VectorisedWriter, readWaiter N.VectorisedReadWaiter, inputN int64) (n int64, err error) {
+func copyWaitVectorisedWithPool(session *CopySession, destination N.ExtendedWriter, vectorisedWriter N.VectorisedWriter, readWaiter N.VectorisedReadWaiter, inputN int64) (n int64, err error) {
 	n += inputN
 	var buffers []*buf.Buffer
 	for {
@@ -83,7 +83,14 @@ func copyWaitVectorisedWithPool(session *CopySession, vectorisedWriter N.Vectori
 		for _, buffer := range buffers {
 			dataLen += buffer.Len()
 		}
-		err = vectorisedWriter.WriteVectorised(buffers)
+		if len(buffers) == 1 {
+			// Keep the scalar fast path when a ready-only reader has no batch.
+			// In particular, avoid record/vector allocations for lone messages
+			// on a connection that previously crossed the bulk threshold.
+			err = destination.WriteBuffer(buffers[0])
+		} else {
+			err = vectorisedWriter.WriteVectorised(buffers)
+		}
 		if err != nil {
 			for _, buffer := range buffers {
 				buffer.Leak()

@@ -185,8 +185,8 @@ func TestGoReadWaitBatchErrors(t *testing.T) {
 
 type goReadWaitRecorder struct {
 	bytes.Buffer
-	singleBytes int
-	batchCount int
+	singleBytes  int
+	batchCount   int
 	largestBatch int
 }
 
@@ -201,6 +201,9 @@ func (w *goReadWaitRecorder) WriteBuffer(buffer *buf.Buffer) error {
 
 func (w *goReadWaitRecorder) WriteVectorised(buffers []*buf.Buffer) error {
 	defer buf.ReleaseMulti(buffers)
+	if len(buffers) < 2 {
+		return errors.New("lone buffer did not use the scalar fast path")
+	}
 	if w.singleBytes < bufio.DefaultIncreaseBufferAfter {
 		return errors.New("vector copy activated before the existing bulk threshold")
 	}
@@ -225,5 +228,21 @@ func TestGoReadWaitBatchCopyTransition(t *testing.T) {
 	}
 	if writer.batchCount == 0 || writer.largestBatch != goMaxReadBatch {
 		t.Fatalf("public copy did not use ready batches: calls=%d largest=%d", writer.batchCount, writer.largestBatch)
+	}
+}
+
+func TestGoReadWaitBatchCopySingleAfterBulk(t *testing.T) {
+	writer := new(goReadWaitRecorder)
+	options := N.NewReadWaitOptions(nil, writer)
+	probe := options.NewBuffer()
+	capacity := probe.FreeLen()
+	probe.Release()
+	initialBuffers := (bufio.DefaultIncreaseBufferAfter + capacity - 1) / capacity
+	payload := bytes.Repeat([]byte{37}, initialBuffers*capacity+64)
+	conn := newGoReadWaitFixture(t, payload)
+	conn.finReceived = true
+	n, err := bufio.Copy(writer, conn)
+	if err != nil || n != int64(len(payload)) || !bytes.Equal(writer.Bytes(), payload) || writer.batchCount != 0 {
+		t.Fatalf("single buffer after bulk: copied=%d vector calls=%d err=%v", n, writer.batchCount, err)
 	}
 }

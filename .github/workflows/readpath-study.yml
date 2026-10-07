@@ -24,11 +24,12 @@ jobs:
           uname -a | tee -a platform.txt
           lscpu | tee -a platform.txt
           git rev-parse HEAD | tee source-commit.txt
-          gofmt -w third_party/sing-tun/stack_go_read_wait*.go third_party/sing-tun/stack_go_upload_study_test.go
+          gofmt -w third_party/sing/common/bufio/copy_direct.go third_party/sing-tun/stack_go_read_wait*.go third_party/sing-tun/stack_go_upload_study_test.go
           git diff --stat
       - name: Validate ready batches and ownership under race detection
         run: |
           set -o pipefail
+          go test -race -count=3 -timeout=120s github.com/sagernet/sing/common/bufio | tee tests-copy.txt
           go test -race -count=3 -timeout=120s -run '^TestGoReadWaitBatch' -v github.com/sagernet/sing-tun | tee tests-reader.txt
       - name: Validate kernel TCP and Snell decode including post-bulk small messages
         run: |
@@ -52,5 +53,6 @@ jobs:
             tests-*.txt
             latency-*.txt
             bench-*.txt
+            third_party/sing/common/bufio/copy_direct.go
             third_party/sing-tun/stack_go_read_wait*.go
             third_party/sing-tun/stack_go_upload_study_test.go

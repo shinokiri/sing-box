@@ -27,13 +27,15 @@ func TestGoKernelReadWaitBatch(t *testing.T) {
 			for _, ipv6 := range []bool{false, true} {
 				t.Run(fmt.Sprintf("ipv6=%v", ipv6), func(t *testing.T) {
 					client, server := fixture.pair(t, ipv6)
-					client.SetDeadline(time.Now().Add(15*time.Second))
-					server.SetDeadline(time.Now().Add(15*time.Second))
+					client.SetDeadline(time.Now().Add(15 * time.Second))
+					server.SetDeadline(time.Now().Add(15 * time.Second))
 					payload := kernelPayload(4<<20, 71)
 					written := make(chan error, 1)
 					go func() {
 						_, err := client.Write(payload)
-						if err == nil { err = client.CloseWrite() }
+						if err == nil {
+							err = client.CloseWrite()
+						}
 						written <- err
 					}()
 					writer := new(goReadWaitRecorder)
@@ -41,7 +43,9 @@ func TestGoKernelReadWaitBatch(t *testing.T) {
 					if err != nil || n != int64(len(payload)) || !bytes.Equal(writer.Bytes(), payload) {
 						t.Fatalf("kernel copy n=%d err=%v", n, err)
 					}
-					if err := <-written; err != nil { t.Fatal(err) }
+					if err := <-written; err != nil {
+						t.Fatal(err)
+					}
 					if writer.batchCount == 0 || writer.largestBatch > goMaxReadBatch {
 						t.Fatal("copy did not enter bounded vector path")
 					}
@@ -68,25 +72,45 @@ func TestGoKernelReadWaitBatchParked(t *testing.T) {
 						err = fmt.Errorf("unexpected message batch: %d buffers", len(buffers))
 					}
 				}
-				for _, buffer := range buffers { buffer.Release() }
+				for _, buffer := range buffers {
+					buffer.Release()
+				}
 				result <- err
 			}()
 			deadline := time.Now().Add(time.Second)
-			for !server.readerParked.Load() && time.Now().Before(deadline) { time.Sleep(time.Millisecond) }
-			if !server.readerParked.Load() { server.Close(); <-result; t.Fatal("reader did not park") }
+			for !server.readerParked.Load() && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if !server.readerParked.Load() {
+				server.Close()
+				<-result
+				t.Fatal("reader did not park")
+			}
 			switch action {
 			case "message":
-				if _, err := io.WriteString(client, "one message"); err != nil { t.Fatal(err) }
-			case "deadline": server.SetReadDeadline(time.Now())
-			case "close": server.Close()
+				if _, err := io.WriteString(client, "one message"); err != nil {
+					t.Fatal(err)
+				}
+			case "deadline":
+				server.SetReadDeadline(time.Now())
+			case "close":
+				server.Close()
 			}
 			select {
 			case err := <-result:
-				if action == "message" && err != nil { t.Fatal(err) }
-				if action == "deadline" && !errors.Is(err, os.ErrDeadlineExceeded) { t.Fatalf("read deadline: %v", err) }
-				if action == "close" && !errors.Is(err, net.ErrClosed) { t.Fatalf("read close: %v", err) }
+				if action == "message" && err != nil {
+					t.Fatal(err)
+				}
+				if action == "deadline" && !errors.Is(err, os.ErrDeadlineExceeded) {
+					t.Fatalf("read deadline: %v", err)
+				}
+				if action == "close" && !errors.Is(err, net.ErrClosed) {
+					t.Fatalf("read close: %v", err)
+				}
 			case <-time.After(time.Second):
-				server.Close(); <-result; t.Fatal("parked reader did not resume")
+				server.Close()
+				<-result
+				t.Fatal("parked reader did not resume")
 			}
 		})
 	}
