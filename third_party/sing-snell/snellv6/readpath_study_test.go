@@ -6,6 +6,7 @@ import (
     "crypto/cipher"
     "errors"
     "fmt"
+    "flag"
     "io"
     "net"
     "testing"
@@ -18,6 +19,7 @@ import (
 
 // These variants isolate header scratch reuse from ordinary buffered reads.
 // No traffic pacing, socket window or delay settings are involved.
+var studyBufferSize = flag.Int("study-buffer-size", 4096, "read buffer size for the isolated comparison")
 var studyPolicies = []string{"baseline", "scratch", "buffered", "combined"}
 var studyPSK = []byte("public snell readpath test fixture, not a server credential")
 
@@ -31,7 +33,7 @@ type studyRecordReader interface {
 
 func studyReader(policy string, input io.Reader, profile *Profile) (studyRecordReader, func(cipher.AEAD)) {
     if policy == "buffered" || policy == "combined" {
-        input = bufio.NewReaderSize(input, 4096)
+        input = bufio.NewReaderSize(input, *studyBufferSize)
     }
     if policy == "baseline" || policy == "buffered" {
         r := newBaselineShapedReader(input, studyPSK, profile)
