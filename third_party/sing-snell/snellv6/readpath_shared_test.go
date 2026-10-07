@@ -15,6 +15,7 @@ import (
 )
 
 var studyBlockSize = flag.Int("study-block-size", 4096, "initial shared receive block capacity")
+var studySharedReadAhead = flag.Int("study-shared-read-ahead", 4096, "maximum extra small-field receive window")
 
 func init() {
 	studyPolicies = append(studyPolicies, "shared")
@@ -67,6 +68,10 @@ func (r *sharedShapedReader) ensure(required int) error {
 	}
 	available := r.block.Len() - r.position
 	if available >= required { return nil }
+	if available == 0 && r.position > 0 && !r.block.HasSharedViews() {
+		r.block.Resize(0, 0)
+		r.position = 0
+	}
 	if r.block.Cap() - r.position < required {
 		if !r.block.HasSharedViews() && r.block.Cap() >= required {
 			copy(r.block.Bytes(), r.block.Bytes()[r.position:])
@@ -87,7 +92,16 @@ func (r *sharedShapedReader) ensure(required int) error {
 			if errors.Is(r.pendingErr, io.EOF) && r.block.Len() > r.position { return io.ErrUnexpectedEOF }
 			return r.pendingErr
 		}
-		n, err := r.block.ReadOnceFrom(r.upstream)
+		remaining := required - (r.block.Len() - r.position)
+		limit := remaining
+		// A known large record is read exactly to its end, allowing a drained
+		// block to reset without moving the next record. Small fields/records
+		// can still batch whatever is currently available, without waiting.
+		if required <= *studySharedReadAhead { limit = max(limit, *studySharedReadAhead) }
+		space := r.block.FreeBytes()
+		space = space[:min(len(space), limit)]
+		n, err := r.upstream.Read(space)
+		r.block.Extend(n)
 		if err != nil { r.pendingErr = err }
 		if n == 0 && err == nil {
 			emptyReads++

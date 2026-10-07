@@ -16,9 +16,12 @@ target = root / '.study-deps' / 'sing'
 if target.exists():
     raise SystemExit('Refusing to overwrite an existing study dependency')
 shutil.copytree(info['Dir'], target)
+target.chmod(0o755)
 for path in target.rglob('*'):
     if path.is_file():
         path.chmod(0o644)
+    elif path.is_dir():
+        path.chmod(0o755)
 buffer = target / 'common/buf/buffer.go'
 source = buffer.read_text()
 old = '\tmanaged  bool\n'
