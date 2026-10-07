@@ -91,6 +91,10 @@ jobs:
           go test -race -count=3 -run '^TestURLTest' -v ./protocol/snell
           go test -race github.com/sagernet/sing-snell/...
           exit "$urltest_format_status"
+      - name: Compile Snell receive-hint fallback on non-Linux targets
+        run: |
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build github.com/sagernet/sing-snell/...
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build github.com/sagernet/sing-snell/...
       - name: Test URLTest progress and task lifecycle
         run: go test -race -count=3 -timeout=180s ./common/urltest ./protocol/group ./daemon
       - name: Test Android platform TCP Fast Open

@@ -8,12 +8,21 @@ import (
 )
 
 type testSession struct {
-	state  atomic.Uint32
-	closed atomic.Int32
-	inUse  atomic.Int32
+	state      atomic.Uint32
+	closed     atomic.Int32
+	inUse      atomic.Int32
+	threshold  uint32
+	measured   bool
+	sampleHook func()
 }
 
 func (s *testSession) ReuseState() *atomic.Uint32 { return &s.state }
+func (s *testSession) ReceiveThreshold() (uint32, bool) {
+	if s.sampleHook != nil {
+		s.sampleHook()
+	}
+	return s.threshold, s.measured
+}
 func (s *testSession) Close() error {
 	s.state.Store(uint32(StateClosed))
 	s.closed.Add(1)
@@ -77,9 +86,10 @@ func TestPoolSkipsWaitingAndClosedEntries(t *testing.T) {
 	p := makePool(t)
 	ready := put(t, p, StateReady)
 	put(t, p, StateWaiting)
-	put(t, p, StateClosed)
-	got, found, closed := p.Take()
-	if !found || closed || got != ready {
+	closed := put(t, p, StateReady)
+	closed.state.Store(uint32(StateClosed))
+	got, found, poolClosed := p.Take()
+	if !found || poolClosed || got != ready {
 		t.Fatal("unusable entry selected")
 	}
 	got.Close()
@@ -96,7 +106,7 @@ func TestPoolCapacityResetAndClosure(t *testing.T) {
 	}
 	extra := new(testSession)
 	if p.MoveToPool(extra, StateReady, false) || extra.closed.Load() != 1 {
-		t.Fatal("capacity exceeded")
+		t.Fatal("unmeasured full pool did not retain its existing admission policy")
 	}
 	p.Reset()
 	for _, s := range sessions {
