@@ -1,6 +1,6 @@
 # Local URLTest session handoff
 
-Upstream: v0.0.0-20260904135315-bc5a12ac736f. Files are copied from the upstream Go module archive. Local changes cover the exclusive URLTest session handoff and shared idle-pool retention policy described below.
+Upstream: v0.0.0-20260904135315-bc5a12ac736f. Files are copied from the upstream Go module archive. Local changes are described below.
 
 URLTestDialer owns one physical Snell v6 session for exactly two logical requests. The first is the existing HTTP warmup; the second waits for its server EOF before reusing the same transport. The reserved session is never inserted into the shared pool, so background traffic cannot consume it between requests. It is closed when the probe finishes or fails.
 
@@ -30,3 +30,20 @@ throughput guarantee. Queued data and other kernel clamps can reduce that
 window. Queries happen at pool transitions only. Capacity, idle expiration,
 active-session ownership and automatic TCP receive tuning are unchanged;
 no prewarming traffic, keepalives, periodic queries or buffer locks are added.
+
+# Bounded read batching for v6 default mode
+
+The shaped reader keeps a 1 KiB read buffer and reuses its profile-sized
+header scratch for the lifetime of the physical connection. Buffered bytes
+survive logical EOF and session reuse; the exposed upstream reader and returned
+payload ownership remain unchanged. A complete short response is returned
+without waiting for the buffer to fill. Larger reads can bypass the buffer.
+
+The comparison at branch `codex/snell-readpath-study` isolates header reuse
+from batching against installed commit `c99d7779`. Linux x86/ARM and standalone
+Android tests cover fragmented input, logical EOF/reuse, requested headroom,
+truncation, authentication failures and immediate short-message delivery.
+Android loopback comparisons favored 1 KiB over 4 KiB as the more conservative
+tradeoff after the 4 KiB candidate regressed near-64-KiB records. Each record
+avoids one allocation; these are decoder/loopback measurements, not a WAN
+throughput or application startup guarantee.
