@@ -144,5 +144,6 @@ type SnellObfsClientOptions struct {
 }
 
 type SnellV6Options struct {
-	Mode string `json:"mode,omitempty" enum:"default,unshaped,unsafe-raw"`
+	HTTPFraming bool   `json:"http_framing,omitempty"`
+	Mode        string `json:"mode,omitempty" enum:"default,unshaped,unsafe-raw"`
 }

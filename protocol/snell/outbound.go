@@ -84,12 +84,13 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			return nil, err
 		}
 		client, err = snellv6.NewClient(snellv6.ClientOptions{
-			PSK:     []byte(options.PSK),
-			UserKey: []byte(options.UserKey),
-			Mode:    mode,
-			Reuse:   options.Reuse,
-			Dialer:  outboundDialer,
-			Server:  serverAddr,
+			HTTPFraming: options.V6Options.HTTPFraming,
+			PSK:         []byte(options.PSK),
+			UserKey:     []byte(options.UserKey),
+			Mode:        mode,
+			Reuse:       options.Reuse,
+			Dialer:      outboundDialer,
+			Server:      serverAddr,
 		})
 	case 0:
 		return nil, E.New("snell: missing version")

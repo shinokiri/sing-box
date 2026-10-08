@@ -57,7 +57,7 @@ func (c *clientPacketConn) writeRequest() error {
 		request.Release()
 		return err
 	}
-	writer, err := writeFirstRecord(c.Conn, c.client.mode, c.client.psk, c.client.profile, request.Bytes())
+	writer, err := c.client.writeFirstRecord(c.Conn, request.Bytes())
 	request.Release()
 	if err != nil {
 		return E.Cause(err, "write udp request")

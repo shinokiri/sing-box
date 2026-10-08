@@ -42,6 +42,7 @@ icon: material/new-box
   "udp_flow": false,
   "network": "tcp",
   "mode": "",
+  "http_framing": false,
 
   ... // Dial Fields
 }
@@ -125,6 +126,16 @@ The HTTP `Host` header sent when `obfs_mode` is `http`.
 Traffic shaping mode, one of `default` `unshaped` `unsafe-raw`.
 
 `default` is used by default.
+
+#### http_framing
+
+==Version 6 default mode only; fork extension==
+
+Enable matched HTTP framing on the first client write to work around the reproduced TCP Fast Open persistent slowdown. Disabled by default. Both endpoints must support this extension: an outbound connects either to an inbound with the same setting or to `snell-http-relay` forwarding to the existing Snell server. It is incompatible with an unmodified Snell listener when enabled directly.
+
+The receiver reconstructs deterministic profile padding and preserves the original Snell salt, ciphertext and authentication. The header is paid for by those recovered bytes; profiles with insufficient recoverable padding are rejected during configuration. The kernel chooses normal TCP segmentation without an MSS cache or a separate warmup connection. Decoding starts as soon as the header and salt-position bytes arrive, without waiting for the complete body. Subsequent writes and server replies retain the normal Snell format. This option does not itself enable TCP Fast Open; use the existing dial/listen setting as appropriate.
+
+The fixed `.invalid` Host value is a framing literal and is not resolved. No HTTP server or TLS handshake is involved. This mechanism has been tested against a specific reproduced path defect; it is not a replacement for Snell encryption.
 
 ### Dial Fields
 

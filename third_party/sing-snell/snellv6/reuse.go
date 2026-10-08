@@ -380,7 +380,7 @@ func (c *reuseConn) writeRequest(payload []byte) error {
 		if len(first) > maxPayload {
 			first = data[:maxPayload]
 		}
-		c.session.writer, err = writeFirstRecord(c.session.Conn, c.session.client.mode, c.session.client.psk, c.session.client.profile, first)
+		c.session.writer, err = c.session.client.writeFirstRecord(c.session.Conn, first)
 		if err != nil {
 			c.session.Release(false)
 			return E.Cause(err, "write request")
@@ -407,7 +407,7 @@ func (c *reuseConn) writeRequestBuffer(buffer *buf.Buffer) error {
 		return err
 	}
 	if c.session.writer == nil {
-		c.session.writer, err = writeFirstRecordBuffer(c.session.Conn, c.session.client.mode, c.session.client.psk, c.session.client.profile, buffer)
+		c.session.writer, err = c.session.client.writeFirstRecordBuffer(c.session.Conn, buffer)
 	} else {
 		err = c.session.writer.WriteBuffer(buffer)
 	}

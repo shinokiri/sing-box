@@ -17,16 +17,18 @@ import (
 )
 
 type Service struct {
-	psk     []byte
-	mode    Mode
-	profile *Profile
-	handler snell.Handler
+	psk         []byte
+	mode        Mode
+	profile     *Profile
+	httpFraming *HTTPFraming
+	handler     snell.Handler
 }
 
 type ServerOptions struct {
-	PSK     []byte
-	Mode    Mode
-	Handler snell.Handler
+	HTTPFraming bool
+	PSK         []byte
+	Mode        Mode
+	Handler     snell.Handler
 }
 
 func NewService(options ServerOptions) (*Service, error) {
@@ -44,10 +46,27 @@ func NewService(options ServerOptions) (*Service, error) {
 	if options.Mode == ModeDefault {
 		service.profile = NewProfile(options.PSK)
 	}
+	if options.HTTPFraming {
+		if options.Mode != ModeDefault {
+			return nil, E.New("snell: HTTP framing requires default v6 mode")
+		}
+		var err error
+		service.httpFraming, err = NewHTTPFraming(options.PSK)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return service, nil
 }
 
 func (s *Service) NewConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
+	if s.httpFraming != nil {
+		var err error
+		conn, err = s.httpFraming.DecodeConn(conn)
+		if err != nil {
+			return &snell.ServerError{Conn: conn, Source: source, Cause: err}
+		}
+	}
 	err := s.newConnection(ctx, conn, source, onClose)
 	if err != nil {
 		return &snell.ServerError{Conn: conn, Source: source, Cause: err}
@@ -97,6 +116,13 @@ func (s *MultiService[U]) UpdateUsers(users []U, userKeys [][]byte) error {
 }
 
 func (s *MultiService[U]) NewConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
+	if s.httpFraming != nil {
+		var err error
+		conn, err = s.httpFraming.DecodeConn(conn)
+		if err != nil {
+			return &snell.ServerError{Conn: conn, Source: source, Cause: err}
+		}
+	}
 	err := s.newConnection(ctx, conn, source, onClose)
 	if err != nil {
 		return &snell.ServerError{Conn: conn, Source: source, Cause: err}

@@ -16,25 +16,27 @@ import (
 )
 
 type Client struct {
-	psk     []byte
-	userKey []byte
-	mode    Mode
-	reuse   bool
-	profile *Profile
-	dialer  N.Dialer
-	server  M.Socksaddr
+	psk         []byte
+	userKey     []byte
+	mode        Mode
+	reuse       bool
+	profile     *Profile
+	httpFraming *HTTPFraming
+	dialer      N.Dialer
+	server      M.Socksaddr
 
 	pool      reuse.Pool[*reuseSession]
 	closeIdle atomic.Bool
 }
 
 type ClientOptions struct {
-	PSK     []byte
-	UserKey []byte
-	Mode    Mode
-	Reuse   bool
-	Dialer  N.Dialer
-	Server  M.Socksaddr
+	PSK         []byte
+	UserKey     []byte
+	Mode        Mode
+	Reuse       bool
+	HTTPFraming bool
+	Dialer      N.Dialer
+	Server      M.Socksaddr
 }
 
 func NewClient(options ClientOptions) (*Client, error) {
@@ -57,6 +59,16 @@ func NewClient(options ClientOptions) (*Client, error) {
 	}
 	if options.Mode == ModeDefault {
 		client.profile = NewProfile(options.PSK)
+	}
+	if options.HTTPFraming {
+		if options.Mode != ModeDefault {
+			return nil, E.New("snell: HTTP framing requires default v6 mode")
+		}
+		var err error
+		client.httpFraming, err = NewHTTPFraming(options.PSK)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if options.Reuse {
 		client.pool.Init()
@@ -120,7 +132,7 @@ func (c *clientConn) writeRequest(payload []byte) error {
 	if len(first) > maxPayload {
 		first = data[:maxPayload]
 	}
-	writer, err := writeFirstRecord(c.Conn, c.client.mode, c.client.psk, c.client.profile, first)
+	writer, err := c.client.writeFirstRecord(c.Conn, first)
 	if err != nil {
 		return E.Cause(err, "write request")
 	}
@@ -142,7 +154,7 @@ func (c *clientConn) writeRequestBuffer(buffer *buf.Buffer) error {
 		buffer.Release()
 		return err
 	}
-	writer, err := writeFirstRecordBuffer(c.Conn, c.client.mode, c.client.psk, c.client.profile, buffer)
+	writer, err := c.client.writeFirstRecordBuffer(c.Conn, buffer)
 	if err != nil {
 		return E.Cause(err, "write request")
 	}

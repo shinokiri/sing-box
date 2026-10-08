@@ -86,9 +86,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 			return nil, err
 		}
 		serviceOptions := snellv6.ServerOptions{
-			PSK:     []byte(options.PSK),
-			Mode:    mode,
-			Handler: inbound,
+			HTTPFraming: options.V6Options.HTTPFraming,
+			PSK:         []byte(options.PSK),
+			Mode:        mode,
+			Handler:     inbound,
 		}
 		if len(options.Users) > 0 {
 			var service *snellv6.MultiService[int]
