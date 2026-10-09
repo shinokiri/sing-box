@@ -129,11 +129,12 @@ func (r *portReturn) classifyFragment(parsed *forwardPacket, size int, now int64
 		parsed.protocol = info.protocol
 		parsed.parseTransport(info.payload)
 		var (
-			flow *forwardFlow
-			rule *rewriteRule
+			flow    *forwardFlow
+			rule    *rewriteRule
+			scratch rewriteRule
 		)
 		if parsed.hasFlow {
-			flow, rule = r.matchReverse(parsed)
+			flow, rule = r.matchReverse(parsed, &scratch)
 		}
 		if flow == nil {
 			r.fragments.remove(key)

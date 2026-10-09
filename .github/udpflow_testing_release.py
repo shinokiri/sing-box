@@ -23,6 +23,11 @@ def plan():
     if event == "pull_request":
         output(build=True, publish=False, source=json.dumps(current), reason="pull-request")
         return
+    if event == "workflow_dispatch" and os.environ["GITHUB_REF"] != f"refs/heads/{BRANCH}":
+        # Maintainers can validate a pinned branch if PR event delivery is delayed.
+        # Keep publication and automatic upstream selection exclusive to BRANCH.
+        output(build=True, publish=False, source=json.dumps(current), reason="manual-branch-validation")
+        return
     if os.environ["GITHUB_REF"] != f"refs/heads/{BRANCH}":
         raise ValueError("Testing snapshots must be published from udpflow-testing")
     auto_sync = event == "schedule" or os.environ.get("SYNC_UPSTREAM") == "true"

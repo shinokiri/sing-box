@@ -54,6 +54,16 @@ class TestingReleaseTest(unittest.TestCase):
             self.assertEqual(release.properties(output), {"build": "true", "publish": "false", "source": json.dumps(self.source), "reason": "pull-request"})
             api.assert_not_called()
 
+    def test_manual_branch_validation_never_publishes_or_changes_pins(self):
+        for auto_sync in ("false", "true"):
+            with self.subTest(auto_sync=auto_sync), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "output"
+                with patch.object(release, "snapshot", return_value=(self.source, "version")), patch.object(release, "api") as api, patch.object(release.sync, "select_source") as select_source, patch.dict(os.environ, GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_REF="refs/heads/candidate", SYNC_UPSTREAM=auto_sync, GITHUB_OUTPUT=str(output)):
+                    release.plan()
+                self.assertEqual(release.properties(output), {"build": "true", "publish": "false", "source": json.dumps(self.source), "reason": "manual-branch-validation"})
+                api.assert_not_called()
+                select_source.assert_not_called()
+
     def test_testing_release_cannot_be_silently_promoted_to_stable(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(release, "snapshot", return_value=(self.source, "version")), patch.object(release, "api", side_effect=[{"sha": "a" * 40}, {"draft": False, "prerelease": False}]), patch.dict(os.environ, GITHUB_EVENT_NAME="push", GITHUB_REF="refs/heads/udpflow-testing", GITHUB_REPOSITORY="example/fork", GITHUB_OUTPUT=str(Path(directory) / "output")):

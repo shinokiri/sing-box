@@ -214,9 +214,9 @@ func (n *portNAT) deleteUDPMapping(key flowKey, f *forwardFlow) {
 	}
 }
 
-func (n *portNAT) matchUDPFlow(packet *forwardPacket, expected *udpMapping) (*forwardFlow, *rewriteRule) {
+func (n *portNAT) matchUDPFlow(packet *forwardPacket, expected *udpMapping) (*forwardFlow, rewriteRule) {
 	if n.udpMappings == nil || packet.protocol != uint8(header.UDPProtocolNumber) {
-		return nil, nil
+		return nil, rewriteRule{}
 	}
 	n.udpAccess.RLock()
 	var owner *forwardFlow
@@ -229,7 +229,7 @@ func (n *portNAT) matchUDPFlow(packet *forwardPacket, expected *udpMapping) (*fo
 	}
 	n.udpAccess.RUnlock()
 	if owner == nil {
-		return nil, nil
+		return nil, rewriteRule{}
 	}
 	// Keep the responder's actual port. Only a known real IP has a Fake-IP
 	// alias; a new peer keeps its own source address.
@@ -241,7 +241,7 @@ func (n *portNAT) matchUDPFlow(packet *forwardPacket, expected *udpMapping) (*fo
 	if owner.serverAddress == packet.source.Addr() && owner.dnatAddress {
 		rule.sourceAddress = addrToTCPIP(owner.clientDestinationAddress)
 	}
-	return owner, &rule
+	return owner, rule
 }
 
 func (n *portNAT) returnUDPFlow(packet *forwardPacket, size int, now int64, expected *udpMapping) *forwardFlow {
@@ -253,6 +253,6 @@ func (n *portNAT) returnUDPFlow(packet *forwardPacket, size int, now int64, expe
 		owner.tracker.CountReverse(size)
 	}
 	owner.observeReverse(packet, now)
-	applyRewrite(packet, rule)
+	applyRewrite(packet, &rule)
 	return owner
 }

@@ -999,7 +999,8 @@ func (r *portReturn) classifyReturn(raw []byte, headroom int, now int64) (return
 		}
 		return returnPass, nil
 	}
-	flow, rule := r.matchReverse(&parsed)
+	var scratch rewriteRule
+	flow, rule := r.matchReverse(&parsed, &scratch)
 	if flow == nil {
 		return returnPass, nil
 	}
@@ -1020,7 +1021,7 @@ func (r *portReturn) classifyReturn(raw []byte, headroom int, now int64) (return
 	return returnWrite, flow.owner.writeback
 }
 
-func (r *portReturn) matchReverse(parsed *forwardPacket) (*forwardFlow, *rewriteRule) {
+func (r *portReturn) matchReverse(parsed *forwardPacket, scratch *rewriteRule) (*forwardFlow, *rewriteRule) {
 	key := parsed.flowKey()
 	flow := r.nat.lookup(key)
 	if flow != nil {
@@ -1037,7 +1038,8 @@ func (r *portReturn) matchReverse(parsed *forwardPacket) (*forwardFlow, *rewrite
 		if flow == nil || flow.owner.root != r.dispatcher {
 			return nil, nil
 		}
-		return flow, rule
+		*scratch = rule
+		return flow, scratch
 	}
 	mapping, anchor := r.nat.lookupMapping(key.destination.Addr(), key.destination.Port(), key.source.Addr())
 	if mapping == nil || mapping.key.dispatcher != r.dispatcher {

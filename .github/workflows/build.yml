@@ -56,7 +56,7 @@ jobs:
     env:
       # Exercise Android changes on in-repository PRs before merging.
       # Fork PRs run core checks without access to signing secrets.
-      BUILD_ANDROID: ${{ github.ref == 'refs/heads/udpflow-testing' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+      BUILD_ANDROID: ${{ github.ref == 'refs/heads/udpflow-testing' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
