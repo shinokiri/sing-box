@@ -61,6 +61,7 @@ type Pool[S Session] struct {
 	closed  bool
 	entries list.List[*poolEntry[S]]
 	stop    chan struct{}
+	changed chan struct{}
 	ticking bool
 	drainWg sync.WaitGroup
 }
@@ -82,6 +83,12 @@ func (p *Pool[S]) IsClosed() bool {
 }
 
 func (p *Pool[S]) Take() (session S, found bool, closed bool) {
+	session, found, closed, _ = p.take(false)
+	return
+}
+
+// take can register a readiness notification atomically with an empty checkout.
+func (p *Pool[S]) take(watch bool) (session S, found bool, closed bool, changed <-chan struct{}) {
 	p.access.Lock()
 	closed = p.closed
 	var expired []S
@@ -123,6 +130,12 @@ func (p *Pool[S]) Take() (session S, found bool, closed bool) {
 			p.entries.Remove(selected)
 		}
 		// Close may race with sampling. Rescan after a failed reservation.
+	}
+	if watch && !found && !closed {
+		if p.changed == nil {
+			p.changed = make(chan struct{})
+		}
+		changed = p.changed
 	}
 	p.access.Unlock()
 	for _, expiredSession := range expired {
@@ -188,6 +201,11 @@ func (p *Pool[S]) MoveToPool(session S, state State, drain bool) bool {
 				p.drainWg.Add(1)
 			}
 			added = true
+			// A concurrent read can finish draining before insertion even if
+			// the caller originally observed StateWaiting.
+			if State(session.ReuseState().Load()) == StateReady {
+				p.notifyLocked()
+			}
 			if !p.ticking {
 				p.ticking = true
 				go p.ExpireLoop()
@@ -257,6 +275,20 @@ func (p *Pool[S]) DrainDone() {
 	p.drainWg.Done()
 }
 
+// NotifyReady wakes pending acquisitions after a draining session becomes ready.
+func (p *Pool[S]) NotifyReady() {
+	p.access.Lock()
+	p.notifyLocked()
+	p.access.Unlock()
+}
+
+func (p *Pool[S]) notifyLocked() {
+	if p.changed != nil {
+		close(p.changed)
+		p.changed = nil
+	}
+}
+
 func (p *Pool[S]) Reset() {
 	p.access.Lock()
 	if p.closed {
@@ -268,6 +300,7 @@ func (p *Pool[S]) Reset() {
 		sessions = append(sessions, element.Value.session)
 	}
 	p.entries.Init()
+	p.notifyLocked()
 	p.access.Unlock()
 	for _, session := range sessions {
 		session.Close()
@@ -286,6 +319,7 @@ func (p *Pool[S]) Close() error {
 		sessions = append(sessions, element.Value.session)
 	}
 	p.entries.Init()
+	p.notifyLocked()
 	if p.stop != nil {
 		close(p.stop)
 	}

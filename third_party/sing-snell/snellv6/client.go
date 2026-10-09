@@ -16,13 +16,14 @@ import (
 )
 
 type Client struct {
-	psk     []byte
-	userKey []byte
-	mode    Mode
-	reuse   bool
-	profile *Profile
-	dialer  N.Dialer
-	server  M.Socksaddr
+	psk       []byte
+	userKey   []byte
+	mode      Mode
+	reuse     bool
+	reuseRace bool
+	profile   *Profile
+	dialer    N.Dialer
+	server    M.Socksaddr
 
 	pool      reuse.Pool[*reuseSession]
 	closeIdle atomic.Bool
@@ -33,8 +34,10 @@ type ClientOptions struct {
 	UserKey []byte
 	Mode    Mode
 	Reuse   bool
-	Dialer  N.Dialer
-	Server  M.Socksaddr
+	// ReuseRace is experimental: race pool readiness against a demand dial.
+	ReuseRace bool
+	Dialer    N.Dialer
+	Server    M.Socksaddr
 }
 
 func NewClient(options ClientOptions) (*Client, error) {
@@ -48,12 +51,13 @@ func NewClient(options ClientOptions) (*Client, error) {
 		return nil, E.New("snell: unknown v6 mode: ", int(options.Mode))
 	}
 	client := &Client{
-		psk:     options.PSK,
-		userKey: options.UserKey,
-		mode:    options.Mode,
-		reuse:   options.Reuse,
-		dialer:  options.Dialer,
-		server:  options.Server,
+		psk:       options.PSK,
+		userKey:   options.UserKey,
+		mode:      options.Mode,
+		reuse:     options.Reuse,
+		reuseRace: options.ReuseRace,
+		dialer:    options.Dialer,
+		server:    options.Server,
 	}
 	if options.Mode == ModeDefault {
 		client.profile = NewProfile(options.PSK)

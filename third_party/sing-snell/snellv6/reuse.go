@@ -56,6 +56,13 @@ func (c *Client) DialContext(ctx context.Context, destination M.Socksaddr) (net.
 }
 
 func (c *Client) reuseSession(ctx context.Context) (*reuseSession, error) {
+	if c.reuseRace {
+		if c.dialer == nil {
+			return nil, E.New("snell: missing dialer")
+		}
+		session, _, err := c.pool.Acquire(ctx, c.dialReuseSession)
+		return session, err
+	}
 	session, found, closed := c.pool.Take()
 	if closed {
 		return nil, net.ErrClosed
@@ -66,6 +73,10 @@ func (c *Client) reuseSession(ctx context.Context) (*reuseSession, error) {
 	if found {
 		return session, nil
 	}
+	return c.dialReuseSession(ctx)
+}
+
+func (c *Client) dialReuseSession(ctx context.Context) (*reuseSession, error) {
 	conn, err := c.dialer.DialContext(ctx, N.NetworkTCP, c.server)
 	if err != nil {
 		return nil, err
@@ -74,7 +85,7 @@ func (c *Client) reuseSession(ctx context.Context) (*reuseSession, error) {
 		conn.Close()
 		return nil, net.ErrClosed
 	}
-	session = c.newReuseSession(conn)
+	session := c.newReuseSession(conn)
 	session.state.Store(uint32(reuse.StateActive))
 	return session, nil
 }
@@ -175,11 +186,14 @@ func (s *reuseSession) Close() error {
 	return s.Conn.Close()
 }
 
-// markReady also wakes the exclusive URLTest handoff. Ordinary sessions keep
-// their existing pool behavior.
+// markReady wakes acquisitions racing a dial and the exclusive URLTest handoff.
 func (s *reuseSession) markReady() {
-	if s.state.CompareAndSwap(uint32(reuse.StateWaiting), uint32(reuse.StateReady)) && s.urlTest != nil {
-		s.urlTest.signalReady()
+	if s.state.CompareAndSwap(uint32(reuse.StateWaiting), uint32(reuse.StateReady)) {
+		if s.urlTest != nil {
+			s.urlTest.signalReady()
+		} else {
+			s.client.pool.NotifyReady()
+		}
 	}
 }
 
