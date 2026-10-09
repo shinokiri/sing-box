@@ -1,7 +1,7 @@
 # Local sing-tun patches
 
-Upstream source: v0.9.7-0.20261002083955-3f8acd9da65b, as required by
-sing-box v1.15.0-alpha.10 (c992297988288565a24a6d36e2cf4d77cb835fcd).
+Upstream source: v0.9.7-0.20261009022811-5c2edb183cc9, as required by
+sing-box v1.15.0-alpha.11 (6afeff4c0f7123b5782f888812e96b8c82c7b699).
 
 The fork retains bounded asynchronous first-flow routing, fixed DNS failure
 retry deadlines, writeback outside the flow-table lock, selector cancellation,
@@ -57,3 +57,14 @@ validation, MSS bounds, and handling of data received after FIN. These changes
 also apply to the fork's asynchronous dispatcher; the new address-family guard
 remains ahead of flow creation. The SACK fixture and window-edge ACK regression
 remain unchanged by this update.
+
+The alpha.11 update adopts upstream's shared port NAT registry, selector
+reservation and expansion, configured UDP mapping/filtering, and fragmented
+reply forwarding. Each port has a return path for its owning inbound; shared
+ports retain reservations until the final owning flow is removed. Socket-style
+proxy ports retain captured UDP associations, bounded FakeIP alias history and
+route cancellation. The legacy timeout-only constructor remains available;
+stack callers use NewForwardDispatcherWithOptions to retain NAT options across
+worker stages. Regression checks cover shared-inbound reply ownership, external
+socket reservations, range expansion, filtering on secondary workers, and route
+retirement between fragments.

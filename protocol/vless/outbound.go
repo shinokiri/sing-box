@@ -184,11 +184,15 @@ func (h *Outbound) PortMTU() uint32 {
 	return h.flowPort.PortMTU()
 }
 
-func (h *Outbound) PortSelectorRange() (uint16, uint16) {
+func (h *Outbound) PortSelectorRanges(protocol uint8) []tun.SelectorRange {
 	if h.flowPort == nil {
-		return 0, 0
+		return nil
 	}
-	return h.flowPort.PortSelectorRange()
+	return h.flowPort.PortSelectorRanges(protocol)
+}
+
+func (h *Outbound) ExpandSelectorRanges(protocol uint8) bool {
+	return h.flowPort != nil && h.flowPort.ExpandSelectorRanges(protocol)
 }
 
 func (h *Outbound) AttachReturn(returnPath tun.Return) error {

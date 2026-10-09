@@ -22,7 +22,7 @@ func (d *ForwardDispatcher) NewStage(writeback ForwardWriteback) *ForwardStage {
 	}
 	worker := root
 	if len(root.stages) > 0 {
-		worker = NewForwardDispatcher(root.handler, writeback, root.logger, root.udpTimeout, root.icmpTimeout)
+		worker = NewForwardDispatcherWithOptions(root.handler, writeback, root.logger, UDPNatOptions{Timeout: root.udpTimeout, Mapping: root.udpMapping, Filtering: root.udpFiltering}, root.icmpTimeout)
 		worker.root = root
 		worker.epoch = root.epoch
 		worker.returnPath = root.returnPath
