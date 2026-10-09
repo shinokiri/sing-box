@@ -9,6 +9,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/preconnect"
 	"github.com/sagernet/sing-box/common/udpflow"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -36,6 +37,7 @@ type Outbound struct {
 	serverAddr M.Socksaddr
 	flowPort   *udpflow.Port
 	reuse      bool
+	preconnect *preconnect.Dialer
 }
 
 var (
@@ -55,11 +57,20 @@ type snellClient interface {
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SnellOutboundOptions) (adapter.Outbound, error) {
+	if options.Preconnect && (!options.Reuse || options.TCPFastOpen || options.Detour != "") {
+		return nil, E.New("snell: preconnect requires reuse, tcp_fast_open disabled and no detour")
+	}
 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
 	if err != nil {
 		return nil, err
 	}
 	serverAddr := options.ServerOptions.Build()
+	clientDialer := outboundDialer
+	var spareDialer *preconnect.Dialer
+	if options.Preconnect {
+		spareDialer = preconnect.New(ctx, outboundDialer, serverAddr)
+		clientDialer = spareDialer
+	}
 	var client snellClient
 	switch options.Version {
 	case 4:
@@ -74,7 +85,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			Reuse:    options.Reuse,
 			ObfsMode: obfsMode,
 			ObfsHost: options.ObfsOptions.ObfsHost,
-			Dialer:   outboundDialer,
+			Dialer:   clientDialer,
 			Server:   serverAddr,
 		})
 	case 6:
@@ -88,7 +99,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			UserKey: []byte(options.UserKey),
 			Mode:    mode,
 			Reuse:   options.Reuse,
-			Dialer:  outboundDialer,
+			Dialer:  clientDialer,
 			Server:  serverAddr,
 		})
 	case 0:
@@ -106,6 +117,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		client:     client,
 		serverAddr: serverAddr,
 		reuse:      options.Reuse,
+		preconnect: spareDialer,
 	}
 	if options.UDPFlow {
 		outbound.flowPort, err = udpflow.New(udpflow.Options{
@@ -239,6 +251,9 @@ func (h *Outbound) WritePackets(packets [][]byte) error {
 }
 
 func (h *Outbound) InterfaceUpdated(ctx context.Context) {
+	if h.preconnect != nil {
+		h.preconnect.Reset()
+	}
 	if h.flowPort != nil {
 		h.flowPort.Reset()
 	}
@@ -250,10 +265,16 @@ func (h *Outbound) MultiplexEnabled() bool {
 }
 
 func (h *Outbound) SetKeepIdleConnections(keep bool) {
+	if h.preconnect != nil {
+		h.preconnect.SetEnabled(keep)
+	}
 	h.client.SetKeepIdleConnections(keep)
 }
 
 func (h *Outbound) CloseIdleConnections() {
+	if h.preconnect != nil {
+		h.preconnect.Reset()
+	}
 	h.client.CloseIdleConnections()
 }
 
@@ -262,6 +283,9 @@ func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 		return nil
 	}
 	scope.Add(h.client.Close)
+	if h.preconnect != nil {
+		scope.Add(h.preconnect.Close)
+	}
 	if h.flowPort != nil {
 		scope.Add(h.flowPort.Close)
 	}
