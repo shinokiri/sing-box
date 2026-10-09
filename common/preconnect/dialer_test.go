@@ -296,3 +296,34 @@ func TestReadClaimRacesWithClose(t *testing.T) {
 		wg.Wait()
 	}
 }
+
+func TestSpareHandoffOnTCP(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() { conn, _ := listener.Accept(); accepted <- conn }()
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	peer := <-accepted
+	if peer == nil {
+		t.Fatal("accept failed")
+	}
+	defer peer.Close()
+	idle := newIdleConn(conn, time.Second)
+	used := idle.take()
+	if used != conn {
+		t.Fatal("live TCP spare was discarded")
+	}
+	// A handoff must clear the temporary read deadline before protocol IO.
+	go func() { peer.Write([]byte("ok")) }()
+	var data [2]byte
+	if _, err := io.ReadFull(used, data[:]); err != nil || string(data[:]) != "ok" {
+		t.Fatalf("TCP handoff: %q %v", data, err)
+	}
+}

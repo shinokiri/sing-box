@@ -68,7 +68,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	clientDialer := outboundDialer
 	var spareDialer *preconnect.Dialer
 	if options.Preconnect {
-		spareDialer = preconnect.New(ctx, outboundDialer, serverAddr)
+		spareContext, metadata := adapter.ExtendContext(ctx)
+		metadata.Outbound = tag
+		metadata.Network = N.NetworkTCP
+		metadata.Destination = serverAddr
+		spareDialer = preconnect.New(spareContext, outboundDialer, serverAddr)
 		clientDialer = spareDialer
 	}
 	var client snellClient
