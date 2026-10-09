@@ -27,7 +27,7 @@ require (
 	github.com/sagernet/sing-quic v0.7.1-0.20260927144857-8601a428f4db
 	github.com/sagernet/sing-shadowsocks v0.2.8
 	github.com/sagernet/sing-shadowsocks2 v0.2.1
-	github.com/sagernet/sing-tun v0.9.7-0.20261002083955-3f8acd9da65b
+	github.com/sagernet/sing-tun v0.9.7-0.20261009022811-5c2edb183cc9
 	github.com/sagernet/tailscale v1.102.1-sing-box-1.14-mod.5.0.20260925112514-35e61219dedd
 	github.com/spyzhov/ajson v0.9.4
 	github.com/stretchr/testify v1.12.0

@@ -21,9 +21,12 @@ type udpHistoryPort struct {
 func (*udpHistoryPort) PortAddresses() (netip.Addr, netip.Addr) {
 	return netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("fd01::1")
 }
-func (*udpHistoryPort) PortMTU() uint32                           { return 0 }
-func (*udpHistoryPort) EndpointIndependentUDP() bool              { return true }
-func (*udpHistoryPort) PortSelectorRange() (uint16, uint16)       { return 1, 65535 }
+func (*udpHistoryPort) PortMTU() uint32              { return 0 }
+func (*udpHistoryPort) EndpointIndependentUDP() bool { return true }
+func (*udpHistoryPort) PortSelectorRanges(uint8) []SelectorRange {
+	return []SelectorRange{{Start: 1, Count: 65535}}
+}
+func (*udpHistoryPort) ExpandSelectorRanges(uint8) bool           { return false }
 func (*udpHistoryPort) WriteUDPFlowPackets([]UDPFlowPacket) error { return nil }
 func (*udpHistoryPort) DetachReturn(Return) error                 { return nil }
 func (*udpHistoryPort) WritePackets([][]byte) error               { return nil }

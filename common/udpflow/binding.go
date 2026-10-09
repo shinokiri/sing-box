@@ -72,11 +72,13 @@ func (b *portBinding) PortMTU() uint32 {
 
 func (b *portBinding) EndpointIndependentUDP() bool { return true }
 
-func (b *portBinding) PortSelectorRange() (uint16, uint16) {
+func (b *portBinding) PortSelectorRanges(protocol uint8) []tun.SelectorRange {
 	// Preserve the application's source port when reply ownership and Fake-IP
 	// aliases are unambiguous. sing-tun separates conflicting mappings.
-	return 1, math.MaxUint16
+	return []tun.SelectorRange{{Start: 1, Count: math.MaxUint16}}
 }
+
+func (b *portBinding) ExpandSelectorRanges(protocol uint8) bool { return false }
 
 func (b *portBinding) AttachReturn(returnPath tun.Return) error {
 	p := b.port

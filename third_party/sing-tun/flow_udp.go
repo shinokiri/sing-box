@@ -8,13 +8,14 @@ import (
 )
 
 type udpMapping struct {
-	nat      *portNAT
-	source   netip.AddrPort
-	ctx      context.Context
-	cancel   context.CancelFunc
-	client   netip.AddrPort
-	peers    map[netip.Addr]*udpPeer
-	flowHead *forwardFlow
+	nat        *portNAT
+	returnPath *forwardReturn
+	source     netip.AddrPort
+	ctx        context.Context
+	cancel     context.CancelFunc
+	client     netip.AddrPort
+	peers      map[netip.Addr]*udpPeer
+	flowHead   *forwardFlow
 }
 
 type udpPeer struct {
@@ -58,25 +59,21 @@ func (m *udpMapping) IsActive() bool {
 	return m.activeFlow() != nil
 }
 
-func (r *forwardReturn) UDPMapping(source netip.AddrPort) UDPMapping {
-	if r.closed.Load() {
+func (r *portReturn) UDPMapping(source netip.AddrPort) UDPMapping {
+	if r.dispatcher.returnPath.closed.Load() {
 		return nil
 	}
-	if rev := r.dispatcher.revNAT.Load(); rev != nil {
-		if nat := (*rev)[source.Addr()]; nat != nil {
-			nat.udpAccess.RLock()
-			mapping := nat.udpMappings[source]
-			nat.udpAccess.RUnlock()
-			if mapping != nil {
-				return mapping
-			}
-		}
+	r.nat.udpAccess.RLock()
+	mapping := r.nat.udpMappings[source]
+	r.nat.udpAccess.RUnlock()
+	if mapping == nil || mapping.returnPath.dispatcher != r.dispatcher {
+		return nil
 	}
-	return nil
+	return mapping
 }
 
 func (m *udpMapping) ReturnPacket(raw []byte) bool {
-	d := m.nat.returnPath.dispatcher
+	d := m.returnPath.dispatcher
 	headroom := d.writeback.ReturnHeadroom()
 	if m.ctx.Err() != nil || d.returnPath.closed.Load() || len(raw) < headroom {
 		return false
@@ -108,12 +105,15 @@ func (m *udpMapping) ReturnPacket(raw []byte) bool {
 
 // Look up this application's existing associations before considering a new
 // selector. Prefer an already known peer/alias over another compatible socket.
-func (n *portNAT) findUDPMapping(client netip.AddrPort, server, destination netip.Addr, serverPort uint16) (netip.AddrPort, bool) {
+func (n *portNAT) findUDPMapping(dispatcher *ForwardDispatcher, client netip.AddrPort, server, destination netip.Addr, serverPort uint16) (netip.AddrPort, bool) {
 	n.udpAccess.RLock()
 	defer n.udpAccess.RUnlock()
 	var compatible netip.AddrPort
 	for source, mapping := range n.udpClients[client] {
-		key := n.reverseKeyFor(uint8(header.UDPProtocolNumber), source.Addr(), server, serverPort, source.Port())
+		if mapping.returnPath.dispatcher != dispatcher {
+			continue
+		}
+		key := n.reverseKeyFor(uint8(header.UDPProtocolNumber), source.Addr(), netip.AddrPortFrom(server, serverPort), source.Port())
 		if n.lookup(key) != nil {
 			continue
 		}
@@ -132,7 +132,7 @@ func (n *portNAT) findUDPMapping(client netip.AddrPort, server, destination neti
 // socket-style port receives a reply from an endpoint the client has not sent
 // to. Each internal address/selector belongs to one original application
 // endpoint; aliases of the same real IP must also agree on the reverse address.
-func (n *portNAT) canShareUDPMapping(key flowKey, client netip.AddrPort, destination netip.Addr) bool {
+func (n *portNAT) canShareUDPMapping(dispatcher *ForwardDispatcher, key flowKey, client netip.AddrPort, destination netip.Addr) bool {
 	if n.udpMappings == nil || key.protocol != uint8(header.UDPProtocolNumber) {
 		return true
 	}
@@ -143,7 +143,7 @@ func (n *portNAT) canShareUDPMapping(key flowKey, client netip.AddrPort, destina
 		return true
 	}
 	peer := mapping.peers[key.source.Addr()]
-	return mapping.client == client && ((peer == nil && len(mapping.peers) < flowTableCapacity) || (peer != nil && peer.destination == destination))
+	return mapping.returnPath.dispatcher == dispatcher && mapping.client == client && ((peer == nil && len(mapping.peers) < flowTableCapacity) || (peer != nil && peer.destination == destination))
 }
 
 func (n *portNAT) insertUDPMapping(key flowKey, f *forwardFlow) {
@@ -155,7 +155,7 @@ func (n *portNAT) insertUDPMapping(key flowKey, f *forwardFlow) {
 	mapping := n.udpMappings[key.destination]
 	if mapping == nil {
 		ctx, cancel := context.WithCancel(context.Background())
-		mapping = &udpMapping{nat: n, source: key.destination, ctx: ctx, cancel: cancel, client: netip.AddrPortFrom(f.clientAddress, f.clientSelector), peers: make(map[netip.Addr]*udpPeer)}
+		mapping = &udpMapping{nat: n, returnPath: f.owner.returnPath, source: key.destination, ctx: ctx, cancel: cancel, client: netip.AddrPortFrom(f.clientAddress, f.clientSelector), peers: make(map[netip.Addr]*udpPeer)}
 		n.udpMappings[key.destination] = mapping
 		if n.udpClients[mapping.client] == nil {
 			n.udpClients[mapping.client] = make(map[netip.AddrPort]*udpMapping)
@@ -214,9 +214,9 @@ func (n *portNAT) deleteUDPMapping(key flowKey, f *forwardFlow) {
 	}
 }
 
-func (n *portNAT) returnUDPFlow(packet *forwardPacket, size int, now int64, expected *udpMapping) *forwardFlow {
+func (n *portNAT) matchUDPFlow(packet *forwardPacket, expected *udpMapping) (*forwardFlow, *rewriteRule) {
 	if n.udpMappings == nil || packet.protocol != uint8(header.UDPProtocolNumber) {
-		return nil
+		return nil, nil
 	}
 	n.udpAccess.RLock()
 	var owner *forwardFlow
@@ -229,7 +229,7 @@ func (n *portNAT) returnUDPFlow(packet *forwardPacket, size int, now int64, expe
 	}
 	n.udpAccess.RUnlock()
 	if owner == nil {
-		return nil
+		return nil, nil
 	}
 	// Keep the responder's actual port. Only a known real IP has a Fake-IP
 	// alias; a new peer keeps its own source address.
@@ -241,10 +241,18 @@ func (n *portNAT) returnUDPFlow(packet *forwardPacket, size int, now int64, expe
 	if owner.serverAddress == packet.source.Addr() && owner.dnatAddress {
 		rule.sourceAddress = addrToTCPIP(owner.clientDestinationAddress)
 	}
+	return owner, &rule
+}
+
+func (n *portNAT) returnUDPFlow(packet *forwardPacket, size int, now int64, expected *udpMapping) *forwardFlow {
+	owner, rule := n.matchUDPFlow(packet, expected)
+	if owner == nil {
+		return nil
+	}
 	if owner.tracker != nil {
 		owner.tracker.CountReverse(size)
 	}
 	owner.observeReverse(packet, now)
-	applyRewrite(packet, &rule)
+	applyRewrite(packet, rule)
 	return owner
 }
