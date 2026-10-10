@@ -235,17 +235,19 @@ type reuseConn struct {
 	session     *reuseSession
 	destination M.Socksaddr
 
-	access          sync.Mutex
-	writer          reuse.RecordWriter
-	closeWriteOnce  sync.Once
-	closeWriteErr   error
-	closeOnce       sync.Once
-	closeErr        error
-	replyRead       atomic.Bool
-	readWaitOptions N.ReadWaitOptions
-	closed          atomic.Bool
-	readActionCount atomic.Int32
-	readClosed      atomic.Bool
+	access           sync.Mutex
+	deadlineAccess   sync.Mutex
+	writer           reuse.RecordWriter
+	closeWriteOnce   sync.Once
+	closeWriteErr    error
+	closeOnce        sync.Once
+	closeErr         error
+	replyRead        atomic.Bool
+	readWaitOptions  N.ReadWaitOptions
+	closed           atomic.Bool
+	readActionCount  atomic.Int32
+	writeActionCount atomic.Int32
+	readClosed       atomic.Bool
 }
 
 func (c *reuseConn) readResponse() error {
@@ -420,6 +422,10 @@ func (c *reuseConn) writeRequestBuffer(buffer *buf.Buffer) error {
 }
 
 func (c *reuseConn) Write(p []byte) (int, error) {
+	if !c.beginWrite() {
+		return 0, net.ErrClosed
+	}
+	defer c.writeActionCount.Add(-1)
 	if c.writer != nil {
 		return c.writer.Write(p)
 	}
@@ -437,6 +443,11 @@ func (c *reuseConn) Write(p []byte) (int, error) {
 }
 
 func (c *reuseConn) WriteBuffer(buffer *buf.Buffer) error {
+	if !c.beginWrite() {
+		buffer.Release()
+		return net.ErrClosed
+	}
+	defer c.writeActionCount.Add(-1)
 	if c.writer != nil {
 		return c.writer.WriteBuffer(buffer)
 	}
@@ -464,6 +475,11 @@ type reuseVectorisedWriter struct {
 
 func (w *reuseVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error {
 	conn := w.conn
+	if !conn.beginWrite() {
+		buf.ReleaseMulti(buffers)
+		return net.ErrClosed
+	}
+	defer conn.writeActionCount.Add(-1)
 	if conn.writer != nil {
 		return conn.writer.CreateVectorisedWriterFor(w.upstream).WriteVectorised(buffers)
 	}
@@ -495,6 +511,29 @@ func (w *reuseVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error {
 }
 
 func (c *reuseConn) CloseWrite() error {
+	if !c.beginWrite() {
+		return net.ErrClosed
+	}
+	defer c.writeActionCount.Add(-1)
+	return c.closeWrite()
+}
+
+// An old logical connection must not write into a session already handed to
+// another request. Close retires a session with an in-flight write instead of
+// waiting for that write, which may itself need Close to unblock it.
+func (c *reuseConn) beginWrite() bool {
+	if c.closed.Load() {
+		return false
+	}
+	c.writeActionCount.Add(1)
+	if c.closed.Load() {
+		c.writeActionCount.Add(-1)
+		return false
+	}
+	return true
+}
+
+func (c *reuseConn) closeWrite() error {
 	c.closeWriteOnce.Do(func() {
 		c.access.Lock()
 		defer c.access.Unlock()
@@ -511,8 +550,10 @@ func (c *reuseConn) CloseWrite() error {
 
 func (c *reuseConn) Close() error {
 	c.closeOnce.Do(func() {
+		c.deadlineAccess.Lock()
 		c.closed.Store(true)
-		if !c.replyRead.Load() {
+		c.deadlineAccess.Unlock()
+		if c.writeActionCount.Load() > 0 || !c.replyRead.Load() {
 			c.session.Release(false)
 			return
 		}
@@ -535,7 +576,7 @@ func (c *reuseConn) Close() error {
 				return
 			}
 		}
-		c.closeErr = c.CloseWrite()
+		c.closeErr = c.closeWrite()
 		if c.closeErr != nil {
 			c.session.Release(false)
 			return
@@ -575,6 +616,36 @@ func (c *reuseConn) Close() error {
 		c.session.startDrain()
 	})
 	return c.closeErr
+}
+
+// TLS/HTTP cleanup can outlive its logical request. Serializing deadline
+// changes with Close prevents a late close_notify deadline from expiring the
+// next request's physical connection.
+func (c *reuseConn) SetDeadline(deadline time.Time) error {
+	c.deadlineAccess.Lock()
+	defer c.deadlineAccess.Unlock()
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	return c.Conn.SetDeadline(deadline)
+}
+
+func (c *reuseConn) SetReadDeadline(deadline time.Time) error {
+	c.deadlineAccess.Lock()
+	defer c.deadlineAccess.Unlock()
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	return c.Conn.SetReadDeadline(deadline)
+}
+
+func (c *reuseConn) SetWriteDeadline(deadline time.Time) error {
+	c.deadlineAccess.Lock()
+	defer c.deadlineAccess.Unlock()
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	return c.Conn.SetWriteDeadline(deadline)
 }
 
 func (c *reuseConn) CreateReadWaiter() (N.ReadWaiter, bool) {
