@@ -380,7 +380,8 @@ func (c *helloConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (c *helloConn) Upstream() any           { return c.Conn }
-func (c *helloConn) ReaderReplaceable() bool { return c.sent.Load() && c.observed.Load() }
-func (c *helloConn) WriterReplaceable() bool { return c.sent.Load() }
-func (c *helloConn) NeedHandshake() bool     { return !c.sent.Load() }
+func (c *helloConn) Upstream() any            { return c.Conn }
+func (c *helloConn) ReaderReplaceable() bool  { return c.sent.Load() && c.observed.Load() }
+func (c *helloConn) WriterReplaceable() bool  { return c.sent.Load() }
+func (c *helloConn) NeedHandshake() bool      { return !c.sent.Load() }
+func (c *helloConn) PreferEarlyPayload() bool { return !c.sent.Load() }

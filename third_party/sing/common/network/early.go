@@ -33,6 +33,13 @@ type EarlyWriter interface {
 	NeedHandshakeForWrite() bool
 }
 
+// EarlyPayloadWriter identifies a transport whose first physical write can
+// deliver application data during its handshake. A caller may read the first
+// payload before an empty handshake write when the application is client-first.
+type EarlyPayloadWriter interface {
+	PreferEarlyPayload() bool
+}
+
 func NeedHandshakeForWrite(writer io.Writer) bool {
 	return NeedHandshakeForWriteAny(writer)
 }

@@ -63,6 +63,14 @@ and route observations take precedence. The tested IPv4 path used 1200; do
 not copy that to a different path blindly. A network change clears learned
 observations. No calibration connection is opened.
 
+On a new hello connection, the route layer includes the first application
+bytes with the proxy request for recognized HTTP/TLS and web ports 80/443.
+It reads one available batch without waiting to fill a record. If no data
+arrives within the existing 300ms first-payload timeout, it sends the proxy
+header alone. Unknown protocols, including SSH on custom ports, keep their
+immediate header; cached payload and already-used physical connections keep
+their existing behavior. Large application handshakes can still exceed a SYN.
+
 Backend timestamp workaround:
 The optional nftables example removes only the timestamp offer from initial
 relay -> candidate decoder SYNs. It does not strip timestamps from established
@@ -89,10 +97,14 @@ data clearing is part of retirement. A candidate may have a higher Android
 versionCode; configuration rollback needs no APK downgrade or uninstall.
 
 Evidence boundaries:
-The standalone Android harness uses the actual SFA dialer and connection
-manager. Tested 512-byte first batches fit in both native SYNs as a complete
-711-byte carrier. Bigger first batches may need later segments. Missing TFO
-cookies still require cookie acquisition. SYN acceptance, decoding, application
+The standalone Android harness uses the actual SFA dialer and network-manager
+callbacks, but a direct client.Write test bypasses inbound route setup. The
+separate ConnectionManager regression checks that uncached HTTPS payload
+reaches the first carrier, including when Snell reuse is enabled. Installed
+traffic must also be checked: a SYN carrying only a proxy header proves TFO
+activation, not early delivery of the application's ClientHello. Bigger first
+batches may need later segments. Missing TFO cookies still require cookie
+acquisition. SYN acceptance, decoding, application
 acceptance and response are different milestones; processing can finish after
 the final handshake ACK. Not every response completes before that ACK.
 Installed VPN startup, actual Android OS network notifications and sustained

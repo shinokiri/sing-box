@@ -163,11 +163,12 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		remoteConn = spoofConn
 	}
 	serverFirst := sniff.Skip(&metadata)
+	clientFirst := !serverFirst && handshakeClientFirst(&metadata)
 	var done atomic.Bool
-	if m.kickWriteHandshake(ctx, conn, remoteConn, serverFirst, false, &done, onClose) {
+	if m.kickWriteHandshake(ctx, conn, remoteConn, serverFirst, clientFirst, false, &done, onClose) {
 		return
 	}
-	if m.kickWriteHandshake(ctx, remoteConn, conn, serverFirst, true, &done, onClose) {
+	if m.kickWriteHandshake(ctx, remoteConn, conn, serverFirst, false, true, &done, onClose) {
 		return
 	}
 	go m.connectionCopy(ctx, conn, remoteConn, false, &done, onClose)
@@ -332,7 +333,35 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	}
 }
 
-func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.Conn, destination net.Conn, serverFirst bool, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) bool {
+// Only protocols known to speak first get an opportunity to provide early
+// application bytes. Unknown protocols (including SSH on custom ports) keep
+// their immediate empty handshake. A web-port hint is bounded by the usual
+// first-payload timeout in case that port hosts a server-first protocol.
+func handshakeClientFirst(metadata *adapter.InboundContext) bool {
+	if metadata.Protocol == C.ProtocolTLS || metadata.Protocol == C.ProtocolHTTP {
+		return true
+	}
+	return metadata.Destination.Port == 80 || metadata.Destination.Port == 443
+}
+
+func readHandshakePayload(source net.Conn, reader io.Reader) (*buf.Buffer, error) {
+	if err := source.SetReadDeadline(time.Now().Add(C.ReadPayloadTimeout)); err != nil {
+		return nil, nil
+	}
+	buffer := buf.New()
+	n, err := buffer.ReadOnceFrom(reader)
+	_ = source.SetReadDeadline(time.Time{})
+	if n > 0 {
+		return buffer, nil
+	}
+	buffer.Release()
+	if E.IsTimeout(err) {
+		return nil, nil
+	}
+	return nil, err
+}
+
+func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.Conn, destination net.Conn, serverFirst bool, clientFirst bool, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) bool {
 	if !N.NeedHandshakeForWrite(destination) {
 		return false
 	}
@@ -351,7 +380,12 @@ func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.C
 		if cachedReader, ok := sourceReader.(N.CachedReader); ok {
 			cachedBuffer = cachedReader.ReadCached()
 		}
-		if cachedBuffer != nil {
+		if cachedBuffer == nil && clientFirst && !direction {
+			if earlyWriter, ok := common.Cast[N.EarlyPayloadWriter](destinationWriter); ok && earlyWriter.PreferEarlyPayload() {
+				cachedBuffer, err = readHandshakePayload(source, sourceReader)
+			}
+		}
+		if err == nil && cachedBuffer != nil {
 			wrotePayload = true
 			dataLen := cachedBuffer.Len()
 			_, err = destinationWriter.Write(cachedBuffer.Bytes())
@@ -364,7 +398,7 @@ func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.C
 					counter(int64(dataLen))
 				}
 			}
-		} else {
+		} else if err == nil {
 			_ = destination.SetWriteDeadline(time.Now().Add(C.ReadPayloadTimeout))
 			_, err = destinationWriter.Write(nil)
 			_ = destination.SetWriteDeadline(time.Time{})

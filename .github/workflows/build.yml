@@ -109,8 +109,9 @@ jobs:
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build github.com/sagernet/sing-tun
       - name: Test experimental Snell hello framing and shutdown
         run: |
-          test -z "$(gofmt -l third_party/sing-snell/hellorelay/*.go third_party/sing-snell/snellv6/hello*.go cmd/snell-hello/*.go common/dialer/snell_hello_linux_test.go protocol/snell/hello_lifecycle_test.go)"
+          test -z "$(gofmt -l third_party/sing-snell/hellorelay/*.go third_party/sing-snell/snellv6/hello*.go cmd/snell-hello/*.go common/dialer/snell_hello_linux_test.go protocol/snell/hello_lifecycle_test.go route/conn.go route/conn_early_payload_test.go third_party/sing/common/network/early.go)"
           go test -race -count=3 -timeout=60s -run '^TestSnellHello' ./common/dialer ./protocol/snell
+          go test -race -count=3 -timeout=60s -run '^TestHelloRouteEarlyPayload$' ./route
           go test -race -count=3 -timeout=30s ./cmd/snell-hello
       - name: Build standalone Snell hello receiver candidates
         run: |
