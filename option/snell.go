@@ -77,11 +77,13 @@ type _SnellOutboundOptions struct {
 type AbstractSnellOutboundOptions struct {
 	DialerOptions
 	ServerOptions
-	PSK     string      `json:"psk"`
-	UserKey string      `json:"userkey,omitempty"`
-	Reuse   bool        `json:"reuse,omitempty"`
-	UDPFlow bool        `json:"udp_flow,omitempty"`
-	Network NetworkList `json:"network,omitempty"`
+	PSK                      string      `json:"psk"`
+	UserKey                  string      `json:"userkey,omitempty"`
+	Reuse                    bool        `json:"reuse,omitempty"`
+	HelloFraming             bool        `json:"hello_framing,omitempty"`
+	HelloInitialSYNDataLimit int         `json:"hello_initial_syn_data_limit,omitempty"`
+	UDPFlow                  bool        `json:"udp_flow,omitempty"`
+	Network                  NetworkList `json:"network,omitempty"`
 }
 
 type SnellOutboundOptions _SnellOutboundOptions

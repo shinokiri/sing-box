@@ -107,6 +107,29 @@ jobs:
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build github.com/sagernet/sing-snell/...
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build github.com/sagernet/sing-tun
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build github.com/sagernet/sing-tun
+      - name: Test experimental Snell hello framing and shutdown
+        run: |
+          test -z "$(gofmt -l third_party/sing-snell/hellorelay/*.go third_party/sing-snell/snellv6/hello*.go cmd/snell-hello/*.go common/dialer/snell_hello_linux_test.go protocol/snell/hello_lifecycle_test.go)"
+          go test -race -count=3 -timeout=60s -run '^TestSnellHello' ./common/dialer ./protocol/snell
+          go test -race -count=3 -timeout=30s ./cmd/snell-hello
+      - name: Build standalone Snell hello receiver candidates
+        run: |
+          mkdir -p dist/hello-receiver
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags '-s -w' -o dist/hello-receiver/snell-hello-linux-amd64 ./cmd/snell-hello
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags '-s -w' -o dist/hello-receiver/snell-hello-linux-arm64 ./cmd/snell-hello
+          cp contrib/snell-hello/* dist/hello-receiver/
+          python3 - <<'PYMETA'
+          import hashlib,json,pathlib,subprocess
+          root=pathlib.Path('dist/hello-receiver')
+          metadata={'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'kind':'experimental candidate; not deployed','protocol':'private Snell hello carrier; not TLS','go_version':subprocess.check_output(['go','version'],text=True).strip()}
+          (root/'source-metadata.json').write_text(json.dumps(metadata,indent=2)+'\n')
+          (root/'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in sorted(root.iterdir()) if p.is_file() and p.name!='SHA256SUMS'))
+          PYMETA
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snell-hello-receiver-candidate
+          path: dist/hello-receiver/
+          if-no-files-found: error
       - name: Test URLTest progress and task lifecycle
         run: go test -race -count=3 -timeout=180s ./common/urltest ./protocol/group ./daemon
       - name: Test Android platform TCP Fast Open

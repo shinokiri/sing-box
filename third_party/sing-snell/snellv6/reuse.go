@@ -472,6 +472,10 @@ func (w *reuseVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error {
 	if conn.writer != nil {
 		return conn.writer.CreateVectorisedWriterFor(w.upstream).WriteVectorised(buffers)
 	}
+	if conn.session.writer == nil {
+		request := snell.Request{Command: snell.CommandConnectV2, ClientID: conn.session.client.userKey, Destination: conn.destination}
+		buffers = gatherHelloFirstVector(conn.session.Conn, conn, buffers, request.Len())
+	}
 	for index, buffer := range buffers {
 		if buffer.IsEmpty() {
 			buffer.Release()

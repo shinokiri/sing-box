@@ -150,6 +150,12 @@ func (c *slowOpenConn) RemoteAddr() net.Addr {
 	return conn.RemoteAddr()
 }
 
+// DialDestination exposes the resolved target while a TFO socket is deferred.
+// It is a routing hint, and does not initiate the connection.
+func (c *slowOpenConn) DialDestination() net.Addr {
+	return c.destination
+}
+
 func (c *slowOpenConn) SetDeadline(t time.Time) error {
 	conn := c.conn.Load()
 	if conn == nil {

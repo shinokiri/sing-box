@@ -36,6 +36,7 @@ type Outbound struct {
 	serverAddr M.Socksaddr
 	flowPort   *udpflow.Port
 	reuse      bool
+	hello      *snellv6.HelloTransport
 }
 
 var (
@@ -55,12 +56,19 @@ type snellClient interface {
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SnellOutboundOptions) (adapter.Outbound, error) {
+	if options.HelloInitialSYNDataLimit != 0 && !options.HelloFraming {
+		return nil, E.New("snell: hello_initial_syn_data_limit requires hello_framing")
+	}
+	if options.HelloFraming && options.Version != 6 {
+		return nil, E.New("snell: hello_framing requires version 6")
+	}
 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
 	if err != nil {
 		return nil, err
 	}
 	serverAddr := options.ServerOptions.Build()
 	var client snellClient
+	var hello *snellv6.HelloTransport
 	switch options.Version {
 	case 4:
 		var obfsMode snellprotocol.ObfsMode
@@ -82,6 +90,16 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		mode, err = snellv6.ParseMode(options.V6Options.Mode)
 		if err != nil {
 			return nil, err
+		}
+		if options.HelloFraming {
+			if mode != snellv6.ModeDefault {
+				return nil, E.New("snell: hello_framing requires default mode")
+			}
+			hello, err = snellv6.NewHelloTransportWithOptions([]byte(options.PSK), snellv6.HelloTransportOptions{InitialSYNDataLimit: options.HelloInitialSYNDataLimit})
+			if err != nil {
+				return nil, err
+			}
+			outboundDialer = hello.WrapDialer(outboundDialer)
 		}
 		client, err = snellv6.NewClient(snellv6.ClientOptions{
 			PSK:     []byte(options.PSK),
@@ -106,6 +124,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		client:     client,
 		serverAddr: serverAddr,
 		reuse:      options.Reuse,
+		hello:      hello,
 	}
 	if options.UDPFlow {
 		outbound.flowPort, err = udpflow.New(udpflow.Options{
@@ -239,6 +258,9 @@ func (h *Outbound) WritePackets(packets [][]byte) error {
 }
 
 func (h *Outbound) InterfaceUpdated(ctx context.Context) {
+	if h.hello != nil {
+		h.hello.Reset()
+	}
 	if h.flowPort != nil {
 		h.flowPort.Reset()
 	}

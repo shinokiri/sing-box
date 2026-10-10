@@ -1,0 +1,9 @@
+# Edit the documentation IPs and candidate port before deliberate installation.
+# This affects only SYN timestamp negotiation, not established connections.
+# It does not open any port through other firewall chains.
+table inet snell_hello_backend_candidate {
+    chain input {
+        type filter hook input priority -150; policy accept;
+        ip saddr 192.0.2.10 ip daddr 198.51.100.20 tcp dport 30814 tcp flags & (syn | ack) == syn counter reset tcp option timestamp
+    }
+}
