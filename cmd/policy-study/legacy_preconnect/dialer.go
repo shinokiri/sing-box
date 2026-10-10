@@ -26,7 +26,6 @@ type Dialer struct {
 	epoch       uint64
 	spare       *idleConn
 	cancel      context.CancelFunc
-	pending     chan struct{}
 	wg          sync.WaitGroup
 	idleTimeout time.Duration
 }
@@ -50,7 +49,6 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address M.Sock
 	epoch := d.epoch
 	spare := d.spare
 	d.spare = nil
-	pending := d.pending
 	d.access.Unlock()
 	var conn net.Conn
 	if spare != nil {
@@ -70,11 +68,7 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address M.Sock
 	}
 	if conn == nil {
 		var err error
-		if pending == nil {
-			conn, err = d.Dialer.DialContext(ctx, network, address)
-		} else {
-			conn, err = d.racePending(ctx, network, address, epoch, pending)
-		}
+		conn, err = d.Dialer.DialContext(ctx, network, address)
 		if err != nil {
 			return nil, err
 		}
@@ -86,74 +80,10 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address M.Sock
 		conn.Close()
 		return nil, net.ErrClosed
 	}
-	if err := ctx.Err(); err != nil {
-		conn.Close()
-		return nil, err
-	}
 	// Reuse in the protocol's own pool remains the first choice. This dialer
 	// is reached only when that pool needs another physical TCP connection.
 	d.prepare(epoch)
 	return conn, nil
-}
-
-// racePending also uses a spare that was already being prepared when demand
-// arrived. A real-demand dial runs concurrently, so a stalled preparation can
-// never force the caller to wait for its timeout. Only the winner is handed
-// to the protocol, before any application data has been sent.
-func (d *Dialer) racePending(ctx context.Context, network string, address M.Socksaddr, epoch uint64, pending <-chan struct{}) (net.Conn, error) {
-	dialContext, cancel := context.WithCancel(ctx)
-	defer cancel()
-	type result struct {
-		conn net.Conn
-		err  error
-	}
-	completed := make(chan result)
-	go func() {
-		conn, err := d.Dialer.DialContext(dialContext, network, address)
-		select {
-		case completed <- result{conn, err}:
-		case <-dialContext.Done():
-			if conn != nil {
-				conn.Close()
-			}
-		}
-	}()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-pending:
-			d.access.Lock()
-			closed := d.closed
-			var spare *idleConn
-			if epoch == d.epoch {
-				spare = d.spare
-				d.spare = nil
-				pending = d.pending
-			} else {
-				// Reset/idle policy retires speculative work. The caller's own
-				// dial continues under its existing context and routing policy.
-				pending = nil
-			}
-			d.access.Unlock()
-			if closed {
-				return nil, net.ErrClosed
-			}
-			if spare != nil {
-				if conn := spare.take(); conn != nil {
-					d.access.Lock()
-					valid := !d.closed && epoch == d.epoch
-					d.access.Unlock()
-					if valid {
-						return conn, nil
-					}
-					conn.Close()
-				}
-			}
-		case fresh := <-completed:
-			return fresh.conn, fresh.err
-		}
-	}
 }
 
 func (d *Dialer) prepare(epoch uint64) {
@@ -164,8 +94,6 @@ func (d *Dialer) prepare(epoch uint64) {
 	}
 	ctx, cancel := context.WithTimeout(d.ctx, idleTimeout)
 	d.cancel = cancel
-	pending := make(chan struct{})
-	d.pending = pending
 	d.wg.Add(1)
 	d.access.Unlock()
 	go func() {
@@ -174,19 +102,16 @@ func (d *Dialer) prepare(epoch uint64) {
 		conn, err := d.Dialer.DialContext(ctx, N.NetworkTCP, d.server)
 		d.access.Lock()
 		defer d.access.Unlock()
-		defer func() {
-			if d.pending == pending {
-				d.pending = nil
-				d.cancel = nil
-				close(pending)
-			}
-		}()
 		if d.closed || epoch != d.epoch || !d.enabled || ctx.Err() != nil {
 			if conn != nil {
 				conn.Close()
 			}
+			if epoch == d.epoch {
+				d.cancel = nil
+			}
 			return
 		}
+		d.cancel = nil
 		if err == nil {
 			d.spare = newIdleConn(conn, d.idleTimeout)
 		}
@@ -206,10 +131,6 @@ func (d *Dialer) resetLocked() {
 	if d.cancel != nil {
 		d.cancel()
 		d.cancel = nil
-	}
-	if d.pending != nil {
-		close(d.pending)
-		d.pending = nil
 	}
 	if d.spare != nil {
 		d.spare.conn.Close()

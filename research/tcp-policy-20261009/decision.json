@@ -1,0 +1,21 @@
+{
+  "selected_candidate_commit": "2b83087debfebde6da54b0d22f036911d0984ea1",
+  "policy": "one completed short-lived spare, only after actual demand; ready Snell pool remains first choice",
+  "experimental_branch_only": [
+    "pool-ready race",
+    "pending-preparation race",
+    "two-demand adaptive gating"
+  ],
+  "observed_counterexamples": {
+    "pool-ready race": "Cancelling new dials keeps a single connection cycling through a delayed EOF and adds recurring waits.",
+    "pending-preparation race": "Stealing a completing spare from the next request and restarting preparation increases dial attempts and regresses the staggered workload.",
+    "adaptive gating": "Avoids an unused spare for purely sequential requests but misses the useful beginning of a burst."
+  },
+  "limits": [
+    "Constructed workloads do not establish their real app frequency.",
+    "No battery claim.",
+    "One spare helps one ready hit, not every member of an instantaneous burst.",
+    "First ever connection and misses still perform ordinary TCP handshakes."
+  ],
+  "implementation_in_this_branch": "Rejected experimental alternatives retained for reproducibility; not the Android candidate source."
+}

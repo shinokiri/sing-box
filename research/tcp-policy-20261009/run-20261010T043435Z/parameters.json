@@ -1,0 +1,16 @@
+{
+  "command": "sudo -n unshare -n sh -c 'ip link set lo up mtu 1500 && tc qdisc add dev lo root netem limit 10000 delay 75ms loss random 0.5% && /home/shin/snell-preconnect-20261009/policy-study -rounds 2 -policies reuse,spare -workload staggered-burst'",
+  "options": {
+    "rounds": 2,
+    "loss": "0.5",
+    "delay": "75ms",
+    "workload": "staggered-burst",
+    "policies": "reuse,spare"
+  },
+  "scope": "Synthetic verified TLS/HTTP requests through real Snell v6 records on loopback; isolated netem; no production services or qdiscs modified",
+  "limitations": [
+    "Workload mixes are constructed, not measured app demand",
+    "No mobile battery measurement",
+    "Namespace reset scenario flushes pools; it does not emulate every ongoing network-switch failure"
+  ]
+}
