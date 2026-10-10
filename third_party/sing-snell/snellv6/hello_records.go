@@ -23,6 +23,13 @@ type helloRecordState struct {
 	nonce []byte
 }
 
+type helloFirstRecord struct {
+	end        int
+	header     []byte
+	ciphertext []byte
+	state      *helloRecordState
+}
+
 func (c *helloRecordCodec) recordState(firstPrefix []byte) (*helloRecordState, error) {
 	salt := c.profile.extractSalt(firstPrefix[:c.profile.saltBlockLen])
 	aead, err := snell.NewAEAD(snell.DeriveKey(c.psk, salt[:]))
@@ -51,36 +58,31 @@ func (s *helloRecordState) open(header, prefix []byte) (paddingLen, cipherLen in
 	return
 }
 
-func (c *helloRecordCodec) packRecords(original []byte, budget int) ([]byte, int, error) {
-	firstPrefix := original[:c.prefix.PrefixSize()]
-	salt, err := c.prefix.Pack(firstPrefix)
-	if err != nil {
-		return nil, 0, err
+func (c *helloRecordCodec) packRecords(original []byte, budget int, first helloFirstRecord) ([]byte, int, error) {
+	if 2+saltLen+len(first.header)+len(first.ciphertext) > budget {
+		return nil, 0, nil
 	}
-	state, err := c.recordState(firstPrefix)
-	if err != nil {
-		return nil, 0, err
-	}
-	packed := append([]byte{2, 0}, salt...)
-	at, count := 0, 0
+	packed := make([]byte, 2, budget)
+	packed[0] = 2
+	packed = c.prefix.appendSalt(packed, original)
+	packed = append(packed, first.header...)
+	packed = append(packed, first.ciphertext...)
+	at, count := first.end, 1
+	var prefixScratch, bodyScratch, paddingScratch []byte
 	for count < helloMaxCompactRecords {
 		prefixLen := c.profile.recordPrefixLen(uint32(count))
-		saltSize := 0
-		if count == 0 {
-			saltSize = c.profile.saltBlockLen
-		}
-		headEnd := at + saltSize + prefixLen + snell.HeaderCipherLen
+		headEnd := at + prefixLen + snell.HeaderCipherLen
 		if headEnd > len(original) || len(packed)+snell.HeaderCipherLen > budget {
 			break
 		}
-		prefix := original[at+saltSize : headEnd-snell.HeaderCipherLen]
-		expectedPrefix := make([]byte, prefixLen)
-		c.profile.fillPadding(uint32(count), expectedPrefix)
-		if !bytes.Equal(prefix, expectedPrefix) {
+		prefix := original[at : headEnd-snell.HeaderCipherLen]
+		prefixScratch = helloScratch(prefixScratch, prefixLen)
+		c.profile.fillPadding(uint32(count), prefixScratch)
+		if !bytes.Equal(prefix, prefixScratch) {
 			return nil, 0, fmt.Errorf("record %d prefix is not reproducible", count)
 		}
 		header := original[headEnd-snell.HeaderCipherLen : headEnd]
-		padSize, cipherSize, err := state.open(header, prefix)
+		padSize, cipherSize, err := first.state.open(header, prefix)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -88,14 +90,15 @@ func (c *helloRecordCodec) packRecords(original []byte, budget int) ([]byte, int
 		if end > len(original) || end > helloMaxExpandedBytes || len(packed)+snell.HeaderCipherLen+cipherSize > budget {
 			break
 		}
-		body := append([]byte(nil), original[headEnd:end]...)
-		padding, ciphertext := body[:padSize], body[padSize:]
+		bodyScratch = helloScratch(bodyScratch, end-headEnd)
+		copy(bodyScratch, original[headEnd:end])
+		padding, ciphertext := bodyScratch[:padSize], bodyScratch[padSize:]
 		if cipherSize > 0 {
 			c.profile.mixPaddingPayload(uint32(count), padding, ciphertext)
 		}
-		expectedPadding := make([]byte, padSize)
-		c.profile.fillPadding(uint32(count), expectedPadding)
-		if !bytes.Equal(padding, expectedPadding) {
+		paddingScratch = helloScratch(paddingScratch, padSize)
+		c.profile.fillPadding(uint32(count), paddingScratch)
+		if !bytes.Equal(padding, paddingScratch) {
 			return nil, 0, fmt.Errorf("record %d padding is not reproducible", count)
 		}
 		packed = append(packed, header...)
@@ -109,6 +112,13 @@ func (c *helloRecordCodec) packRecords(original []byte, budget int) ([]byte, int
 	tail := min(len(original)-at, budget-len(packed), helloMaxExpandedBytes-at)
 	packed = append(packed, original[at:at+tail]...)
 	return packed, at + tail, nil
+}
+
+func helloScratch(buffer []byte, size int) []byte {
+	if cap(buffer) < size {
+		return make([]byte, size)
+	}
+	return buffer[:size]
 }
 
 func (c *helloRecordCodec) unpackRecords(packed []byte) ([]byte, error) {

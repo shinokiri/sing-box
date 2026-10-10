@@ -55,25 +55,26 @@ func (c *helloRecordCodec) Pack(original []byte, budget int) (packed []byte, con
 		return nil, 0, 0, fmt.Errorf("short original prefix")
 	}
 	// Verify all omitted prefix bytes even when we use the fallback.
-	if _, err = c.prefix.Pack(original[:c.prefix.PrefixSize()]); err != nil {
+	if err = c.prefix.validate(original); err != nil {
 		return nil, 0, 0, err
 	}
 	headLen := c.prefix.PrefixSize() + snell.HeaderCipherLen
 	if len(original) >= headLen {
-		padSize, dataSize, e := c.header(original[:headLen])
+		state, e := c.recordState(original[:c.prefix.PrefixSize()])
 		if e != nil {
 			return nil, 0, 0, e
 		}
-		cipherSize := dataSize
-		if dataSize > 0 {
-			cipherSize += snell.AEADTagLen
+		header := original[c.prefix.PrefixSize():headLen]
+		padSize, cipherSize, e := state.open(header, original[c.profile.saltBlockLen:c.prefix.PrefixSize()])
+		if e != nil {
+			return nil, 0, 0, e
 		}
 		originalSize := headLen + padSize + cipherSize
 		packedSize := 1 + saltLen + snell.HeaderCipherLen + cipherSize
 		if originalSize <= len(original) && packedSize <= budget {
 			body := append([]byte(nil), original[headLen:originalSize]...)
 			padding, ciphertext := body[:padSize], body[padSize:]
-			if dataSize > 0 {
+			if cipherSize > 0 {
 				c.profile.mixPaddingPayload(0, padding, ciphertext)
 			}
 			expected := make([]byte, padSize)
@@ -81,18 +82,12 @@ func (c *helloRecordCodec) Pack(original []byte, budget int) (packed []byte, con
 			if !bytes.Equal(padding, expected) {
 				return nil, 0, 0, fmt.Errorf("first record padding is not reproducible")
 			}
-			packedHead, e := c.prefix.Pack(original[:headLen])
-			if e != nil {
-				return nil, 0, 0, e
-			}
 			tail := min(len(original)-originalSize, budget-packedSize)
-			packed = make([]byte, 0, packedSize+tail)
-			packed = append(packed, 1)
-			packed = append(packed, packedHead...)
-			packed = append(packed, ciphertext...)
-			packed = append(packed, original[originalSize:originalSize+tail]...)
 			if originalSize < len(original) {
-				multi, take, e := c.packRecords(original, budget)
+				// Continue from the verified first record. No second KDF, header
+				// authentication or padding reversal is needed for the multi path.
+				first := helloFirstRecord{end: originalSize, header: header, ciphertext: ciphertext, state: state}
+				multi, take, e := c.packRecords(original, budget, first)
 				if e != nil {
 					return nil, 0, 0, e
 				}
@@ -100,6 +95,14 @@ func (c *helloRecordCodec) Pack(original []byte, budget int) (packed []byte, con
 					return multi, take, 2, nil
 				}
 			}
+			// Only materialize this fallback when the multi-record form did not
+			// consume more original bytes. The encoded choice is unchanged.
+			packed = make([]byte, 1, packedSize+tail)
+			packed[0] = 1
+			packed = c.prefix.appendSalt(packed, original)
+			packed = append(packed, header...)
+			packed = append(packed, ciphertext...)
+			packed = append(packed, original[originalSize:originalSize+tail]...)
 			return packed, originalSize + tail, 1, nil
 		}
 	}
@@ -109,11 +112,10 @@ func (c *helloRecordCodec) Pack(original []byte, budget int) (packed []byte, con
 	if consumed < c.prefix.PrefixSize() {
 		return nil, 0, 0, fmt.Errorf("prefix does not fit carrier budget")
 	}
-	p, e := c.prefix.Pack(original[:consumed])
-	if e != nil {
-		return nil, 0, 0, e
-	}
-	return append([]byte{0}, p...), consumed, 0, nil
+	packed = make([]byte, 1, 1+saltLen+consumed-c.prefix.PrefixSize())
+	packed = c.prefix.appendSalt(packed, original)
+	packed = append(packed, original[c.prefix.PrefixSize():consumed]...)
+	return packed, consumed, 0, nil
 }
 
 func (c *helloRecordCodec) Unpack(packed []byte) ([]byte, error) {

@@ -12,35 +12,33 @@ func helloRecord(payload []byte, compactRecord bool) ([]byte, error) {
 	if len(payload) < 1 || len(payload) > 4096 {
 		return nil, fmt.Errorf("carrier payload out of bounds")
 	}
-	ext := func(kind uint16, p []byte) []byte {
-		b := make([]byte, 4+len(p))
-		binary.BigEndian.PutUint16(b, kind)
-		binary.BigEndian.PutUint16(b[2:], uint16(len(p)))
-		copy(b[4:], p)
-		return b
+	// The envelope is fixed except for lengths, random and the carrier kind.
+	// Fill one final allocation instead of building extensions and copying them
+	// through a body buffer before constructing the same wire representation.
+	out := make([]byte, 85+len(payload))
+	copy(out, []byte{22, 3, 1})
+	binary.BigEndian.PutUint16(out[3:5], uint16(len(out)-5))
+	out[5] = 1
+	binary.BigEndian.PutUint16(out[7:9], uint16(len(out)-9))
+	copy(out[9:11], []byte{3, 3})
+	if _, err := rand.Read(out[11:43]); err != nil {
+		return nil, err
 	}
-	var extensions []byte
+	copy(out[43:50], []byte{0, 0, 2, 0x13, 1, 1, 0})
+	binary.BigEndian.PutUint16(out[50:52], uint16(len(out)-52))
+	copy(out[52:81], []byte{
+		0, 43, 0, 3, 2, 3, 4,
+		0, 10, 0, 4, 0, 2, 0, 29,
+		0, 13, 0, 4, 0, 2, 8, 7,
+		0, 51, 0, 2, 0, 0,
+	})
 	var carrierType uint16 = 0xffaa
 	if compactRecord {
 		carrierType = 0xffab
 	}
-	for _, e := range [][]byte{ext(43, []byte{2, 3, 4}), ext(10, []byte{0, 2, 0, 29}), ext(13, []byte{0, 2, 8, 7}), ext(51, []byte{0, 0}), ext(carrierType, payload)} {
-		extensions = append(extensions, e...)
-	}
-	body := make([]byte, 43)
-	body[0] = 3
-	body[1] = 3
-	if _, err := rand.Read(body[2:34]); err != nil {
-		return nil, err
-	}
-	copy(body[34:], []byte{0, 0, 2, 0x13, 1, 1, 0, byte(len(extensions) >> 8), byte(len(extensions))})
-	body = append(body, extensions...)
-	out := make([]byte, 9+len(body))
-	copy(out, []byte{22, 3, 1, byte((len(body) + 4) >> 8), byte(len(body) + 4), 1, 0, byte(len(body) >> 8), byte(len(body))})
-	copy(out[9:], body)
-	if len(out) != len(payload)+85 {
-		panic("carrier length calculation")
-	}
+	binary.BigEndian.PutUint16(out[81:83], carrierType)
+	binary.BigEndian.PutUint16(out[83:85], uint16(len(payload)))
+	copy(out[85:], payload)
 	return out, nil
 }
 

@@ -101,3 +101,31 @@ func TestHelloRecordCodecDoesNotDiscardUnexpectedPadding(t *testing.T) {
 		t.Fatal("unexpected padding byte was silently discarded")
 	}
 }
+
+func TestHelloPrefixChecksEveryOmittedByte(t *testing.T) {
+	for k := 0; k < 12; k++ {
+		codec := newHelloPrefixCodec([]byte(fmt.Sprintf("public omitted-prefix byte fixture %d", k)))
+		original := append([]byte(nil), codec.template...)
+		var saltPosition [256]bool
+		for i, at := range codec.positions {
+			original[at] = byte(i + 17)
+			saltPosition[at] = true
+		}
+		for at := range original {
+			original[at] ^= 1
+			packed, err := codec.Pack(original)
+			if at < len(saltPosition) && saltPosition[at] {
+				if err != nil {
+					t.Fatal("variable salt byte rejected", k, at, err)
+				}
+				restored, err := codec.Unpack(packed)
+				if err != nil || !bytes.Equal(restored, original) {
+					t.Fatal("variable salt byte lost", k, at, err)
+				}
+			} else if err == nil {
+				t.Fatal("modified omitted byte silently discarded", k, at)
+			}
+			original[at] ^= 1
+		}
+	}
+}
