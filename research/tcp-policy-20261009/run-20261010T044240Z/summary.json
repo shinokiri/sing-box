@@ -1,0 +1,16 @@
+{
+  "reuse": {
+    "requests": 6,
+    "bytes": 12582912,
+    "errors": 0,
+    "median_body_ms": 103.724,
+    "median_complete_ms": 431.4015
+  },
+  "spare": {
+    "requests": 6,
+    "bytes": 12582912,
+    "errors": 0,
+    "median_body_ms": 103.7125,
+    "median_complete_ms": 421.336
+  }
+}

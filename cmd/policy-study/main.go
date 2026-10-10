@@ -50,6 +50,9 @@ func (h *handler) NewConnectionEx(ctx context.Context, raw net.Conn, _, _ M.Sock
 		request.Body.Close()
 		// Fixed application response, independent of the transport policy.
 		body := strings.Repeat("ordinary TCP experiment\n", 48)
+		if request.URL.Path == "/bulk" {
+			body = strings.Repeat("0123456789abcdef", 131072)
+		}
 		if _, err = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body); err != nil {
 			return
 		}
@@ -143,11 +146,14 @@ type observation struct {
 	Index      int     `json:"index"`
 	AcquireMS  float64 `json:"acquire_ms"`
 	TotalMS    float64 `json:"total_ms"`
+	Bytes      int64   `json:"bytes"`
+	BodyMS     float64 `json:"body_ms"`
 	Connection int64   `json:"connection"`
 	Error      string  `json:"error,omitempty"`
 }
 type experiment struct {
 	ctx           context.Context
+	bulk          bool
 	cancel        context.CancelFunc
 	client        *snellv6.Client
 	prepared      preparedDialer
@@ -237,13 +243,22 @@ func (e *experiment) request(index int, hold bool) net.Conn {
 	c.SetDeadline(time.Now().Add(8 * time.Second))
 	t := tls.Client(c, &tls.Config{RootCAs: e.roots, ServerName: "example.com"})
 	if err = t.HandshakeContext(e.ctx); err == nil {
-		_, err = io.WriteString(t, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+		path := "/"
+		if e.bulk {
+			path = "/bulk"
+		}
+		_, err = io.WriteString(t, "GET "+path+" HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
 	}
 	if err == nil {
 		var response *http.Response
 		response, err = http.ReadResponse(bufio.NewReader(t), nil)
 		if err == nil {
-			_, err = io.Copy(io.Discard, response.Body)
+			bodyStart := time.Now()
+			row.Bytes, err = io.Copy(io.Discard, response.Body)
+			row.BodyMS = float64(time.Since(bodyStart).Microseconds()) / 1000
+			if err == nil && row.Bytes != response.ContentLength {
+				err = fmt.Errorf("body length mismatch")
+			}
 			response.Body.Close()
 			if response.StatusCode != 200 {
 				err = fmt.Errorf("unexpected HTTP status %d", response.StatusCode)
@@ -315,7 +330,7 @@ func main() {
 	roots.AddCert(tlsFixture.Certificate())
 	tlsFixture.Close()
 	policies := strings.Split(*policyList, ",")
-	workloads := []string{"sequential-ready", "handoff", "saturated-burst", "staggered-burst", "idle-expiry", "reset"}
+	workloads := []string{"sequential-ready", "handoff", "saturated-burst", "staggered-burst", "idle-expiry", "reset", "bulk"}
 	for round := range *rounds {
 		for _, workload := range workloads {
 			if *only != "" && workload != *only {
@@ -333,6 +348,12 @@ func main() {
 					os.Exit(1)
 				}
 				switch workload {
+				case "bulk":
+					e.bulk = true
+					for i := range 3 {
+						e.request(i, false)
+						time.Sleep(250 * time.Millisecond)
+					}
 				case "sequential-ready", "handoff":
 					for i := range 8 {
 						e.request(i, false)

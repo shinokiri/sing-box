@@ -17,5 +17,12 @@
     "One spare helps one ready hit, not every member of an instantaneous burst.",
     "First ever connection and misses still perform ordinary TCP handshakes."
   ],
-  "implementation_in_this_branch": "Rejected experimental alternatives retained for reproducibility; not the Android candidate source."
+  "implementation_in_this_branch": "Rejected experimental alternatives retained for reproducibility; not the Android candidate source.",
+  "additional_validation": {
+    "bulk_requests": 12,
+    "bulk_bytes": 25165824,
+    "errors": 0,
+    "total_synthetic_cases": 124,
+    "total_synthetic_requests": 804
+  }
 }
