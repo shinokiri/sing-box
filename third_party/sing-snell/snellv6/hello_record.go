@@ -12,7 +12,11 @@ import (
 	snell "github.com/sagernet/sing-snell"
 )
 
-const helloMinBudget = 85 + 1 + saltLen + snell.HeaderCipherLen
+const (
+	helloMinBudget = 85 + 1 + saltLen + snell.HeaderCipherLen
+	// Envelope, mode, salt, authenticated header and nonempty payload tag.
+	helloSingleRecordOverhead = helloMinBudget + snell.AEADTagLen
+)
 
 type helloRecordCodec struct {
 	psk     []byte

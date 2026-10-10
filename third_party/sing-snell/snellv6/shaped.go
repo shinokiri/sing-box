@@ -15,16 +15,17 @@ import (
 )
 
 type shapedWriter struct {
-	upstream      io.Writer
-	profile       *Profile
-	cipher        cipher.AEAD
-	salt          []byte
-	nonce         []byte
-	seq           uint32
-	saltSent      bool
-	chunkSize     int
-	lastWriteUnix int64
-	access        sync.Mutex
+	upstream          io.Writer
+	profile           *Profile
+	cipher            cipher.AEAD
+	salt              []byte
+	nonce             []byte
+	seq               uint32
+	saltSent          bool
+	chunkSize         int
+	lastWriteUnix     int64
+	firstPayloadLimit int
+	access            sync.Mutex
 }
 
 func newShapedWriter(upstream io.Writer, profile *Profile, salt []byte, aead cipher.AEAD, nonce []byte) *shapedWriter {
@@ -143,6 +144,9 @@ func (w *shapedWriter) payloadLimitFor(now time.Time) int {
 	payloadLimit := w.profile.chunkPayloadLimit(w.seq, w.chunkSize)
 	if w.seq == 0 {
 		payloadLimit = min(payloadLimit, w.profile.firstRecordCap)
+		if w.firstPayloadLimit > 0 {
+			payloadLimit = w.firstPayloadLimit
+		}
 	}
 	w.chunkSize = w.profile.nextChunkSize(w.chunkSize)
 	w.lastWriteUnix = nowUnix

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	snell "github.com/sagernet/sing-snell"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
@@ -397,8 +398,9 @@ func TestHelloFirstApplicationVectorFitsOneRecord(t *testing.T) {
 					t.Fatal(err)
 				}
 				early := size / 2
-				if framed && size == 128 {
-					early = size
+				if framed {
+					request := snell.Request{Command: snell.CommandConnectV2, Destination: M.ParseSocksaddr("example.test:443")}
+					early = min(size, helloColdBudget-helloSingleRecordOverhead-request.Len())
 				}
 				if !bytes.Equal(record.Bytes(), want[:early]) {
 					t.Fatalf("reuse=%v framed=%v size=%d first application bytes=%d want=%d", reuse, framed, size, record.Len(), early)

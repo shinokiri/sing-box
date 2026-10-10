@@ -1,6 +1,7 @@
 package snellv6
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	snell "github.com/sagernet/sing-snell"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
@@ -206,14 +208,64 @@ func (t *HelloTransport) budget(conn net.Conn, endpoint string, generation uint6
 
 type helloConn struct {
 	net.Conn
-	transport  *HelloTransport
-	endpoint   string
-	generation uint64
-	mu         sync.Mutex
-	sent       atomic.Bool
-	observed   atomic.Bool
-	err        error
-	vectorised N.VectorisedWriter
+	transport         *HelloTransport
+	endpoint          string
+	generation        uint64
+	mu                sync.Mutex
+	sent              atomic.Bool
+	observed          atomic.Bool
+	err               error
+	vectorised        N.VectorisedWriter
+	firstBudget       int
+	firstBudgetSource string
+}
+
+// Use one capacity decision for gathering, record construction and framing.
+// Otherwise a concurrent cache observation could change the boundary after the
+// authenticated record has already been sealed. Call with c.mu held.
+func (c *helloConn) firstFrameBudget() (int, string) {
+	if c.firstBudget == 0 {
+		c.firstBudget, c.firstBudgetSource = c.transport.budget(c.Conn, c.endpoint, c.generation)
+	}
+	return c.firstBudget, c.firstBudgetSource
+}
+
+// Only the first shaped record on a new carrier connection uses this limit.
+// Size it before encryption so even a larger first write leaves a complete,
+// authenticated record in the SYN. No application bytes are awaited or added.
+func helloFirstPayloadLimit(upstream any) (int, bool) {
+	for depth := 0; upstream != nil && depth < 8; depth++ {
+		if c, ok := upstream.(*helloConn); ok {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if c.sent.Load() || c.err != nil {
+				return 0, false
+			}
+			budget, _ := c.firstFrameBudget()
+			return max(0, budget-helloSingleRecordOverhead), true
+		}
+		u, ok := upstream.(common.WithUpstream)
+		if !ok {
+			break
+		}
+		upstream = u.Upstream()
+	}
+	return 0, false
+}
+
+func helloFirstRecordLimit(upstream any, payload []byte) int {
+	limit, active := helloFirstPayloadLimit(upstream)
+	if !active {
+		return 0
+	}
+	// Snell expects its request header in the first authenticated record.
+	// A very small configured budget or a long destination/user key must not
+	// split that header. Such a request simply cannot complete in this SYN.
+	reader := bytes.NewReader(payload)
+	if _, err := snell.ReadRequest(reader); err != nil {
+		return 0
+	}
+	return max(limit, len(payload)-reader.Len())
 }
 
 func (c *helloConn) observe() {
@@ -241,7 +293,7 @@ func (c *helloConn) writeLocked(p []byte) (int, error) {
 	if c.sent.Load() {
 		return c.Conn.Write(p)
 	}
-	budget, source := c.transport.budget(c.Conn, c.endpoint, c.generation)
+	budget, source := c.firstFrameBudget()
 	packed, take, mode, err := c.transport.codec.Pack(p, budget-85)
 	if err != nil {
 		return c.fail(0, err)
