@@ -11,7 +11,8 @@ import (
 )
 
 // Before a deferred TFO write, TCP_INFO/TCP_MAXSEG can report a placeholder536.
-// Only an established socket supplies a negotiated MSS suitable for caching.
+// A connected socket supplies a negotiated MSS suitable for caching, including
+// CLOSE_WAIT when the peer's response and FIN arrive before the application reads.
 func helloSocketCapacity(conn net.Conn) (negotiated, routeLimit int) {
 	for depth := 0; conn != nil && depth < 8; depth++ {
 		if socket, ok := conn.(syscall.Conn); ok {
@@ -26,7 +27,7 @@ func helloSocketCapacity(conn net.Conn) (negotiated, routeLimit int) {
 						routeLimit = mtu - headers
 					}
 					info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
-					if err != nil || info.State != 1 { // Linux TCP_ESTABLISHED
+					if err != nil || (info.State != 1 && info.State != 8) { // TCP_ESTABLISHED or TCP_CLOSE_WAIT
 						return
 					}
 					negotiated = int(info.Snd_mss) - 40
