@@ -82,8 +82,14 @@ func TestHelloFirstRecordHasNoPayloadCliff(t *testing.T) {
 							if err != nil {
 								t.Fatal(err)
 							}
-							if info.WireBytes != min(size, limit)+159 || info.Mode != 1 || info.Budget != budget {
+							if info.Budget != budget || info.WireBytes > budget || (info.Mode != 0 && info.Mode != 1) {
 								t.Fatal(info)
+							}
+							if info.Mode == 1 && info.WireBytes != min(size, limit)+159 {
+								t.Fatal("compact first record size changed", info)
+							}
+							if info.Mode == 0 && info.OriginalBytes != info.InitialWriteBytes {
+								t.Fatal("prefix optimization lost early original bytes", info)
 							}
 							request := snell.Request{Command: snell.CommandConnectV2, Destination: target}
 							requestBuffer := buf.NewSize(request.Len())

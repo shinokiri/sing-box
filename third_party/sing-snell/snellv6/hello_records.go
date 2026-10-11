@@ -31,7 +31,17 @@ type helloFirstRecord struct {
 }
 
 func (c *helloRecordCodec) recordState(firstPrefix []byte) (*helloRecordState, error) {
+	return c.recordStateWithHint(firstPrefix, nil)
+}
+
+func (c *helloRecordCodec) recordStateWithHint(firstPrefix []byte, hint *helloCipherHint) (*helloRecordState, error) {
 	salt := c.profile.extractSalt(firstPrefix[:c.profile.saltBlockLen])
+	if hint != nil {
+		if salt != hint.salt {
+			return nil, fmt.Errorf("first shaped record salt differs from its cipher")
+		}
+		return &helloRecordState{aead: hint.aead, nonce: make([]byte, snell.NonceLen)}, nil
+	}
 	aead, err := snell.NewAEAD(snell.DeriveKey(c.psk, salt[:]))
 	if err != nil {
 		return nil, err

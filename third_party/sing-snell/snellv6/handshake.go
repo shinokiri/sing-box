@@ -89,6 +89,7 @@ func writeFirstRecord(conn io.Writer, mode Mode, psk []byte, profile *Profile, p
 			return nil, err
 		}
 		writer := newShapedWriter(conn, profile, salt, aead, make([]byte, snell.NonceLen))
+		helloFirstRecordCipher(conn, psk, salt, aead)
 		writer.firstPayloadLimit = helloFirstRecordLimit(conn, payload)
 		if len(payload) == 0 {
 			writer.payloadLimitFor(time.Now())
@@ -165,6 +166,7 @@ func writeFirstRecordBuffer(conn io.Writer, mode Mode, psk []byte, profile *Prof
 			return nil, err
 		}
 		writer := newShapedWriter(conn, profile, salt, aead, make([]byte, snell.NonceLen))
+		helloFirstRecordCipher(conn, psk, salt, aead)
 		writer.firstPayloadLimit = helloFirstRecordLimit(conn, buffer.Bytes())
 		err = writer.WriteBuffer(buffer)
 		if err != nil {

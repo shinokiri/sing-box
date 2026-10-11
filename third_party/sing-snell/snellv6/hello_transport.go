@@ -3,6 +3,7 @@ package snellv6
 import (
 	"bytes"
 	"context"
+	"crypto/cipher"
 	"fmt"
 	"io"
 	"net"
@@ -218,6 +219,30 @@ type helloConn struct {
 	vectorised        N.VectorisedWriter
 	firstBudget       int
 	firstBudgetSource string
+	firstCipher       *helloCipherHint
+}
+
+// Reuse only the cipher prepared by this connection's own shaped handshake.
+// No key cache or additional wire metadata is created. AES-GCM is immutable;
+// packing authenticates headers with its own nonce, leaving the writer's
+// nonce and record sequence untouched.
+func helloFirstRecordCipher(upstream any, psk, salt []byte, aead cipher.AEAD) {
+	for depth := 0; upstream != nil && depth < 8; depth++ {
+		if c, ok := upstream.(*helloConn); ok {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if !c.sent.Load() && c.err == nil && c.firstCipher == nil && len(salt) == saltLen && bytes.Equal(psk, c.transport.codec.psk) {
+				c.firstCipher = &helloCipherHint{aead: aead}
+				copy(c.firstCipher.salt[:], salt)
+			}
+			return
+		}
+		u, ok := upstream.(common.WithUpstream)
+		if !ok {
+			return
+		}
+		upstream = u.Upstream()
+	}
 }
 
 // Use one capacity decision for gathering, record construction and framing.
@@ -294,7 +319,9 @@ func (c *helloConn) writeLocked(p []byte) (int, error) {
 		return c.Conn.Write(p)
 	}
 	budget, source := c.firstFrameBudget()
-	packed, take, mode, err := c.transport.codec.Pack(p, budget-85)
+	hint := c.firstCipher
+	c.firstCipher = nil
+	packed, take, mode, err := c.transport.codec.pack(p, budget-85, hint, true)
 	if err != nil {
 		return c.fail(0, err)
 	}

@@ -6,6 +6,7 @@ package snellv6
 // bytes before passing them to the existing Snell server.
 import (
 	"bytes"
+	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
 
@@ -22,6 +23,14 @@ type helloRecordCodec struct {
 	psk     []byte
 	profile *Profile
 	prefix  *helloPrefixCodec
+}
+
+// This hint belongs to one physical connection and is consumed by its first
+// write. The shaped writer already derived this cipher from the same PSK and
+// salt. Header authentication still runs with an independent decoding nonce.
+type helloCipherHint struct {
+	salt [saltLen]byte
+	aead cipher.AEAD
 }
 
 func newHelloRecordCodec(psk []byte) *helloRecordCodec {
@@ -52,6 +61,10 @@ func (c *helloRecordCodec) header(head []byte) (paddingLen, payloadLen int, err 
 // envelope. Mode1 compacts a whole record; mode0 preserves a prefix when the
 // ciphertext itself is too large. Any unconsumed original suffix is sent intact.
 func (c *helloRecordCodec) Pack(original []byte, budget int) (packed []byte, consumed int, mode int, err error) {
+	return c.pack(original, budget, nil, false)
+}
+
+func (c *helloRecordCodec) pack(original []byte, budget int, hint *helloCipherHint, preferCompletePrefix bool) (packed []byte, consumed int, mode int, err error) {
 	if budget < 1+saltLen+snell.HeaderCipherLen {
 		return nil, 0, 0, fmt.Errorf("carrier budget too small")
 	}
@@ -62,9 +75,18 @@ func (c *helloRecordCodec) Pack(original []byte, budget int) (packed []byte, con
 	if err = c.prefix.validate(original); err != nil {
 		return nil, 0, 0, err
 	}
+	// Use the existing mode 0 only if it carries the entire original first
+	// write in this same SYN. This avoids a second KDF at the receiver while
+	// preserving all early application bytes. Larger writes retain compaction.
+	if preferCompletePrefix && len(original) <= budget-1+c.prefix.SavedBytes() {
+		packed = make([]byte, 1, 1+len(original)-c.prefix.SavedBytes())
+		packed = c.prefix.appendSalt(packed, original)
+		packed = append(packed, original[c.prefix.PrefixSize():]...)
+		return packed, len(original), 0, nil
+	}
 	headLen := c.prefix.PrefixSize() + snell.HeaderCipherLen
 	if len(original) >= headLen {
-		state, e := c.recordState(original[:c.prefix.PrefixSize()])
+		state, e := c.recordStateWithHint(original[:c.prefix.PrefixSize()], hint)
 		if e != nil {
 			return nil, 0, 0, e
 		}
