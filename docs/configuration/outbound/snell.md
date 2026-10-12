@@ -17,6 +17,7 @@ icon: material/new-box
   "psk": "password",
   "userkey": "",
   "reuse": false,
+  "preconnect": false,
   "udp_flow": false,
   "network": "tcp",
   "obfs_mode": "",
@@ -39,6 +40,7 @@ icon: material/new-box
   "psk": "password",
   "userkey": "",
   "reuse": false,
+  "preconnect": false,
   "udp_flow": false,
   "network": "tcp",
   "mode": "",
@@ -89,6 +91,12 @@ The user key, used to authenticate against a multi-user server.
 #### reuse
 
 Enable connection reuse (the Snell v2 `CONNECT` command).
+
+#### preconnect
+
+Prepare one short-lived ordinary TCP spare for when the reuse pool is exhausted. Defaults to `false`; requires `reuse: true`, `tcp_fast_open: false`, and no `detour`.
+
+Preparation follows successful actual TCP demand. Each outbound retains at most one spare for 5 seconds, without idle replenishment or keepalive payloads. Network changes, disabling idle connections, and shutdown retire the spare. Existing reusable Snell sessions remain preferred. A cold first connection still needs its handshake; a speculative connection may expire unused.
 
 #### udp_flow
 

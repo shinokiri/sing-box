@@ -17,6 +17,7 @@ icon: material/new-box
   "psk": "password",
   "userkey": "",
   "reuse": false,
+  "preconnect": false,
   "udp_flow": false,
   "network": "tcp",
   "obfs_mode": "",
@@ -39,6 +40,7 @@ icon: material/new-box
   "psk": "password",
   "userkey": "",
   "reuse": false,
+  "preconnect": false,
   "udp_flow": false,
   "network": "tcp",
   "mode": "",
@@ -88,6 +90,12 @@ Snell 协议版本，`4` `6` 之一。
 #### reuse
 
 启用连接复用（Snell v2 `CONNECT` 命令）。
+
+#### preconnect
+
+准备一条短暂保留的普通 TCP 备用连接，供复用池耗尽时使用。默认为 `false`；要求 `reuse: true`、`tcp_fast_open: false`，且不能设置 `detour`。
+
+只在实际 TCP 连接需求成功后准备，每个节点最多一条，最多空闲 5 秒。过期后不会自动补建，也不发送保活数据；网络切换、停用节点和关闭服务都会清理备用连接。已复用的 Snell 会话仍优先使用。首次冷连接仍需要正常握手；此选项可能提前建立一条最终未被使用的连接。
 
 #### udp_flow
 

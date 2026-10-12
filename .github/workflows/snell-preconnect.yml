@@ -1,0 +1,31 @@
+name: Snell bounded preconnection
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'common/preconnect/**'
+      - 'protocol/snell/**'
+      - 'option/snell.go'
+      - '.github/workflows/snell-preconnect.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.8'
+          cache: false
+      - name: Check formatting and lifecycle races
+        run: |
+          test -z "$(gofmt -l common/preconnect protocol/snell/outbound.go option/snell.go)"
+          go test -race -count=10 -timeout=180s ./common/preconnect
+          go test -race -count=3 -timeout=180s ./protocol/snell
+          go test ./option
+          sh .github/check_local_patches.sh
