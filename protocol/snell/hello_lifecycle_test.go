@@ -109,7 +109,7 @@ func helloLifecycleOutbound(t *testing.T, family string, tfo, reuse bool) (*Outb
 	endpoint, accepted := helloLifecycleServer(t, family)
 	ctx, cancel := context.WithTimeout(service.ContextWithDefaultRegistry(context.Background()), 6*time.Second)
 	t.Cleanup(cancel)
-	manager := route.NewConnectionManager(logger.NOP())
+	manager := route.NewConnectionManager(ctx, logger.NOP())
 	service.MustRegister[adapter.ConnectionManager](ctx, manager)
 	opts := option.SnellOutboundOptions{Version: 6, AbstractSnellOutboundOptions: option.AbstractSnellOutboundOptions{
 		ServerOptions: option.ServerOptions{Server: endpoint.Addr.String(), ServerPort: endpoint.Port},

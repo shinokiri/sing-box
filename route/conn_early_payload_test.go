@@ -177,7 +177,7 @@ func TestHelloRouteEarlyPayload(t *testing.T) {
 				source = bufio.NewCachedConn(source, buf.As(append([]byte(nil), payload...)))
 			}
 			metadata := adapter.InboundContext{Destination: M.ParseSocksaddr(fmt.Sprintf("example.test:%d", test.port)), Protocol: test.protocol}
-			manager := NewConnectionManager(logger.NOP())
+			manager := NewConnectionManager(context.Background(), logger.NOP())
 			routeStarted := make(chan struct{})
 			go func() {
 				manager.NewConnection(context.Background(), outbound, source, metadata, nil)
