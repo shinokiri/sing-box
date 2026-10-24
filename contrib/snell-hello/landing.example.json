@@ -1,0 +1,11 @@
+{
+  "mode": "decode",
+  "listen": "198.51.100.20:30814",
+  "upstream": "127.0.0.1:17468",
+  "psk_file": "snell.psk",
+  "listen_tfo": true,
+  "upstream_tfo": true,
+  "setup_timeout": "5s",
+  "dial_timeout": "4s",
+  "max_connections": 256
+}

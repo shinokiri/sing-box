@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	"github.com/sagernet/sing-box/common/sniff"
 	"github.com/sagernet/sing-box/common/tlsfragment"
 	"github.com/sagernet/sing-box/common/tlsspoof"
+	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
@@ -28,19 +30,22 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/x/list"
+	"github.com/sagernet/sing/service"
 )
 
 var _ adapter.ConnectionManager = (*ConnectionManager)(nil)
 
 type ConnectionManager struct {
-	logger      logger.ContextLogger
-	access      sync.Mutex
-	connections list.List[io.Closer]
+	logger         logger.ContextLogger
+	urlTestHistory *urltest.HistoryStorage
+	access         sync.Mutex
+	connections    list.List[io.Closer]
 }
 
-func NewConnectionManager(logger logger.ContextLogger) *ConnectionManager {
+func NewConnectionManager(ctx context.Context, logger logger.ContextLogger) *ConnectionManager {
 	return &ConnectionManager{
-		logger: logger,
+		logger:         logger,
+		urlTestHistory: service.PtrFromContext[urltest.HistoryStorage](ctx),
 	}
 }
 
@@ -123,6 +128,7 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 			dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 		}
 		err = E.Cause(err, "open connection to ", remoteString, dialerString)
+		m.deleteURLTestHistory(metadata.OutboundChain)
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		m.logger.ErrorContext(ctx, err)
 		return
@@ -163,11 +169,12 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		remoteConn = spoofConn
 	}
 	serverFirst := sniff.Skip(&metadata)
+	clientFirst := !serverFirst && handshakeClientFirst(&metadata)
 	var done atomic.Bool
-	if m.kickWriteHandshake(ctx, conn, remoteConn, serverFirst, false, &done, onClose) {
+	if m.kickWriteHandshake(ctx, conn, remoteConn, serverFirst, clientFirst, false, &done, onClose) {
 		return
 	}
-	if m.kickWriteHandshake(ctx, remoteConn, conn, serverFirst, true, &done, onClose) {
+	if m.kickWriteHandshake(ctx, remoteConn, conn, serverFirst, false, true, &done, onClose) {
 		return
 	}
 	go m.connectionCopy(ctx, conn, remoteConn, false, &done, onClose)
@@ -211,6 +218,7 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 			}
 			err = E.Cause(err, "open packet connection to ", remoteString, dialerString)
+			m.deleteURLTestHistory(metadata.OutboundChain)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
 			m.logger.ErrorContext(ctx, err)
 			return
@@ -234,6 +242,7 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 			}
 			err = E.Cause(err, "listen packet connection using ", dialerString)
+			m.deleteURLTestHistory(metadata.OutboundChain)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
 			m.logger.ErrorContext(ctx, err)
 			return
@@ -241,9 +250,10 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 	}
 	err = N.ReportPacketConnHandshakeSuccess(conn, remotePacketConn)
 	if err != nil {
-		conn.Close()
+		err = E.Cause(err, "report handshake success")
 		remotePacketConn.Close()
-		m.logger.ErrorContext(ctx, "report handshake success: ", err)
+		N.CloseOnHandshakeFailure(conn, onClose, err)
+		m.logger.ErrorContext(ctx, err)
 		return
 	}
 	udpTimeout := packetTimeout(&metadata)
@@ -291,6 +301,15 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 	go m.packetConnectionCopy(ctx, destination, conn, true, &done, onClose)
 }
 
+func (m *ConnectionManager) deleteURLTestHistory(chain []adapter.Outbound) {
+	if slices.ContainsFunc(chain, func(it adapter.Outbound) bool {
+		_, isURLTestGroup := it.(adapter.URLTestGroup)
+		return isURLTestGroup
+	}) {
+		m.urlTestHistory.DeleteURLTestHistory(chain[len(chain)-1].Tag())
+	}
+}
+
 func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn, destination net.Conn, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {
 	_, err := bufio.CopyWithIncreateBuffer(destination, source, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
 	if err != nil {
@@ -332,7 +351,35 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	}
 }
 
-func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.Conn, destination net.Conn, serverFirst bool, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) bool {
+// Only protocols known to speak first get an opportunity to provide early
+// application bytes. Unknown protocols (including SSH on custom ports) keep
+// their immediate empty handshake. A web-port hint is bounded by the usual
+// first-payload timeout in case that port hosts a server-first protocol.
+func handshakeClientFirst(metadata *adapter.InboundContext) bool {
+	if metadata.Protocol == C.ProtocolTLS || metadata.Protocol == C.ProtocolHTTP {
+		return true
+	}
+	return metadata.Destination.Port == 80 || metadata.Destination.Port == 443
+}
+
+func readHandshakePayload(source net.Conn, reader io.Reader) (*buf.Buffer, error) {
+	if err := source.SetReadDeadline(time.Now().Add(C.ReadPayloadTimeout)); err != nil {
+		return nil, nil
+	}
+	buffer := buf.New()
+	n, err := buffer.ReadOnceFrom(reader)
+	_ = source.SetReadDeadline(time.Time{})
+	if n > 0 {
+		return buffer, nil
+	}
+	buffer.Release()
+	if E.IsTimeout(err) {
+		return nil, nil
+	}
+	return nil, err
+}
+
+func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.Conn, destination net.Conn, serverFirst bool, clientFirst bool, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) bool {
 	if !N.NeedHandshakeForWrite(destination) {
 		return false
 	}
@@ -351,7 +398,12 @@ func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.C
 		if cachedReader, ok := sourceReader.(N.CachedReader); ok {
 			cachedBuffer = cachedReader.ReadCached()
 		}
-		if cachedBuffer != nil {
+		if cachedBuffer == nil && clientFirst && !direction {
+			if earlyWriter, ok := common.Cast[N.EarlyPayloadWriter](destinationWriter); ok && earlyWriter.PreferEarlyPayload() {
+				cachedBuffer, err = readHandshakePayload(source, sourceReader)
+			}
+		}
+		if err == nil && cachedBuffer != nil {
 			wrotePayload = true
 			dataLen := cachedBuffer.Len()
 			_, err = destinationWriter.Write(cachedBuffer.Bytes())
@@ -364,7 +416,7 @@ func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.C
 					counter(int64(dataLen))
 				}
 			}
-		} else {
+		} else if err == nil {
 			_ = destination.SetWriteDeadline(time.Now().Add(C.ReadPayloadTimeout))
 			_, err = destinationWriter.Write(nil)
 			_ = destination.SetWriteDeadline(time.Time{})

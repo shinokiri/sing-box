@@ -103,6 +103,7 @@ type forwardFlow struct {
 	finReverse  atomic.Bool
 	reported    atomic.Bool
 	closed      atomic.Bool
+	aborted     atomic.Bool
 	lastReverse atomic.Int64
 }
 
@@ -123,6 +124,7 @@ func (f *forwardFlow) close(reason FlowCloseReason) {
 }
 
 func (f *forwardFlow) CloseFlow() {
+	f.aborted.Store(true)
 	f.close(FlowCloseReset)
 }
 
@@ -325,12 +327,9 @@ func (d *ForwardDispatcher) handleHit(key flowKey, entry *flowEntry, packet *for
 	case ActionAccept:
 		packet.verdict = entry.verdict
 		if packet.protocol == uint8(header.TCPProtocolNumber) {
-			if packet.tcpFlags&header.TCPFlagRst != 0 {
+			if packet.tcpFlags&header.TCPFlagSyn == 0 {
 				d.removeEntry(key, entry, FlowCloseReset)
 				return false
-			}
-			if packet.tcpFlags&header.TCPFlagSyn == 0 {
-				entry.idle = tcpEstablishedTimeout
 			}
 		}
 		entry.deadline = now + int64(entry.idle)
@@ -795,7 +794,7 @@ func (d *ForwardDispatcher) discardStagedPackets() {
 }
 
 func (d *ForwardDispatcher) entryExpired(entry *flowEntry, now int64) bool {
-	if entry.flow != nil && routeExpired(entry.flow.routeContexts) {
+	if entry.flow != nil && (entry.flow.aborted.Load() || routeExpired(entry.flow.routeContexts)) {
 		return true
 	}
 	if now <= entry.deadline {
@@ -824,9 +823,12 @@ func (d *ForwardDispatcher) judgeFlowForStack(handler Handler, protocol uint8, s
 		}
 		entry := d.table[flowKey{protocol: protocol, source: source, destination: destination}]
 		if entry != nil && entry.action != ActionFlow && !d.entryExpired(entry, d.now()) {
-			action := entry.action
+			verdict := entry.verdict
+			if entry.action != ActionAccept {
+				verdict = FlowVerdict{Action: entry.action}
+			}
 			d.access.Unlock()
-			return FlowVerdict{Action: action}
+			return verdict
 		}
 		d.access.Unlock()
 	}
@@ -889,10 +891,10 @@ func (d *ForwardDispatcher) maybeSweep(now int64) {
 	d.lastSweep = now
 	visited := 0
 	for key, entry := range d.table {
-		if entry.action == ActionFlow && entry.flow.closed.Load() {
-			d.tombstoneEntry(entry, now)
-		} else if d.entryExpired(entry, now) {
+		if d.entryExpired(entry, now) {
 			d.removeEntry(key, entry, FlowCloseTimeout)
+		} else if entry.action == ActionFlow && entry.flow.closed.Load() {
+			d.tombstoneEntry(entry, now)
 		}
 		visited++
 		if visited >= flowSweepLimit {

@@ -1,7 +1,7 @@
 # Local sing-tun patches
 
-Upstream source: v0.9.7-0.20261009022811-5c2edb183cc9, as required by
-sing-box v1.15.0-alpha.11 (6afeff4c0f7123b5782f888812e96b8c82c7b699).
+Upstream source: v0.9.7-0.20261023115453-611d83b7a57b, as required by
+sing-box v1.15.0-alpha.13 (824dbcfb4dd0a95921840b1737b950cde590241e).
 
 The fork retains bounded asynchronous first-flow routing, fixed DNS failure
 retry deadlines, writeback outside the flow-table lock, selector cancellation,
@@ -68,3 +68,13 @@ stack callers use NewForwardDispatcherWithOptions to retain NAT options across
 worker stages. Regression checks cover shared-inbound reply ownership, external
 socket reservations, range expansion, filtering on secondary workers, and route
 retirement between fragments.
+
+The alpha.13 update retains the existing bounded, cancellable asynchronous
+worker stages instead of adding upstream's separate judgement queues. It
+adopts the upstream fixes for explicitly aborted flows (expire and re-route
+instead of keeping a dropping tombstone), accepted TCP decision cleanup,
+full cached verdicts, Go hairpin batching/flushes, and system TCP NAT closure
+and tuple reuse. Other upstream package lookup, socket, monitor, and memory
+queue fixes are merged normally. Both main and test modules use the main
+release's sing and sing-tun pins; upstream's test pins name different snapshots.
+The automatic migration disagreement guard remains enabled.

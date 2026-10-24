@@ -246,6 +246,8 @@ func (w *clientVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error {
 		conn.access.Unlock()
 		return recordWriter.CreateVectorisedWriterFor(w.upstream).WriteVectorised(buffers)
 	}
+	request := snell.Request{Command: snell.CommandConnectV2, ClientID: conn.client.userKey, Destination: conn.destination}
+	buffers = gatherHelloFirstVector(conn.Conn, conn, buffers, request.Len())
 	for index, buffer := range buffers {
 		if buffer.IsEmpty() {
 			buffer.Release()

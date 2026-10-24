@@ -151,20 +151,37 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	if N.NeedHandshakeForWrite(instance) {
 		start = time.Now()
 	}
+	// Own the outermost connection's complete close operation. net/http can
+	// finish TLS close_notify asynchronously after delivering the HEAD
+	// response; closing its underlying reusable stream first can retire or
+	// corrupt the session intended for the measured request.
+	requestConn := &testConn{Conn: instance}
+	defer requestConn.Close()
+	transport := &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return requestConn, nil
+		},
+	}
+	if linkURL.Scheme == "https" {
+		tlsConn := tls.Client(instance, &tls.Config{
+			ServerName: hostname,
+			Time:       ntp.TimeFuncFromContext(ctx),
+			RootCAs:    adapter.RootPoolFromContext(ctx),
+		})
+		requestConn.Conn = tlsConn
+		transport.DialTLSContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			if handshakeErr := tlsConn.HandshakeContext(ctx); handshakeErr != nil {
+				return nil, handshakeErr
+			}
+			return requestConn, nil
+		}
+	}
 	req, err := http.NewRequest(http.MethodHead, link, nil)
 	if err != nil {
 		return
 	}
 	client := http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return instance, nil
-			},
-			TLSClientConfig: &tls.Config{
-				Time:    ntp.TimeFuncFromContext(ctx),
-				RootCAs: adapter.RootPoolFromContext(ctx),
-			},
-		},
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -178,4 +195,15 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	resp.Body.Close()
 	t = uint16(time.Since(start) / time.Millisecond)
 	return
+}
+
+type testConn struct {
+	net.Conn
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (c *testConn) Close() error {
+	c.closeOnce.Do(func() { c.closeErr = c.Conn.Close() })
+	return c.closeErr
 }
