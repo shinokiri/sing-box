@@ -122,11 +122,12 @@ const (
 )
 
 type NetworkInterface struct {
-	Index     int32
-	MTU       int32
-	Name      string
-	Addresses StringIterator
-	Flags     int32
+	NetworkHandle int64
+	Index         int32
+	MTU           int32
+	Name          string
+	Addresses     StringIterator
+	Flags         int32
 
 	Type            int32
 	DNSServer       StringIterator

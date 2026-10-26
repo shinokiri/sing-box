@@ -785,3 +785,42 @@ index fa39ea9..886b17c 100644
          ApkInstaller.install(context, apkFile)
      }
  }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt b/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
+index 7c23a03..d20d108 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
+@@ -8,6 +8,7 @@ import java.net.NetworkInterface
+
+ object DefaultNetworkMonitor {
+
++    @Volatile
+     var defaultNetwork: Network? = null
+     private var listener: InterfaceUpdateListener? = null
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt b/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
+index 865e600..989b358 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
+@@ -98,7 +98,10 @@ interface PlatformInterfaceWrapper : PlatformInterface {
+     }
+
+     override fun getInterfaces(): NetworkInterfaceIterator {
+-        val networks = Application.connectivity.allNetworks
++        val defaultNetwork = DefaultNetworkMonitor.defaultNetwork
++        // The core deduplicates by interface name. Prefer the selected Android
++        // Network when several Network records refer to the same interface.
++        val networks = Application.connectivity.allNetworks.sortedBy { it != defaultNetwork }
+         val networkInterfaces = NetworkInterface.getNetworkInterfaces().toList()
+         val interfaces = mutableListOf<LibboxNetworkInterface>()
+         for (network in networks) {
+@@ -106,6 +109,10 @@ interface PlatformInterfaceWrapper : PlatformInterface {
+             val linkProperties = Application.connectivity.getLinkProperties(network) ?: continue
+             val networkCapabilities =
+                 Application.connectivity.getNetworkCapabilities(network) ?: continue
++            if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
++                boxInterface.networkHandle = network.networkHandle
++            }
+             boxInterface.name = linkProperties.interfaceName
+             val networkInterface =
+                 networkInterfaces.find { it.name == boxInterface.name } ?: continue

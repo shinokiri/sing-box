@@ -85,6 +85,8 @@ func NormalizeWIFIBSSID(bssid string) string {
 
 type NetworkInterface struct {
 	control.Interface
+	// Android's opaque Network handle, not the Linux interface index or netId.
+	NetworkHandle    uint64
 	Type             C.InterfaceType
 	DNSServers       []string
 	DNSSearchDomains []string

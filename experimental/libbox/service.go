@@ -141,6 +141,7 @@ func (w *platformInterfaceWrapper) NetworkInterfaces() ([]adapter.NetworkInterfa
 				Addresses: common.Map(iteratorToArray[string](netInterface.Addresses), netip.MustParsePrefix),
 				Flags:     linkFlags(uint32(netInterface.Flags)),
 			},
+			NetworkHandle:    uint64(netInterface.NetworkHandle),
 			Type:             C.InterfaceType(netInterface.Type),
 			DNSServers:       iteratorToArray[string](netInterface.DNSServer),
 			DNSSearchDomains: iteratorToArray[string](netInterface.DNSSearchDomain),

@@ -34,8 +34,8 @@ func TestNetworkTFOEventPublication(t *testing.T) {
 	cell := control.Interface{Name: "cellular", Index: 2, Flags: net.FlagUp}
 	monitor := &networkTFOTestMonitor{current: &wifi}
 	platform := &networkTFOTestPlatform{interfaces: []adapter.NetworkInterface{
-		{Interface: wifi, Type: C.InterfaceTypeWIFI},
-		{Interface: cell, Type: C.InterfaceTypeCellular},
+		{Interface: wifi, Type: C.InterfaceTypeWIFI, NetworkHandle: 101},
+		{Interface: cell, Type: C.InterfaceTypeCellular, NetworkHandle: 102},
 	}}
 	manager := &NetworkManager{
 		logger:            logger.NOP(),
@@ -71,6 +71,12 @@ func TestNetworkTFOEventPublication(t *testing.T) {
 	manager.notifyInterfaceUpdate(&wifi, 0)
 	if !allowed() {
 		t.Fatal("Wi-Fi restoration did not update the policy")
+	}
+	// Android can replace the Network while retaining the Linux interface.
+	platform.interfaces[0].NetworkHandle = 103
+	refresh()
+	if manager.NetworkTFOState().Select("", netip.Addr{}).NetworkHandle != 103 || oldSnapshot.Select("", netip.Addr{}).NetworkHandle != 101 {
+		t.Fatal("replacement Network handle was lost or mutated the old snapshot")
 	}
 	// Capability changes can refresh interfaces without changing name/index.
 	platform.interfaces[0].Type = C.InterfaceTypeCellular
