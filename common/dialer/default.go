@@ -52,6 +52,7 @@ type DefaultDialer struct {
 	networkFallbackDelay   time.Duration
 	networkLastFallback    common.TypedValue[time.Time]
 	androidTFO             bool
+	bindNetwork            networkBinder
 	selectTFO4             func() *tfo.Dialer
 	selectTFO6             func() *tfo.Dialer
 }
@@ -261,9 +262,12 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 		fallbackNetworkType:    fallbackNetworkType,
 		networkFallbackDelay:   networkFallbackDelay,
 	}
+	if result.androidTFO && networkManager != nil && options.NetNs == "" && options.RoutingMark == 0 && networkManager.DefaultOptions().RoutingMark == 0 {
+		result.bindNetwork = bindAndroidNetwork
+	}
 	if options.TCPFastOpen && platformInterface != nil && platformInterface.UsePlatformNetworkInterfaces() {
-		result.selectTFO4 = newNetworkTFOSelector(&result.dialer4, networkManager, options)
-		result.selectTFO6 = newNetworkTFOSelector(&result.dialer6, networkManager, options)
+		result.selectTFO4 = newNetworkTFOSelector(&result.dialer4, networkManager, options, result.bindNetwork)
+		result.selectTFO6 = newNetworkTFOSelector(&result.dialer6, networkManager, options, result.bindNetwork)
 	}
 	return result, nil
 }
@@ -351,7 +355,7 @@ func (d *DefaultDialer) DialParallelInterface(ctx context.Context, network strin
 	}
 	if err != nil {
 		// bind interface failed on legacy xiaomi systems
-		if d.defaultNetworkStrategy && errors.Is(err, syscall.EPERM) {
+		if d.defaultNetworkStrategy && errors.Is(err, syscall.EPERM) && !errors.Is(err, errNetworkBinding) {
 			d.networkStrategy = nil
 			return d.DialContext(ctx, network, address)
 		} else {
@@ -391,14 +395,14 @@ func (d *DefaultDialer) ListenPacket(ctx context.Context, destination M.Socksadd
 }
 
 func (d *DefaultDialer) ICMPControl() control.Func {
-	if d.networkStrategy == nil || d.defaultNetworkStrategy && len(d.networkType) == 0 {
+	if d.networkStrategy == nil || d.bindNetwork == nil && d.defaultNetworkStrategy && len(d.networkType) == 0 {
 		return d.dialer4.Control
 	}
 	interfaceControl := d.serialInterfaceControl(*d.networkStrategy, d.networkType, d.fallbackNetworkType)
 	return control.Append(d.dialer4.Control, func(network, address string, conn syscall.RawConn) error {
 		err := interfaceControl(network, address, conn)
 		// bind interface failed on legacy xiaomi systems
-		if d.defaultNetworkStrategy && errors.Is(err, syscall.EPERM) {
+		if d.defaultNetworkStrategy && errors.Is(err, syscall.EPERM) && !errors.Is(err, errNetworkBinding) {
 			return nil
 		}
 		return err
@@ -427,7 +431,7 @@ func (d *DefaultDialer) ListenSerialInterfacePacket(ctx context.Context, destina
 	packetConn, err := listenConfig.ListenPacket(ctx, network, "")
 	if err != nil {
 		// bind interface failed on legacy xiaomi systems
-		if d.defaultNetworkStrategy && errors.Is(err, syscall.EPERM) {
+		if d.defaultNetworkStrategy && errors.Is(err, syscall.EPERM) && !errors.Is(err, errNetworkBinding) {
 			d.networkStrategy = nil
 			return d.ListenPacket(ctx, destination)
 		} else {

@@ -32,9 +32,7 @@ func (d *DefaultDialer) dialParallelInterface(ctx context.Context, dialer net.Di
 			iif = fallbackInterfaces[0]
 		}
 		perNetDialer := dialer
-		if defaultInterface == nil || iif.Index != defaultInterface.Index {
-			perNetDialer.Control = control.Append(perNetDialer.Control, control.BindToInterface(nil, iif.Name, iif.Index))
-		}
+		perNetDialer.Control = control.Append(perNetDialer.Control, d.interfaceControl(iif, defaultInterface))
 		conn, err := perNetDialer.DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, false, E.Cause(err, "dial ", iif.Name, " (", iif.Index, ")")
@@ -54,9 +52,7 @@ func (d *DefaultDialer) dialParallelInterface(ctx context.Context, dialer net.Di
 	results := make(chan dialResult) // unbuffered
 	startRacer := func(ctx context.Context, primary bool, iif adapter.NetworkInterface) {
 		perNetDialer := dialer
-		if defaultInterface == nil || iif.Index != defaultInterface.Index {
-			perNetDialer.Control = control.Append(perNetDialer.Control, control.BindToInterface(nil, iif.Name, iif.Index))
-		}
+		perNetDialer.Control = control.Append(perNetDialer.Control, d.interfaceControl(iif, defaultInterface))
 		conn, err := perNetDialer.DialContext(ctx, network, addr)
 		if err != nil {
 			select {
@@ -127,9 +123,7 @@ func (d *DefaultDialer) dialParallelInterfaceFastFallback(ctx context.Context, d
 			iif = fallbackInterfaces[0]
 		}
 		perNetDialer := dialer
-		if defaultInterface == nil || iif.Index != defaultInterface.Index {
-			perNetDialer.Control = control.Append(perNetDialer.Control, control.BindToInterface(nil, iif.Name, iif.Index))
-		}
+		perNetDialer.Control = control.Append(perNetDialer.Control, d.interfaceControl(iif, defaultInterface))
 		conn, err := perNetDialer.DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, false, E.Cause(err, "dial ", iif.Name, " (", iif.Index, ")")
@@ -150,9 +144,7 @@ func (d *DefaultDialer) dialParallelInterfaceFastFallback(ctx context.Context, d
 	results := make(chan dialResult) // unbuffered
 	startRacer := func(ctx context.Context, primary bool, iif adapter.NetworkInterface) {
 		perNetDialer := dialer
-		if defaultInterface == nil || iif.Index != defaultInterface.Index {
-			perNetDialer.Control = control.Append(perNetDialer.Control, control.BindToInterface(nil, iif.Name, iif.Index))
-		}
+		perNetDialer.Control = control.Append(perNetDialer.Control, d.interfaceControl(iif, defaultInterface))
 		conn, err := perNetDialer.DialContext(ctx, network, addr)
 		if err != nil {
 			select {
@@ -201,10 +193,11 @@ func (d *DefaultDialer) serialInterfaceControl(strategy C.NetworkStrategy, inter
 		var errors []error
 		for _, networkInterfaces := range [][]adapter.NetworkInterface{primaryInterfaces, fallbackInterfaces} {
 			for _, networkInterface := range networkInterfaces {
-				if defaultInterface != nil && networkInterface.Index == defaultInterface.Index {
+				bind := d.interfaceControl(networkInterface, defaultInterface)
+				if bind == nil {
 					return nil
 				}
-				err := control.BindToInterface0(nil, conn, network, address, networkInterface.Name, networkInterface.Index, false)
+				err := bind(network, address, conn)
 				if err == nil {
 					return nil
 				}

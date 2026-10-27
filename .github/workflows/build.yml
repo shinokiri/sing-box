@@ -135,10 +135,14 @@ jobs:
         run: go test -race -count=3 -timeout=180s ./common/urltest ./protocol/group ./daemon
       - name: Test Android platform TCP Fast Open
         run: |
-          gofmt -d adapter/network_tfo.go adapter/network_tfo_test.go common/dialer/default.go common/dialer/default_tfo.go common/dialer/default_tfo_linux_test.go common/dialer/resolve.go common/dialer/tfo.go common/dialer/tfo_network.go common/dialer/tfo_network_linux_test.go route/network.go route/network_tfo.go route/network_tfo_test.go
-          go test -race -exec sudo -count=3 -run '^TestPlatform(TCPFastOpen|TFO)' ./common/dialer
+          test -z "$(gofmt -l adapter/network*.go common/dialer/network_bind*.go common/dialer/default*.go common/dialer/resolve.go common/dialer/tfo*.go route/network*.go experimental/libbox/platform.go experimental/libbox/service.go)"
+          go test -race -exec sudo -count=3 -run '^TestPlatform(TCPFastOpen|TFO|Network)' ./common/dialer
           go test -race -ldflags "$(cat release/LDFLAGS)" -count=3 -run '^TestNetworkTFO' ./adapter ./route
           go test -run '^$' -bench '^BenchmarkPlatformTFONetworkPolicy$' -benchmem -count=3 ./common/dialer
+      - name: Verify selected network overrides destination-specific routes
+        run: |
+          go test -race -c -o "$RUNNER_TEMP/android-network-routes.test" ./common/dialer
+          sudo python3 .github/check_android_network_routes.py "$RUNNER_TEMP/android-network-routes.test"
       - name: Test DNS connection contexts through Snell
         run: go test -race -count=10 -timeout=120s -run '^Test(UDPOverSnellTFODialContext|ConnPoolDialContextRetirement|ConnPoolResetCancelsPendingDial|ConnPoolFailedDialContextCleanup|ConnPoolLateDialContextCleanup)$' ./dns/transport
       - name: Test all core packages with release features

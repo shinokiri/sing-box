@@ -13,14 +13,20 @@ type NetworkTFOProvider interface {
 }
 
 type NetworkTFOState struct {
-	defaultAllowed bool
-	byInterface    map[string]bool
+	defaultNetwork NetworkTFOSelection
+	byInterface    map[string]NetworkTFOSelection
 	byAddress      map[netip.Addr]string
+}
+
+// The policy and binding identity must come from the same immutable snapshot.
+type NetworkTFOSelection struct {
+	NetworkHandle uint64
+	Allowed       bool
 }
 
 func NewNetworkTFOState(defaultIndex int, interfaces []NetworkInterface) *NetworkTFOState {
 	state := &NetworkTFOState{
-		byInterface: make(map[string]bool, len(interfaces)),
+		byInterface: make(map[string]NetworkTFOSelection, len(interfaces)),
 		byAddress:   make(map[netip.Addr]string),
 	}
 	for _, iif := range interfaces {
@@ -28,9 +34,10 @@ func NewNetworkTFOState(defaultIndex int, interfaces []NetworkInterface) *Networ
 			continue
 		}
 		allowed := iif.Type == C.InterfaceTypeWIFI || iif.Type == C.InterfaceTypeEthernet || iif.Type == C.InterfaceTypeOther
-		state.byInterface[iif.Name] = allowed
+		selection := NetworkTFOSelection{NetworkHandle: iif.NetworkHandle, Allowed: allowed}
+		state.byInterface[iif.Name] = selection
 		if defaultIndex > 0 && iif.Index == defaultIndex {
-			state.defaultAllowed = allowed
+			state.defaultNetwork = selection
 		}
 		for _, prefix := range iif.Addresses {
 			address := prefix.Addr().Unmap()
@@ -45,18 +52,22 @@ func NewNetworkTFOState(defaultIndex int, interfaces []NetworkInterface) *Networ
 }
 
 func (s *NetworkTFOState) Allowed(interfaceName string, localIP netip.Addr) bool {
+	return s.Select(interfaceName, localIP).Allowed
+}
+
+func (s *NetworkTFOState) Select(interfaceName string, localIP netip.Addr) NetworkTFOSelection {
 	if s == nil {
-		return false
+		return NetworkTFOSelection{}
 	}
 	if localIP.IsValid() {
 		name := s.byAddress[localIP]
 		if name == "" || interfaceName != "" && name != interfaceName {
-			return false
+			return NetworkTFOSelection{}
 		}
 		interfaceName = name
 	}
 	if interfaceName != "" {
 		return s.byInterface[interfaceName]
 	}
-	return s.defaultAllowed
+	return s.defaultNetwork
 }
