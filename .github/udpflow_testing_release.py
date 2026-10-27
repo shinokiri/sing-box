@@ -114,6 +114,7 @@ def publish():
     notes.write_text(
         f"基于上游 [testing `{state['upstream_commit'][:7]}`](https://github.com/{UPSTREAM}/commit/{state['upstream_commit']}) 的开发快照，包含现有 UDP flow 修复。\n\n"
         "Android 16+（API 36）ARM64 签名 APK，沿用本仓库签名；versionCode 递增，可覆盖安装。此 Release 标记为预发布，客户端可选择测试更新通道。\n\n"
+        "修复 Android 同时开启 Wi-Fi 与蜂窝时，代理连接实际出口与 TCP Fast Open 策略所用网络不一致的问题：建连前显式绑定选定的 Android Network，首次发送时共同确定网络与 TFO 策略；蜂窝使用普通 TCP，Wi-Fi 按配置使用 TFO，绑定失败直接返回错误。真机保持双网开启和原有蜂窝目的路由，三轮 Lake Forest 测速的 IPv4/IPv6 连接均经 Wi-Fi；此前 IPv4 首批后续数据的 7–8 秒停顿未再出现。已覆盖延迟写入、网络变化、绑定失败与 IPv4/IPv6 回归测试；长期运行与切网仍需观察。\n\n"
         "本次跟进上游 alpha.13 核心、Android 客户端、sing 和 sing-tun，统一核心与测试模块的依赖基线。保留有界异步路由、回复归属、FakeIP 隔离和连接回收，并纳入上游的关闭流量重建、TCP 判定缓存清理、NAT 会话回收及 Go TUN 回环批量发送修复。\n\n"
         "合入手机已使用的可选 Snell hello carrier：保留首包编码、首包容量、复用会话生命周期和 TLS 测速关闭处理。该封装需要配套接收端；未启用时继续使用普通 Snell。已有手机配置与配套接收端可继续使用。\n\n"
         "优化 Go TUN 的持续 TCP 上传：沿用约 512 KB 的批量切换门槛，每次最多取 8 份已经到达的数据，经已有的批量写入通道发送；不等待凑满，也不添加定时器。仅有一份数据时继续走原来的单份写入路径，避免小消息为批量发送额外分配记录列表。覆盖 IPv4/IPv6、超时、关闭、缓冲区寿命以及大段上传后的小消息；独立 ARM64/x86 对照显示积压数据的处理耗时下降，不能直接换算为外网提速。\n\n"
