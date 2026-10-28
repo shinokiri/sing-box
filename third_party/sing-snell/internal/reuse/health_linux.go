@@ -4,7 +4,9 @@ package reuse
 
 import (
 	"net"
+	"syscall"
 
+	"github.com/sagernet/sing/common"
 	N "github.com/sagernet/sing/common/network"
 	"golang.org/x/sys/unix"
 )
@@ -13,7 +15,7 @@ import (
 // state in one TCP_INFO query. It neither reads payload nor changes deadlines.
 // Unknown wrappers retain portable behavior; this cannot prevent a later close.
 func TCPReceiveState(conn net.Conn) (uint32, bool, bool) {
-	_, raw := N.SyscallConnForRead(conn)
+	raw := tcpMetadataConn(conn)
 	if raw == nil {
 		return 0, false, true
 	}
@@ -42,4 +44,32 @@ func TCPReceiveState(conn net.Conn) (uint32, bool, bool) {
 		return 0, false, false
 	}
 	return snapshot.threshold, snapshot.status == measured, snapshot.status != closed
+}
+
+func tcpMetadataConn(conn net.Conn) syscall.RawConn {
+	_, raw := N.SyscallConnForRead(conn)
+	if raw != nil {
+		return raw
+	}
+	// SFA's trackedConn implements syscall.Conn, but its method returns an
+	// error when the immediate upstream is a deferred TFO wrapper. The read
+	// helper stops there. For metadata only, follow the wrappers to the live
+	// socket, without reading data or initiating a deferred connection.
+	for depth := 0; conn != nil && depth < 8; depth++ {
+		if reader, ok := conn.(N.ReaderWithUpstream); !ok || !reader.ReaderReplaceable() {
+			break
+		}
+		upstream, ok := conn.(common.WithUpstream)
+		if !ok {
+			break
+		}
+		conn, _ = upstream.Upstream().(net.Conn)
+		if socket, ok := conn.(syscall.Conn); ok {
+			raw, err := socket.SyscallConn()
+			if err == nil && raw != nil {
+				return raw
+			}
+		}
+	}
+	return nil
 }

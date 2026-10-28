@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"syscall"
 	"testing"
 
 	"github.com/sagernet/sing-snell/internal/reuse"
@@ -15,6 +17,30 @@ import (
 )
 
 func BenchmarkReadyPoolCheckout(b *testing.B) {
+	benchmarkReadyPoolCheckout(b, false)
+}
+
+func BenchmarkTrackedTFOPoolCheckout(b *testing.B) {
+	benchmarkReadyPoolCheckout(b, true)
+}
+
+type benchDeferredConn struct{ net.Conn }
+
+func (c benchDeferredConn) Upstream() any           { return c.Conn }
+func (c benchDeferredConn) ReaderReplaceable() bool { return true }
+
+type benchTrackedConn struct{ net.Conn }
+
+func (c benchTrackedConn) Upstream() any           { return c.Conn }
+func (c benchTrackedConn) ReaderReplaceable() bool { return true }
+func (c benchTrackedConn) SyscallConn() (syscall.RawConn, error) {
+	if socket, ok := c.Conn.(syscall.Conn); ok {
+		return socket.SyscallConn()
+	}
+	return nil, os.ErrInvalid
+}
+
+func benchmarkReadyPoolCheckout(b *testing.B, wrapped bool) {
 	for _, size := range []int{1, 10} {
 		b.Run(fmt.Sprint(size), func(b *testing.B) {
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -37,6 +63,9 @@ func BenchmarkReadyPoolCheckout(b *testing.B) {
 					b.Fatal(err)
 				}
 				defer peer.Close()
+				if wrapped {
+					conn = benchTrackedConn{benchDeferredConn{conn}}
+				}
 				session := client.newReuseSession(conn)
 				session.state.Store(uint32(reuse.StateActive))
 				session.Release(true)
