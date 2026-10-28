@@ -30,3 +30,21 @@ throughput guarantee. Queued data and other kernel clamps can reduce that
 window. Queries happen at pool transitions only. Capacity, idle expiration,
 active-session ownership and automatic TCP receive tuning are unchanged;
 no prewarming traffic, keepalives, periodic queries or buffer locks are added.
+
+# Reject closed Snell v6 transports before reuse
+
+The client response decoder keeps a physical EOF distinct from Snell's logical
+zero-length EOF record. A closed or truncated TCP stream therefore cannot mark
+an active/draining session ready for a later request. On Linux and Android,
+shared-pool checkout also rejects sockets whose TCP_INFO state is no longer
+ESTABLISHED. State and receive-window hint share the existing TCP_INFO query;
+no extra syscall or network probe is added. The check preserves application
+bytes and deadlines. Normal
+logical EOF still permits reuse; other platforms retain their existing idle
+transport selection. No application request is replayed after a failed write.
+
+Regression tests exercise scalar, buffer, read-waiter and drain paths after a
+physical EOF, plus a real loopback TCP peer that sends FIN after a valid logical
+EOF. Existing hello-framing and sequential-reuse tests remain the controls.
+A close racing after checkout can still fail the current request; the change
+prevents reuse of a transport already known to be closed.

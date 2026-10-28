@@ -69,6 +69,7 @@ func releaseResponseReader(reader reuse.RecordReader) {
 // Only client TCP responses use the buffered receive path. Packet and server
 // readers keep their existing constructors and buffer lifetime contracts.
 func readFirstResponse(conn io.Reader, mode Mode, psk []byte, profile *Profile, options N.ReadWaitOptions) (reuse.RecordReader, *buf.Buffer, error) {
+	conn = responseTransportReader{conn}
 	if mode != ModeDefault {
 		return readFirstRecord(conn, mode, psk, profile, options)
 	}

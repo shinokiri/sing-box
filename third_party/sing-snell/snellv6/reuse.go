@@ -127,6 +127,10 @@ func (s *reuseSession) ReceiveThreshold() (uint32, bool) {
 	return reuse.TCPReceiveThreshold(s.Conn)
 }
 
+func (s *reuseSession) ReceiveState() (uint32, bool, bool) {
+	return reuse.TCPReceiveState(s.Conn)
+}
+
 func (s *reuseSession) DialConn(destination M.Socksaddr) (net.Conn, error) {
 	state := reuse.State(s.state.Load())
 	if state == reuse.StateClosed {

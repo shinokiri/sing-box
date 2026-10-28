@@ -44,11 +44,23 @@ type receiveThresholdSession interface {
 	ReceiveThreshold() (uint32, bool)
 }
 
+type receiveStateSession interface {
+	ReceiveState() (threshold uint32, measured bool, reusable bool)
+}
+
 func receiveThreshold(session Session) (uint32, bool) {
 	if measured, ok := session.(receiveThresholdSession); ok {
 		return measured.ReceiveThreshold()
 	}
 	return 0, false
+}
+
+func receiveState(session Session) (uint32, bool, bool) {
+	if measured, ok := session.(receiveStateSession); ok {
+		return measured.ReceiveState()
+	}
+	threshold, measured := receiveThreshold(session)
+	return threshold, measured, true
 }
 
 type poolEntry[S Session] struct {
@@ -108,7 +120,13 @@ func (p *Pool[S]) Take() (session S, found bool, closed bool) {
 				continue
 			}
 			if state == StateReady {
-				value, available := receiveThreshold(entry.session)
+				value, available, reusable := receiveState(entry.session)
+				if !reusable {
+					p.entries.Remove(element)
+					expired = append(expired, entry.session)
+					element = next
+					continue
+				}
 				if selected == nil || (measured && available && value > threshold) {
 					selected, threshold, measured = element, value, available
 				}
