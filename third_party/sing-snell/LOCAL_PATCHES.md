@@ -40,7 +40,8 @@ shared-pool checkout also rejects sockets whose TCP_INFO state is no longer
 ESTABLISHED. State and receive-window hint share one TCP_INFO query. Existing
 queries are reused where the socket was already accessible. The metadata
 lookup also follows replaceable tracked/deferred-TFO wrappers when an outer
-SyscallConn method cannot reach their socket; those paths previously skipped
+SyscallConn method cannot reach their socket, including traffic-counter wrappers
+without modifying their accounting; those paths previously skipped
 the receive-window query entirely. Non-replaceable and unopened transports
 retain their fallback behavior. No network probe is added, and application
 bytes and deadlines are preserved. Normal logical EOF still permits reuse;

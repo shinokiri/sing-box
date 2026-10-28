@@ -9,6 +9,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sagernet/sing/common/bufio"
+	N "github.com/sagernet/sing/common/network"
 )
 
 // Match the syscall/Upstream behavior of SFA trackedConn over slowOpenConn
@@ -46,9 +49,13 @@ func TestTCPReceiveStateThroughDeferredTFOTracking(t *testing.T) {
 	}
 	defer peer.Close()
 	_ = client.SetDeadline(time.Now().Add(time.Second))
-	wrapped := metadataTrackedConn{metadataDeferredConn{client}}
-	if _, measured, reusable := TCPReceiveState(wrapped); !measured || !reusable {
-		t.Fatal("healthy wrapped TCP socket was not measured", measured, reusable)
+	tracked := metadataTrackedConn{metadataDeferredConn{client}}
+	var counted int64
+	counter := bufio.NewCounterConn(tracked, []N.CountFunc{func(n int64) { counted += n }}, nil)
+	for _, wrapped := range []net.Conn{tracked, counter} {
+		if _, measured, reusable := TCPReceiveState(wrapped); !measured || !reusable {
+			t.Fatal("healthy wrapped TCP socket was not measured", measured, reusable)
+		}
 	}
 	if err := peer.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatal(err)
@@ -56,7 +63,12 @@ func TestTCPReceiveStateThroughDeferredTFOTracking(t *testing.T) {
 	if n, err := client.Read(make([]byte, 1)); n != 0 || err != io.EOF {
 		t.Fatal("expected peer FIN", n, err)
 	}
-	if _, _, reusable := TCPReceiveState(wrapped); reusable {
-		t.Fatal("FIN-closed wrapped TCP socket was reported reusable")
+	for _, wrapped := range []net.Conn{tracked, counter} {
+		if _, _, reusable := TCPReceiveState(wrapped); reusable {
+			t.Fatal("FIN-closed wrapped TCP socket was reported reusable")
+		}
+	}
+	if counted != 0 {
+		t.Fatal("metadata query changed traffic accounting", counted)
 	}
 }

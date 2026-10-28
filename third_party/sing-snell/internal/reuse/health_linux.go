@@ -56,14 +56,20 @@ func tcpMetadataConn(conn net.Conn) syscall.RawConn {
 	// helper stops there. For metadata only, follow the wrappers to the live
 	// socket, without reading data or initiating a deferred connection.
 	for depth := 0; conn != nil && depth < 8; depth++ {
-		if reader, ok := conn.(N.ReaderWithUpstream); !ok || !reader.ReaderReplaceable() {
-			break
+		if counter, ok := conn.(N.ReadCounter); ok {
+			// Metadata consumes no bytes, so counters must remain untouched.
+			upstream, _ := counter.UnwrapReader()
+			conn, _ = upstream.(net.Conn)
+		} else {
+			if reader, ok := conn.(N.ReaderWithUpstream); !ok || !reader.ReaderReplaceable() {
+				break
+			}
+			upstream, ok := conn.(common.WithUpstream)
+			if !ok {
+				break
+			}
+			conn, _ = upstream.Upstream().(net.Conn)
 		}
-		upstream, ok := conn.(common.WithUpstream)
-		if !ok {
-			break
-		}
-		conn, _ = upstream.Upstream().(net.Conn)
 		if socket, ok := conn.(syscall.Conn); ok {
 			raw, err := socket.SyscallConn()
 			if err == nil && raw != nil {

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sagernet/sing-snell/internal/reuse"
+	"github.com/sagernet/sing/common/bufio"
 	N "github.com/sagernet/sing/common/network"
 )
 
@@ -64,7 +65,7 @@ func benchmarkReadyPoolCheckout(b *testing.B, wrapped bool) {
 				}
 				defer peer.Close()
 				if wrapped {
-					conn = benchTrackedConn{benchDeferredConn{conn}}
+					conn = bufio.NewCounterConn(benchTrackedConn{benchDeferredConn{conn}}, nil, nil)
 				}
 				session := client.newReuseSession(conn)
 				session.state.Store(uint32(reuse.StateActive))
