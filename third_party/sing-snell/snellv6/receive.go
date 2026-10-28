@@ -69,9 +69,8 @@ func releaseResponseReader(reader reuse.RecordReader) {
 // Only client TCP responses use the buffered receive path. Packet and server
 // readers keep their existing constructors and buffer lifetime contracts.
 func readFirstResponse(conn io.Reader, mode Mode, psk []byte, profile *Profile, options N.ReadWaitOptions) (reuse.RecordReader, *buf.Buffer, error) {
-	conn = responseTransportReader{conn}
 	if mode != ModeDefault {
-		return readFirstRecord(conn, mode, psk, profile, options)
+		return readFirstRecord(responseTransportReader{conn}, mode, psk, profile, options)
 	}
 	r := newBufferedShapedReader(conn, psk, profile)
 	r.InitializeReadWaiter(options)
@@ -118,7 +117,7 @@ func (r *bufferedShapedReader) ensure(required int) error {
 	front := r.readWaitOptions.FrontHeadroom
 	if r.block == nil {
 		if r.pendingErr != nil {
-			return r.pendingErr
+			return transportReadError(r.pendingErr)
 		}
 		r.block = buf.NewSize(max(r.capacityFor(required), r.transferCapacity))
 		r.block.Resize(0, front)
@@ -163,7 +162,7 @@ func (r *bufferedShapedReader) ensure(required int) error {
 			if errors.Is(r.pendingErr, io.EOF) && r.block.Len() > r.position {
 				return io.ErrUnexpectedEOF
 			}
-			return r.pendingErr
+			return transportReadError(r.pendingErr)
 		}
 		remaining := required - (r.block.Len() - r.position)
 		limit := remaining
