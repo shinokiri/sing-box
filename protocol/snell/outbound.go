@@ -56,13 +56,24 @@ type snellClient interface {
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SnellOutboundOptions) (adapter.Outbound, error) {
+	if options.CellularTFOCompat {
+		if options.Version != 6 || !options.HelloFraming || !options.TCPFastOpen {
+			return nil, E.New("snell: cellular_tfo_compat requires version 6, hello_framing and tcp_fast_open")
+		}
+		if options.Detour != "" {
+			return nil, E.New("snell: cellular_tfo_compat requires a direct connection to the paired relay")
+		}
+	}
 	if options.HelloInitialSYNDataLimit != 0 && !options.HelloFraming {
 		return nil, E.New("snell: hello_initial_syn_data_limit requires hello_framing")
 	}
 	if options.HelloFraming && options.Version != 6 {
 		return nil, E.New("snell: hello_framing requires version 6")
 	}
-	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
+	outboundDialer, err := dialer.NewWithOptions(dialer.Options{
+		Context: ctx, Options: options.DialerOptions, RemoteIsDomain: options.ServerIsDomain(),
+		CellularTFOCompat: options.CellularTFOCompat,
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -34,6 +34,12 @@ type HelloFrameInfo struct {
 	Budget, WireBytes, OriginalBytes, InitialWriteBytes int
 	Mode                                                int
 	BudgetSource                                        string
+	CellularTFOCompat                                   bool
+}
+
+type helloCapacityKey struct {
+	endpoint string
+	network  uint64
 }
 
 type helloCapacity struct {
@@ -56,7 +62,7 @@ type HelloTransport struct {
 	initialSYNDataLimit int
 	mu                  sync.Mutex
 	generation          uint64
-	capacities          map[string]helloCapacity
+	capacities          map[helloCapacityKey]helloCapacity
 	now                 func() time.Time
 	// OnFirstFrame must be configured before using the transport.
 	OnFirstFrame func(HelloFrameInfo)
@@ -73,7 +79,7 @@ func NewHelloTransportWithOptions(psk []byte, options HelloTransportOptions) (*H
 	if n := options.InitialSYNDataLimit; n != 0 && (n < helloMinBudget || n > helloMaxBudget) {
 		return nil, fmt.Errorf("snell: initial SYN data limit must be zero or %d..%d", helloMinBudget, helloMaxBudget)
 	}
-	return &HelloTransport{codec: newHelloRecordCodec(psk), initialSYNDataLimit: options.InitialSYNDataLimit, capacities: make(map[string]helloCapacity), now: time.Now}, nil
+	return &HelloTransport{codec: newHelloRecordCodec(psk), initialSYNDataLimit: options.InitialSYNDataLimit, capacities: make(map[helloCapacityKey]helloCapacity), now: time.Now}, nil
 }
 
 func (t *HelloTransport) initialBudget(endpoint string) (int, string) {
@@ -155,7 +161,7 @@ func helloEndpoint(conn net.Conn, fallback string) string {
 	return fallback
 }
 
-func (t *HelloTransport) remember(endpoint string, generation uint64, capacity int) bool {
+func (t *HelloTransport) remember(endpoint string, generation, network uint64, capacity int) bool {
 	if capacity < 86 {
 		return false
 	}
@@ -166,31 +172,32 @@ func (t *HelloTransport) remember(endpoint string, generation uint64, capacity i
 		return false
 	}
 	now := t.now()
-	if previous, ok := t.capacities[endpoint]; ok && previous.expires.After(now) {
+	key := helloCapacityKey{endpoint, network}
+	if previous, ok := t.capacities[key]; ok && previous.expires.After(now) {
 		capacity = min(capacity, previous.bytes)
 	}
-	if _, exists := t.capacities[endpoint]; !exists && len(t.capacities) >= helloCacheSize {
-		var oldest string
+	if _, exists := t.capacities[key]; !exists && len(t.capacities) >= helloCacheSize {
+		var oldest helloCapacityKey
 		var expiry time.Time
 		for key, entry := range t.capacities {
-			if oldest == "" || entry.expires.Before(expiry) {
+			if oldest.endpoint == "" || entry.expires.Before(expiry) {
 				oldest, expiry = key, entry.expires
 			}
 		}
 		delete(t.capacities, oldest)
 	}
-	t.capacities[endpoint] = helloCapacity{bytes: capacity, expires: now.Add(helloCacheTTL)}
+	t.capacities[key] = helloCapacity{bytes: capacity, expires: now.Add(helloCacheTTL)}
 	return true
 }
 
-func (t *HelloTransport) budget(conn net.Conn, endpoint string, generation uint64) (int, string) {
+func (t *HelloTransport) budget(conn net.Conn, endpoint string, generation, network uint64) (int, string) {
 	negotiated, routeLimit := helloSocketCapacity(conn)
 	if negotiated > 0 {
-		t.remember(endpoint, generation, negotiated)
+		t.remember(endpoint, generation, network, negotiated)
 		return min(negotiated, helloMaxBudget), "negotiated"
 	}
 	t.mu.Lock()
-	entry, found := t.capacities[endpoint]
+	entry, found := t.capacities[helloCapacityKey{endpoint, network}]
 	valid := generation == t.generation && found && entry.expires.After(t.now())
 	t.mu.Unlock()
 	budget, source := t.initialBudget(endpoint)
@@ -220,6 +227,8 @@ type helloConn struct {
 	firstBudget       int
 	firstBudgetSource string
 	firstCipher       *helloCipherHint
+	firstNetwork      atomic.Uint64
+	cellularTFO       bool
 }
 
 // Reuse only the cipher prepared by this connection's own shaped handshake.
@@ -250,9 +259,26 @@ func helloFirstRecordCipher(upstream any, psk, salt []byte, aead cipher.AEAD) {
 // authenticated record has already been sealed. Call with c.mu held.
 func (c *helloConn) firstFrameBudget() (int, string) {
 	if c.firstBudget == 0 {
-		c.firstBudget, c.firstBudgetSource = c.transport.budget(c.Conn, c.endpoint, c.generation)
+		compat, network := helloPrepareTFO(c.Conn)
+		c.cellularTFO = compat
+		c.firstNetwork.Store(network)
+		c.firstBudget, c.firstBudgetSource = c.transport.budget(c.Conn, c.endpoint, c.generation, network)
 	}
 	return c.firstBudget, c.firstBudgetSource
+}
+
+func helloPrepareTFO(upstream any) (bool, uint64) {
+	for depth := 0; upstream != nil && depth < 8; depth++ {
+		if preparer, ok := upstream.(interface{ PrepareTFO() (bool, uint64) }); ok {
+			return preparer.PrepareTFO()
+		}
+		wrapper, ok := upstream.(common.WithUpstream)
+		if !ok {
+			break
+		}
+		upstream = wrapper.Upstream()
+	}
+	return false, 0
 }
 
 // Only the first shaped record on a new carrier connection uses this limit.
@@ -295,7 +321,7 @@ func helloFirstRecordLimit(upstream any, payload []byte) int {
 
 func (c *helloConn) observe() {
 	if capacity, _ := helloSocketCapacity(c.Conn); capacity >= 86 {
-		c.transport.remember(c.endpoint, c.generation, capacity)
+		c.transport.remember(c.endpoint, c.generation, c.firstNetwork.Load(), capacity)
 		// An older connection must not repopulate a new network's cache, but
 		// it also must not keep polling TCP_INFO on every subsequent read.
 		c.observed.Store(true)
@@ -329,6 +355,9 @@ func (c *helloConn) writeLocked(p []byte) (int, error) {
 	if err != nil {
 		return c.fail(0, err)
 	}
+	if c.cellularTFO {
+		copy(wire[11:19], "CTFO\x01\x00\x00\x00")
+	}
 	if len(wire) > budget {
 		return c.fail(0, fmt.Errorf("snell: hello exceeds selected SYN capacity"))
 	}
@@ -352,7 +381,7 @@ func (c *helloConn) writeLocked(p []byte) (int, error) {
 	c.vectorised = bufio.NewVectorisedWriter(c.Conn)
 	c.sent.Store(true)
 	if report := c.transport.OnFirstFrame; report != nil {
-		report(HelloFrameInfo{Budget: budget, WireBytes: len(wire), OriginalBytes: take, InitialWriteBytes: len(p), Mode: mode, BudgetSource: source})
+		report(HelloFrameInfo{Budget: budget, WireBytes: len(wire), OriginalBytes: take, InitialWriteBytes: len(p), Mode: mode, BudgetSource: source, CellularTFOCompat: c.cellularTFO})
 	}
 	return len(p), nil
 }

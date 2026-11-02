@@ -19,19 +19,21 @@ import (
 )
 
 type slowOpenConn struct {
-	dialer      *tfo.Dialer
-	prepare     func() *tfo.Dialer
-	ctx         context.Context
-	cancel      context.CancelFunc
-	netns       string
-	network     string
-	destination M.Socksaddr
-	conn        atomic.Pointer[net.TCPConn]
-	create      chan struct{}
-	done        chan struct{}
-	access      sync.Mutex
-	closeOnce   sync.Once
-	err         error
+	dialer         *tfo.Dialer
+	prepare        func() *networkTFOChoice
+	networkHandle  uint64
+	cellularCompat bool
+	ctx            context.Context
+	cancel         context.CancelFunc
+	netns          string
+	network        string
+	destination    M.Socksaddr
+	conn           atomic.Pointer[net.TCPConn]
+	create         chan struct{}
+	done           chan struct{}
+	access         sync.Mutex
+	closeOnce      sync.Once
+	err            error
 }
 
 func DialSlowContext(dialer *tfo.Dialer, ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -50,7 +52,7 @@ func dialSlowContext(dialer *tfo.Dialer, ctx context.Context, network string, de
 	return newSlowOpenConn(dialer, ctx, network, destination, netns, nil), nil
 }
 
-func newSlowOpenConn(dialer *tfo.Dialer, ctx context.Context, network string, destination M.Socksaddr, netns string, prepare func() *tfo.Dialer) *slowOpenConn {
+func newSlowOpenConn(dialer *tfo.Dialer, ctx context.Context, network string, destination M.Socksaddr, netns string, prepare func() *networkTFOChoice) *slowOpenConn {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	return &slowOpenConn{
 		dialer:      dialer,
@@ -62,6 +64,31 @@ func newSlowOpenConn(dialer *tfo.Dialer, ctx context.Context, network string, de
 		destination: destination,
 		create:      make(chan struct{}),
 		done:        make(chan struct{}),
+	}
+}
+
+// PrepareTFO freezes the network before a carrier constructs its first frame.
+// Write consumes this exact choice, even if a network event arrives in between.
+// The handle also scopes peer-MSS observations to their actual network.
+func (c *slowOpenConn) PrepareTFO() (cellularCompat bool, networkHandle uint64) {
+	c.access.Lock()
+	defer c.access.Unlock()
+	select {
+	case <-c.done:
+		return false, 0
+	default:
+	}
+	c.prepareLocked()
+	return c.cellularCompat, c.networkHandle
+}
+
+func (c *slowOpenConn) prepareLocked() {
+	if c.prepare != nil {
+		choice := c.prepare()
+		c.dialer = &choice.Dialer
+		c.cellularCompat = choice.cellularCompat
+		c.networkHandle = choice.networkHandle
+		c.prepare = nil
 	}
 }
 
@@ -100,11 +127,8 @@ func (c *slowOpenConn) Write(b []byte) (n int, err error) {
 	}
 	// TFO opens the socket on the first write, so enter the namespace here.
 	conn, err := listener.ListenNetworkNamespace[net.Conn](c.ctx, c.netns, func() (net.Conn, error) {
-		dialer := c.dialer
-		if c.prepare != nil {
-			dialer = c.prepare()
-		}
-		return dialer.DialContext(c.ctx, c.network, c.destination.String(), b)
+		c.prepareLocked()
+		return c.dialer.DialContext(c.ctx, c.network, c.destination.String(), b)
 	})
 	if err == nil {
 		c.conn.Store(conn.(*net.TCPConn))

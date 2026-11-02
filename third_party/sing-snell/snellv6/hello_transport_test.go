@@ -132,28 +132,28 @@ func TestHelloCapacityGenerationExpiryAndPeerIsolation(t *testing.T) {
 	clock := time.Unix(1, 0)
 	transport.now = func() time.Time { return clock }
 	raw := new(helloMemoryConn)
-	if size, source := transport.budget(raw, "v4-peer", 0); size != helloColdBudget || source != "cold_estimate" {
+	if size, source := transport.budget(raw, "v4-peer", 0, 0); size != helloColdBudget || source != "cold_estimate" {
 		t.Fatal(size, source)
 	}
-	if !transport.remember("v4-peer", 0, 1292) || !transport.remember("v6-peer", 0, 1392) {
+	if !transport.remember("v4-peer", 0, 0, 1292) || !transport.remember("v6-peer", 0, 0, 1392) {
 		t.Fatal("remember failed")
 	}
-	if size, _ := transport.budget(raw, "v4-peer", 0); size != 1292 {
+	if size, _ := transport.budget(raw, "v4-peer", 0, 0); size != 1292 {
 		t.Fatal(size)
 	}
-	if size, _ := transport.budget(raw, "v6-peer", 0); size != 1392 {
+	if size, _ := transport.budget(raw, "v6-peer", 0, 0); size != 1392 {
 		t.Fatal(size)
 	}
 	transport.Reset()
-	if transport.remember("v4-peer", 0, 1292) {
+	if transport.remember("v4-peer", 0, 0, 1292) {
 		t.Fatal("old connection contaminated new network")
 	}
-	if size, _ := transport.budget(raw, "v4-peer", 1); size != helloColdBudget {
+	if size, _ := transport.budget(raw, "v4-peer", 1, 0); size != helloColdBudget {
 		t.Fatal(size)
 	}
-	transport.remember("v4-peer", 1, 1292)
+	transport.remember("v4-peer", 1, 0, 1292)
 	clock = clock.Add(helloCacheTTL + time.Second)
-	if size, _ := transport.budget(raw, "v4-peer", 1); size != helloColdBudget {
+	if size, _ := transport.budget(raw, "v4-peer", 1, 0); size != helloColdBudget {
 		t.Fatal("expired capacity reused", size)
 	}
 }
@@ -266,12 +266,12 @@ func TestHelloInitialLimitDoesNotOverrideObservation(t *testing.T) {
 	}
 	transport, _ := NewHelloTransportWithOptions(helloTestPSK, HelloTransportOptions{InitialSYNDataLimit: 1200})
 	raw := new(helloMemoryConn)
-	transport.remember("192.0.2.1:443", 0, 400)
-	if n, source := transport.budget(raw, "192.0.2.1:443", 0); n != 400 || source != "observed_peer" {
+	transport.remember("192.0.2.1:443", 0, 0, 400)
+	if n, source := transport.budget(raw, "192.0.2.1:443", 0, 0); n != 400 || source != "observed_peer" {
 		t.Fatal("ignored lower observed limit", n, source)
 	}
 	transport.Reset()
-	if n, source := transport.budget(raw, "192.0.2.1:443", 1); n != 1200 || source != "configured_initial_limit" {
+	if n, source := transport.budget(raw, "192.0.2.1:443", 1, 0); n != 1200 || source != "configured_initial_limit" {
 		t.Fatal("reset converted assumption into observation", n, source)
 	}
 	defaults, _ := NewHelloTransport(helloTestPSK)

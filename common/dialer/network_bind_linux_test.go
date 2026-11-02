@@ -24,8 +24,8 @@ import (
 
 func setTestNetworkBinder(d *DefaultDialer, options option.DialerOptions, bind networkBinder) {
 	d.bindNetwork = bind
-	d.selectTFO4 = newNetworkTFOSelector(&d.dialer4, d.networkManager, options, bind)
-	d.selectTFO6 = newNetworkTFOSelector(&d.dialer6, d.networkManager, options, bind)
+	d.selectTFO4 = newNetworkTFOSelector(&d.dialer4, d.networkManager, options, bind, false)
+	d.selectTFO6 = newNetworkTFOSelector(&d.dialer6, d.networkManager, options, bind, false)
 }
 
 func socketMark(t *testing.T, conn net.Conn) uint64 {

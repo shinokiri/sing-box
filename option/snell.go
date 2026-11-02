@@ -81,6 +81,7 @@ type AbstractSnellOutboundOptions struct {
 	UserKey                  string      `json:"userkey,omitempty"`
 	Reuse                    bool        `json:"reuse,omitempty"`
 	HelloFraming             bool        `json:"hello_framing,omitempty"`
+	CellularTFOCompat        bool        `json:"cellular_tfo_compat,omitempty"`
 	HelloInitialSYNDataLimit int         `json:"hello_initial_syn_data_limit,omitempty"`
 	UDPFlow                  bool        `json:"udp_flow,omitempty"`
 	Network                  NetworkList `json:"network,omitempty"`

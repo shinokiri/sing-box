@@ -53,11 +53,15 @@ type DefaultDialer struct {
 	networkLastFallback    common.TypedValue[time.Time]
 	androidTFO             bool
 	bindNetwork            networkBinder
-	selectTFO4             func() *tfo.Dialer
-	selectTFO6             func() *tfo.Dialer
+	selectTFO4             func() *networkTFOChoice
+	selectTFO6             func() *networkTFOChoice
 }
 
 func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDialer, error) {
+	return newDefault(ctx, options, false)
+}
+
+func newDefault(ctx context.Context, options option.DialerOptions, cellularCompat bool) (*DefaultDialer, error) {
 	connectionManager := service.FromContext[adapter.ConnectionManager](ctx)
 	networkManager := service.FromContext[adapter.NetworkManager](ctx)
 	platformInterface := service.FromContext[adapter.PlatformInterface](ctx)
@@ -266,8 +270,8 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 		result.bindNetwork = bindAndroidNetwork
 	}
 	if options.TCPFastOpen && platformInterface != nil && platformInterface.UsePlatformNetworkInterfaces() {
-		result.selectTFO4 = newNetworkTFOSelector(&result.dialer4, networkManager, options, result.bindNetwork)
-		result.selectTFO6 = newNetworkTFOSelector(&result.dialer6, networkManager, options, result.bindNetwork)
+		result.selectTFO4 = newNetworkTFOSelector(&result.dialer4, networkManager, options, result.bindNetwork, cellularCompat)
+		result.selectTFO6 = newNetworkTFOSelector(&result.dialer6, networkManager, options, result.bindNetwork, cellularCompat)
 	}
 	return result, nil
 }

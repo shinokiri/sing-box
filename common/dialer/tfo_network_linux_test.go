@@ -105,8 +105,8 @@ func newNetworkTFODialer(ctx context.Context, options option.DialerOptions) (*De
 	}
 	dialer.androidTFO = true
 	dialer.bindNetwork = testNetworkBind
-	dialer.selectTFO4 = newNetworkTFOSelector(&dialer.dialer4, dialer.networkManager, options, dialer.bindNetwork)
-	dialer.selectTFO6 = newNetworkTFOSelector(&dialer.dialer6, dialer.networkManager, options, dialer.bindNetwork)
+	dialer.selectTFO4 = newNetworkTFOSelector(&dialer.dialer4, dialer.networkManager, options, dialer.bindNetwork, false)
+	dialer.selectTFO6 = newNetworkTFOSelector(&dialer.dialer6, dialer.networkManager, options, dialer.bindNetwork, false)
 	return dialer, nil
 }
 
@@ -385,7 +385,7 @@ func BenchmarkPlatformTFONetworkPolicy(b *testing.B) {
 			manager := &tfoNetworkManager{}
 			manager.tfoState.Store(adapter.NewNetworkTFOState(1, []adapter.NetworkInterface{{Interface: iif, Type: kind, NetworkHandle: 1}}))
 			dialer := &DefaultDialer{networkManager: manager}
-			selectDialer := newNetworkTFOSelector(&dialer.dialer4, manager, option.DialerOptions{}, testNetworkBind)
+			selectDialer := newNetworkTFOSelector(&dialer.dialer4, manager, option.DialerOptions{}, testNetworkBind, false)
 			b.ReportAllocs()
 			for b.Loop() {
 				selected := selectDialer()
