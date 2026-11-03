@@ -29,12 +29,18 @@ func (d *DefaultDialer) dialSlowContext(base *tfo.Dialer, ctx context.Context, n
 // Keep one prepared choice per address family. The steady-state first-write
 // selection does not allocate or enumerate interfaces. A changed selection
 // creates an immutable dialer whose TFO policy and binding use the same handle.
-func newNetworkTFOSelector(base *tfo.Dialer, manager adapter.NetworkManager, options option.DialerOptions, bind networkBinder) func() *tfo.Dialer {
-	ordinary := *base
+type networkTFOChoice struct {
+	tfo.Dialer
+	networkHandle  uint64
+	cellularCompat bool
+}
+
+func newNetworkTFOSelector(base *tfo.Dialer, manager adapter.NetworkManager, options option.DialerOptions, bind networkBinder, cellularCompat bool) func() *networkTFOChoice {
+	ordinary := networkTFOChoice{Dialer: *base}
 	ordinary.DisableTFO = true
 	provider, ok := manager.(adapter.NetworkTFOProvider)
 	if !ok || bind == nil || options.NetNs != "" || options.RoutingMark != 0 || manager.DefaultOptions().RoutingMark != 0 {
-		return func() *tfo.Dialer { return &ordinary }
+		return func() *networkTFOChoice { return &ordinary }
 	}
 	bindInterface := options.BindInterface
 	if bindInterface == "" && options.Inet4BindAddress == nil && options.Inet6BindAddress == nil {
@@ -47,10 +53,10 @@ func newNetworkTFOSelector(base *tfo.Dialer, manager adapter.NetworkManager, opt
 	}
 	type choice struct {
 		selection adapter.NetworkTFOSelection
-		dialer    tfo.Dialer
+		dialer    networkTFOChoice
 	}
 	var cached atomic.Pointer[choice]
-	return func() *tfo.Dialer {
+	return func() *networkTFOChoice {
 		selection := provider.NetworkTFOState().Select(bindInterface, localIP)
 		if selection.NetworkHandle == 0 {
 			// A default interface classification alone cannot establish which
@@ -60,8 +66,9 @@ func newNetworkTFOSelector(base *tfo.Dialer, manager adapter.NetworkManager, opt
 		if previous := cached.Load(); previous != nil && previous.selection == selection {
 			return &previous.dialer
 		}
-		next := &choice{selection: selection, dialer: *base}
-		next.dialer.DisableTFO = base.DisableTFO || !selection.Allowed
+		compat := cellularCompat && selection.Cellular && !base.DisableTFO
+		next := &choice{selection: selection, dialer: networkTFOChoice{Dialer: *base, networkHandle: selection.NetworkHandle, cellularCompat: compat}}
+		next.dialer.DisableTFO = base.DisableTFO || !(selection.Allowed || compat)
 		next.dialer.Control = control.Append(base.Control, networkControl(bind, selection.NetworkHandle))
 		cached.Store(next)
 		return &next.dialer

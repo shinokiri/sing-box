@@ -42,6 +42,8 @@ icon: material/new-box
   "udp_flow": false,
   "network": "tcp",
   "mode": "",
+  "hello_framing": false,
+  "cellular_tfo_compat": false,
 
   ... // Dial Fields
 }
@@ -125,6 +127,30 @@ The HTTP `Host` header sent when `obfs_mode` is `http`.
 Traffic shaping mode, one of `default` `unshaped` `unsafe-raw`.
 
 `default` is used by default.
+
+#### hello_framing
+
+Private Hello carrier for version 6 in `default` mode. Requires the paired
+Hello decoder at the receiver. This is not TLS and is not supported by an
+unmodified official Snell server.
+
+#### cellular_tfo_compat
+
+Enable the paired relay's SYN-ACK compatibility on Android cellular networks.
+Requires version 6, `hello_framing`, `tcp_fast_open`, and a direct outbound
+(no `detour`). Disabled by default. Install and verify the
+[relay adapter](../../../contrib/snell-tfo-compat/README.md) before enabling it.
+
+The first Hello marks the compatibility request only when the selected Android
+NetworkHandle is cellular. Framing and socket binding use the same immutable
+network selection. Wi-Fi retains native TFO; an unknown network keeps the
+ordinary TCP fallback. Non-Android platforms retain their existing TFO policy.
+The setting does not change established connections or Snell session reuse.
+
+The relay changes only the marked connection's SYN-ACK acknowledgment. The
+client resends the SYN prefix as ordinary data, which the receiver's TCP stack
+deduplicates. This adds a small bandwidth cost and may affect congestion-window
+use; it is not a promise of zero overhead or universal carrier compatibility.
 
 ### Dial Fields
 

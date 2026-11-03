@@ -87,7 +87,7 @@ func TestHelloCapacityLearnsFromReplyWithFIN(t *testing.T) {
 			if !wrapped.observed.Load() {
 				t.Fatal("negotiated capacity discarded after peer FIN")
 			}
-			learned, found := transport.capacities[wrapped.endpoint]
+			learned, found := transport.capacities[helloCapacityKey{endpoint: wrapped.endpoint}]
 			cold, _ := transport.initialBudget(wrapped.endpoint)
 			if !found || learned.bytes <= cold {
 				t.Fatalf("capacity not learned: found=%v bytes=%d cold=%d", found, learned.bytes, cold)

@@ -26,6 +26,8 @@ type Options struct {
 	DisableEmptyDirectCheck bool
 	DirectOutbound          bool
 	DefaultOutbound         bool
+	// Only a protocol carrying the explicit SYN-ACK compatibility marker may opt in.
+	CellularTFOCompat bool
 }
 
 // TODO: merge with NewWithOptions
@@ -57,7 +59,7 @@ func NewWithOptions(options Options) (N.Dialer, error) {
 		}
 		dialer = NewDefaultOutboundDetour(outboundManager)
 	} else {
-		dialer, err = NewDefault(options.Context, dialOptions)
+		dialer, err = newDefault(options.Context, dialOptions, options.CellularTFOCompat)
 		if err != nil {
 			return nil, err
 		}

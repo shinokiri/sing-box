@@ -22,6 +22,7 @@ type NetworkTFOState struct {
 type NetworkTFOSelection struct {
 	NetworkHandle uint64
 	Allowed       bool
+	Cellular      bool
 }
 
 func NewNetworkTFOState(defaultIndex int, interfaces []NetworkInterface) *NetworkTFOState {
@@ -34,7 +35,7 @@ func NewNetworkTFOState(defaultIndex int, interfaces []NetworkInterface) *Networ
 			continue
 		}
 		allowed := iif.Type == C.InterfaceTypeWIFI || iif.Type == C.InterfaceTypeEthernet || iif.Type == C.InterfaceTypeOther
-		selection := NetworkTFOSelection{NetworkHandle: iif.NetworkHandle, Allowed: allowed}
+		selection := NetworkTFOSelection{NetworkHandle: iif.NetworkHandle, Allowed: allowed, Cellular: iif.Type == C.InterfaceTypeCellular}
 		state.byInterface[iif.Name] = selection
 		if defaultIndex > 0 && iif.Index == defaultIndex {
 			state.defaultNetwork = selection
