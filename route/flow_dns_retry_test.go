@@ -38,6 +38,7 @@ func (d *retryFlowDNS) Lookup(context.Context, string, adapter.DNSQueryOptions) 
 }
 
 func (*retryFlowDNS) LookupReverseMapping(netip.Addr) (string, bool) { return "", false }
+func (*retryFlowDNS) LookupECHPublicName(string) string              { return "" }
 func (*retryFlowDNS) ExchangeAsync(_ context.Context, query *mDNS.Msg, _ adapter.DNSQueryOptions, callback func(*mDNS.Msg, error)) {
 	response := new(mDNS.Msg)
 	response.SetReply(query)

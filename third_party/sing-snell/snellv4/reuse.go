@@ -118,7 +118,7 @@ func (s *reuseSession) ReuseState() *atomic.Uint32 {
 }
 
 func (s *reuseSession) ReceiveThreshold() (uint32, bool) {
-	return reuse.TCPReceiveThreshold(s.Conn)
+	return reuse.TCPReceiveThreshold(s.transport.Conn)
 }
 
 func (s *reuseSession) DialConn(destination M.Socksaddr) (net.Conn, error) {

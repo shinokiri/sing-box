@@ -31,9 +31,7 @@ func (c *Client) DialContext(ctx context.Context, destination M.Socksaddr) (net.
 		if err != nil {
 			return nil, err
 		}
-		if snell.KeepSessionFromContext(ctx) {
-			session.keepOnce.Store(true)
-		}
+		session.keepOnce.Store(snell.KeepSessionFromContext(ctx))
 		conn, err := session.DialConn(destination)
 		if err != nil {
 			session.Close()
@@ -286,6 +284,9 @@ func (c *reuseConn) Read(p []byte) (int, error) {
 	if c.closed.Load() {
 		return 0, net.ErrClosed
 	}
+	if c.readClosed.Load() {
+		return 0, io.EOF
+	}
 	c.readActionCount.Add(1)
 	defer c.readActionCount.Add(-1)
 	if c.closed.Load() {
@@ -329,6 +330,9 @@ func (c *reuseConn) ReadBuffer(buffer *buf.Buffer) error {
 	defer c.session.receive.end(c.session.releaseReader)
 	if c.closed.Load() {
 		return net.ErrClosed
+	}
+	if c.readClosed.Load() {
+		return io.EOF
 	}
 	c.readActionCount.Add(1)
 	defer c.readActionCount.Add(-1)
@@ -432,14 +436,13 @@ func (c *reuseConn) Write(p []byte) (int, error) {
 	}
 	defer c.writeActionCount.Add(-1)
 	c.access.Lock()
+	defer c.access.Unlock()
 	if c.writeClosed {
 		return 0, net.ErrClosed
 	}
 	if c.writer != nil {
-		c.access.Unlock()
 		return c.writer.Write(p)
 	}
-	defer c.access.Unlock()
 	err := c.writeRequest(p)
 	if err != nil {
 		return 0, err
@@ -454,15 +457,14 @@ func (c *reuseConn) WriteBuffer(buffer *buf.Buffer) error {
 	}
 	defer c.writeActionCount.Add(-1)
 	c.access.Lock()
+	defer c.access.Unlock()
 	if c.writeClosed {
 		buffer.Release()
 		return net.ErrClosed
 	}
 	if c.writer != nil {
-		c.access.Unlock()
 		return c.writer.WriteBuffer(buffer)
 	}
-	defer c.access.Unlock()
 	return c.writeRequestBuffer(buffer)
 }
 
@@ -570,6 +572,7 @@ func (c *reuseConn) Close() error {
 			c.session.Release(false)
 			return
 		}
+		c.session.Conn.SetReadDeadline(time.Time{})
 		if c.session.urlTest != nil {
 			// crypto/tls.Close leaves the underlying write deadline expired
 			// after close_notify. The Snell EOF is a separate protocol write;
@@ -588,14 +591,17 @@ func (c *reuseConn) Close() error {
 				c.session.Release(false)
 				return
 			}
+		} else {
+			c.session.Conn.SetWriteDeadline(time.Time{})
 		}
 		c.closeErr = c.closeWrite()
 		if c.closeErr != nil {
 			c.session.Release(false)
 			return
 		}
-		c.session.Conn.SetReadDeadline(time.Time{})
-		c.session.Conn.SetWriteDeadline(time.Time{})
+		if c.session.urlTest != nil {
+			c.session.Conn.SetWriteDeadline(time.Time{})
+		}
 		if c.readClosed.Load() {
 			c.session.Release(true)
 			return
@@ -688,6 +694,9 @@ func (w *reuseReadWaiter) WaitReadBuffer() (*buf.Buffer, error) {
 	defer w.conn.session.receive.end(w.conn.session.releaseReader)
 	if w.conn.closed.Load() {
 		return nil, net.ErrClosed
+	}
+	if w.conn.readClosed.Load() {
+		return nil, io.EOF
 	}
 	w.conn.readActionCount.Add(1)
 	defer w.conn.readActionCount.Add(-1)
