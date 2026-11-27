@@ -2,6 +2,7 @@ package route
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -111,8 +112,10 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		remoteConn net.Conn
 		err        error
 	)
-	if len(metadata.DestinationAddresses) > 0 || metadata.Destination.IsIP() {
-		remoteConn, err = dialer.DialSerialNetwork(ctx, this, N.NetworkTCP, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+	if parallelDialer, isParallel := this.(dialer.ParallelNetworkDialer); isParallel {
+		remoteConn, err = parallelDialer.DialParallelNetwork(ctx, N.NetworkTCP, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+	} else if len(metadata.DestinationAddresses) > 0 {
+		remoteConn, err = N.DialSerial(ctx, this, N.NetworkTCP, metadata.Destination, metadata.DestinationAddresses)
 	} else {
 		remoteConn, err = this.DialContext(ctx, N.NetworkTCP, metadata.Destination)
 	}
@@ -128,7 +131,7 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 			dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 		}
 		err = E.Cause(err, "open connection to ", remoteString, dialerString)
-		m.deleteURLTestHistory(metadata.OutboundChain)
+		m.deleteURLTestHistory(metadata.OutboundChain, err)
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		m.logger.ErrorContext(ctx, err)
 		return
@@ -168,16 +171,23 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		}
 		remoteConn = spoofConn
 	}
-	serverFirst := sniff.Skip(&metadata)
-	clientFirst := !serverFirst && handshakeClientFirst(&metadata)
 	var done atomic.Bool
-	if m.kickWriteHandshake(ctx, conn, remoteConn, serverFirst, clientFirst, false, &done, onClose) {
+	if closed, _ := m.kickWriteHandshake(ctx, remoteConn, conn, false, true, &done, onClose); closed {
 		return
 	}
-	if m.kickWriteHandshake(ctx, remoteConn, conn, serverFirst, false, true, &done, onClose) {
+	waitPayload := !sniff.Skip(&metadata) && !E.IsTimeout(metadata.SniffError)
+	if writer, ok := common.Cast[N.EarlyPayloadWriter](remoteConn); ok {
+		waitPayload = waitPayload && writer.PreferEarlyPayload() && handshakeClientFirst(&metadata)
+	}
+	closed, sourceEOF := m.kickWriteHandshake(ctx, conn, remoteConn, waitPayload, false, &done, onClose)
+	if closed {
 		return
 	}
-	go m.connectionCopy(ctx, conn, remoteConn, false, &done, onClose)
+	if sourceEOF {
+		go m.finishConnectionCopy(ctx, conn, remoteConn, nil, false, &done, onClose)
+	} else {
+		go m.connectionCopy(ctx, conn, remoteConn, false, &done, onClose)
+	}
 	go m.connectionCopy(ctx, remoteConn, conn, true, &done, onClose)
 }
 
@@ -190,19 +200,10 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 		err                error
 	)
 	if metadata.UDPConnect {
-		parallelDialer, isParallelDialer := this.(dialer.ParallelInterfaceDialer)
-		if len(metadata.DestinationAddresses) > 0 {
-			if isParallelDialer {
-				remoteConn, err = dialer.DialSerialNetwork(ctx, parallelDialer, N.NetworkUDP, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
-			} else {
-				remoteConn, err = N.DialSerial(ctx, this, N.NetworkUDP, metadata.Destination, metadata.DestinationAddresses)
-			}
-		} else if metadata.Destination.IsIP() {
-			if isParallelDialer {
-				remoteConn, err = dialer.DialSerialNetwork(ctx, parallelDialer, N.NetworkUDP, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
-			} else {
-				remoteConn, err = this.DialContext(ctx, N.NetworkUDP, metadata.Destination)
-			}
+		if parallelDialer, isParallel := this.(dialer.ParallelNetworkDialer); isParallel {
+			remoteConn, err = parallelDialer.DialParallelNetwork(ctx, N.NetworkUDP, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+		} else if len(metadata.DestinationAddresses) > 0 {
+			remoteConn, err = N.DialSerial(ctx, this, N.NetworkUDP, metadata.Destination, metadata.DestinationAddresses)
 		} else {
 			remoteConn, err = this.DialContext(ctx, N.NetworkUDP, metadata.Destination)
 		}
@@ -218,7 +219,7 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 			}
 			err = E.Cause(err, "open packet connection to ", remoteString, dialerString)
-			m.deleteURLTestHistory(metadata.OutboundChain)
+			m.deleteURLTestHistory(metadata.OutboundChain, err)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
 			m.logger.ErrorContext(ctx, err)
 			return
@@ -229,8 +230,10 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			destinationAddress = connRemoteAddr
 		}
 	} else {
-		if len(metadata.DestinationAddresses) > 0 {
-			remotePacketConn, destinationAddress, err = dialer.ListenSerialNetworkPacket(ctx, this, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+		if parallelDialer, isParallel := this.(dialer.ParallelNetworkDialer); isParallel {
+			remotePacketConn, destinationAddress, err = parallelDialer.ListenSerialNetworkPacket(ctx, metadata.Destination, metadata.DestinationAddresses, metadata.NetworkStrategy, metadata.NetworkType, metadata.FallbackNetworkType, metadata.FallbackDelay)
+		} else if len(metadata.DestinationAddresses) > 0 {
+			remotePacketConn, destinationAddress, err = N.ListenSerial(ctx, this, metadata.Destination, metadata.DestinationAddresses)
 		} else if packetDialer, withDestination := this.(dialer.PacketDialerWithDestination); withDestination {
 			remotePacketConn, destinationAddress, err = packetDialer.ListenPacketWithDestination(ctx, metadata.Destination)
 		} else {
@@ -241,11 +244,14 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 			}
-			err = E.Cause(err, "listen packet connection using ", dialerString)
-			m.deleteURLTestHistory(metadata.OutboundChain)
+			err = E.Cause(err, "listen packet connection", dialerString)
+			m.deleteURLTestHistory(metadata.OutboundChain, err)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
 			m.logger.ErrorContext(ctx, err)
 			return
+		}
+		if destinationAddress == metadata.Destination.Addr {
+			destinationAddress = netip.Addr{}
 		}
 	}
 	err = N.ReportPacketConnHandshakeSuccess(conn, remotePacketConn)
@@ -301,17 +307,29 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 	go m.packetConnectionCopy(ctx, destination, conn, true, &done, onClose)
 }
 
-func (m *ConnectionManager) deleteURLTestHistory(chain []adapter.Outbound) {
-	if slices.ContainsFunc(chain, func(it adapter.Outbound) bool {
-		_, isURLTestGroup := it.(adapter.URLTestGroup)
-		return isURLTestGroup
-	}) {
-		m.urlTestHistory.DeleteURLTestHistory(chain[len(chain)-1].Tag())
+func (m *ConnectionManager) deleteURLTestHistory(chain []adapter.Outbound, err error) {
+	if E.IsClosedOrCanceled(err) {
+		return
+	}
+	urlTestGroups := common.FilterIsInstance(chain, func(it adapter.Outbound) (adapter.URLTestGroup, bool) {
+		group, isURLTestGroup := it.(adapter.URLTestGroup)
+		return group, isURLTestGroup
+	})
+	if len(urlTestGroups) == 0 {
+		return
+	}
+	m.urlTestHistory.DeleteURLTestHistory(chain[len(chain)-1].Tag())
+	for _, group := range slices.Backward(urlTestGroups) {
+		group.PerformUpdateCheck()
 	}
 }
 
 func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn, destination net.Conn, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {
 	_, err := bufio.CopyWithIncreateBuffer(destination, source, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
+	m.finishConnectionCopy(ctx, source, destination, err, direction, done, onClose)
+}
+
+func (m *ConnectionManager) finishConnectionCopy(ctx context.Context, source net.Conn, destination net.Conn, err error, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {
 	if err != nil {
 		common.Close(source, destination)
 	} else {
@@ -351,10 +369,6 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	}
 }
 
-// Only protocols known to speak first get an opportunity to provide early
-// application bytes. Unknown protocols (including SSH on custom ports) keep
-// their immediate empty handshake. A web-port hint is bounded by the usual
-// first-payload timeout in case that port hosts a server-first protocol.
 func handshakeClientFirst(metadata *adapter.InboundContext) bool {
 	if metadata.Protocol == C.ProtocolTLS || metadata.Protocol == C.ProtocolHTTP {
 		return true
@@ -362,71 +376,60 @@ func handshakeClientFirst(metadata *adapter.InboundContext) bool {
 	return metadata.Destination.Port == 80 || metadata.Destination.Port == 443
 }
 
-func readHandshakePayload(source net.Conn, reader io.Reader) (*buf.Buffer, error) {
-	if err := source.SetReadDeadline(time.Now().Add(C.ReadPayloadTimeout)); err != nil {
-		return nil, nil
-	}
-	buffer := buf.New()
-	n, err := buffer.ReadOnceFrom(reader)
-	_ = source.SetReadDeadline(time.Time{})
-	if n > 0 {
-		return buffer, nil
-	}
-	buffer.Release()
-	if E.IsTimeout(err) {
-		return nil, nil
-	}
-	return nil, err
-}
-
-func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.Conn, destination net.Conn, serverFirst bool, clientFirst bool, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) bool {
+func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.Conn, destination net.Conn, waitPayload bool, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) (bool, bool) {
 	if !N.NeedHandshakeForWrite(destination) {
-		return false
+		return false, false
 	}
+	sourceReader, readCounters := N.UnwrapCountReader(source, nil)
+	destinationWriter, writeCounters := N.UnwrapCountWriter(destination, nil)
 	var (
-		err          error
-		wrotePayload bool
+		payload   *buf.Buffer
+		sourceEOF bool
+		err       error
 	)
-	if serverFirst {
+	if cachedReader, ok := sourceReader.(N.CachedReader); ok {
+		payload = cachedReader.ReadCached()
+	}
+	if payload == nil && waitPayload && source.SetReadDeadline(time.Now().Add(C.ReadPayloadTimeout)) == nil {
+		sourceReader, readCounters = N.UnwrapCountReader(source, nil)
+		payload = buf.NewPacket()
+		_, err = payload.ReadOnceFrom(sourceReader)
+		_ = source.SetReadDeadline(time.Time{})
+		if errors.Is(err, io.EOF) {
+			sourceEOF = true
+			err = nil
+		} else if E.IsTimeout(err) {
+			err = nil
+		} else if err != nil {
+			err = E.Cause(err, "read payload")
+		}
+		if err != nil || payload.IsEmpty() {
+			payload.Release()
+			payload = nil
+		}
+	}
+	switch {
+	case err != nil:
+	case payload != nil:
+		dataLen := payload.Len()
+		_, err = destinationWriter.Write(payload.Bytes())
+		payload.Release()
+		if err == nil {
+			for _, counter := range readCounters {
+				counter(int64(dataLen))
+			}
+			for _, counter := range writeCounters {
+				counter(int64(dataLen))
+			}
+			return false, sourceEOF
+		}
+	default:
 		_ = destination.SetWriteDeadline(time.Now().Add(C.ReadPayloadTimeout))
-		_, err = destination.Write(nil)
+		_, err = destinationWriter.Write(nil)
 		_ = destination.SetWriteDeadline(time.Time{})
-	} else {
-		var cachedBuffer *buf.Buffer
-		sourceReader, readCounters := N.UnwrapCountReader(source, nil)
-		destinationWriter, writeCounters := N.UnwrapCountWriter(destination, nil)
-		if cachedReader, ok := sourceReader.(N.CachedReader); ok {
-			cachedBuffer = cachedReader.ReadCached()
+		if err == nil || E.IsMulti(err, os.ErrInvalid, context.DeadlineExceeded, io.EOF) || E.IsTimeout(err) {
+			return false, sourceEOF
 		}
-		if cachedBuffer == nil && clientFirst && !direction {
-			if earlyWriter, ok := common.Cast[N.EarlyPayloadWriter](destinationWriter); ok && earlyWriter.PreferEarlyPayload() {
-				cachedBuffer, err = readHandshakePayload(source, sourceReader)
-			}
-		}
-		if err == nil && cachedBuffer != nil {
-			wrotePayload = true
-			dataLen := cachedBuffer.Len()
-			_, err = destinationWriter.Write(cachedBuffer.Bytes())
-			cachedBuffer.Release()
-			if err == nil {
-				for _, counter := range readCounters {
-					counter(int64(dataLen))
-				}
-				for _, counter := range writeCounters {
-					counter(int64(dataLen))
-				}
-			}
-		} else if err == nil {
-			_ = destination.SetWriteDeadline(time.Now().Add(C.ReadPayloadTimeout))
-			_, err = destinationWriter.Write(nil)
-			_ = destination.SetWriteDeadline(time.Time{})
-		}
-	}
-	if err == nil {
-		return false
-	}
-	if !wrotePayload && (E.IsMulti(err, os.ErrInvalid, context.DeadlineExceeded, io.EOF) || E.IsTimeout(err)) {
-		return false
 	}
 	if !done.Swap(true) {
 		if onClose != nil {
@@ -439,7 +442,7 @@ func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.C
 	} else {
 		m.logger.ErrorContext(ctx, "connection download handshake: ", err)
 	}
-	return true
+	return true, false
 }
 
 func (m *ConnectionManager) packetConnectionCopy(ctx context.Context, source N.PacketReader, destination N.PacketWriter, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {

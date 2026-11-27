@@ -47,12 +47,23 @@ func NewQUIC(ctx context.Context, logger log.ContextLogger, tag string, options 
 	}
 	tlsOptions := common.PtrValueOrDefault(options.TLS)
 	tlsOptions.Enabled = true
-	tlsConfig, err := tls.NewClient(ctx, logger, options.Server, tlsOptions)
+	tlsConfig, err := tls.NewClientWithOptions(tls.ClientOptions{
+		Context:        ctx,
+		Logger:         logger,
+		ServerAddress:  options.Server,
+		Options:        tlsOptions,
+		DomainResolver: options.DomainResolver,
+		DirectResolver: true,
+	})
 	if err != nil {
 		return nil, err
 	}
 	if len(tlsConfig.NextProtos()) == 0 {
 		tlsConfig.SetNextProtos([]string{"doq"})
+	}
+	_, err = tlsConfig.STDConfig()
+	if err != nil {
+		return nil, err
 	}
 	serverAddr := options.DNSServerAddressOptions.Build()
 	if serverAddr.Port == 0 {
@@ -107,7 +118,9 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
 				ctx,
 				rawConn,
 				t.tlsConfig,
-				nil,
+				&quic.Config{
+					InitialPacketSize: 1200,
+				},
 			)
 			if err != nil {
 				rawConn.Close()
@@ -181,13 +194,11 @@ func isQUICRetryError(err error) (ok bool) {
 		return true
 	}
 
-	var qIdleErr *quic.IdleTimeoutError
-	if errors.As(err, &qIdleErr) {
+	if _, ok := errors.AsType[*quic.IdleTimeoutError](err); ok {
 		return true
 	}
 
-	var resetErr *quic.StatelessResetError
-	if errors.As(err, &resetErr) {
+	if _, ok := errors.AsType[*quic.StatelessResetError](err); ok {
 		return true
 	}
 

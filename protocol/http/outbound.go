@@ -23,7 +23,10 @@ func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.HTTPOutboundOptions](registry, C.TypeHTTP, NewOutbound)
 }
 
-var _ adapter.OutboundWithMultiplex = (*Outbound)(nil)
+var (
+	_ adapter.OutboundWithMultiplex = (*Outbound)(nil)
+	_ adapter.IdleConnectionKeeper  = (*Outbound)(nil)
+)
 
 type Outbound struct {
 	outbound.Adapter
@@ -37,7 +40,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		return nil, err
 	}
 	headers := options.Headers.Build()
-	client, err := http.NewClientWithTLS(ctx, logger, outboundDialer, options.ServerOptions, common.PtrValueOrDefault(options.TLS), http.ClientOptions{
+	client, err := http.NewClientWithTLS(ctx, logger, outboundDialer, options.ServerOptions, common.PtrValueOrDefault(options.TLS), options.DomainResolver, http.ClientOptions{
 		Username:               options.Username,
 		Password:               options.Password,
 		Path:                   options.Path,
@@ -63,6 +66,14 @@ func (h *Outbound) MultiplexEnabled() bool {
 
 func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 	h.client.ResetConnections()
+}
+
+func (h *Outbound) SetKeepIdleConnections(keep bool) {
+	h.client.SetKeepIdleConnections(keep)
+}
+
+func (h *Outbound) CloseIdleConnections() {
+	h.client.CloseIdleConnections()
 }
 
 func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {

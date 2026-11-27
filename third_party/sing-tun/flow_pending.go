@@ -16,7 +16,7 @@ const (
 type asyncFlowState struct {
 	ctx     context.Context
 	handler ContextFlowHandler
-	accept  func([]byte)
+	accept  func([]byte, ForwardFrameMeta)
 	pending map[flowKey]*pendingFlow
 	workers int
 	bytes   int
@@ -26,7 +26,7 @@ type pendingFlow struct {
 	key     flowKey
 	ctx     context.Context
 	cancel  context.CancelFunc
-	packets [][]byte
+	packets []heldPacket
 	count   int
 	bytes   int // Includes the batch currently being delivered to the stack.
 }
@@ -36,6 +36,10 @@ type pendingFlow struct {
 // accept delivers an owned packet to the ordinary stack without redispatching
 // it here. It must finish using the packet before returning.
 func (d *ForwardDispatcher) EnableAsyncFlow(ctx context.Context, accept func([]byte)) {
+	d.enableAsyncFlow(ctx, func(packet []byte, _ ForwardFrameMeta) { accept(packet) })
+}
+
+func (d *ForwardDispatcher) enableAsyncFlow(ctx context.Context, accept func([]byte, ForwardFrameMeta)) {
 	if d == nil {
 		return
 	}
@@ -49,19 +53,24 @@ func (d *ForwardDispatcher) EnableAsyncFlow(ctx context.Context, accept func([]b
 	}
 }
 
-func (d *ForwardDispatcher) enqueuePendingPacket(p *pendingFlow, raw []byte) {
+func (d *ForwardDispatcher) enqueuePendingPacket(p *pendingFlow, raw []byte, parsed *forwardPacket) bool {
 	if p.count >= pendingPacketLimit || len(raw) > pendingByteLimit-d.async.bytes {
 		d.logger.Trace("pending flow queue full, dropping packet")
-		return
+		return false
 	}
 	// The TUN/gVisor caller may immediately reuse its packet storage.
-	p.packets = append(p.packets, bytes.Clone(raw))
+	held := heldPacket{packet: bytes.Clone(raw), transportLength: len(parsed.transport)}
+	if parsed.frameMeta != nil {
+		held.meta = *parsed.frameMeta
+	}
+	p.packets = append(p.packets, held)
 	p.count++
 	p.bytes += len(raw)
 	d.async.bytes += len(raw)
+	return true
 }
 
-func (d *ForwardDispatcher) startPendingFlow(key flowKey, raw []byte) {
+func (d *ForwardDispatcher) startPendingFlow(key flowKey, raw []byte, parsed *forwardPacket) {
 	if d.async.ctx.Err() != nil {
 		return
 	}
@@ -71,7 +80,7 @@ func (d *ForwardDispatcher) startPendingFlow(key flowKey, raw []byte) {
 	}
 	ctx, cancel := context.WithCancel(d.async.ctx)
 	p := &pendingFlow{key: key, ctx: ctx, cancel: cancel}
-	d.enqueuePendingPacket(p, raw)
+	d.enqueuePendingPacket(p, raw, parsed)
 	d.async.pending[key] = p
 	d.async.workers++
 	go d.resolvePendingFlow(p)
@@ -135,15 +144,17 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 		packets := p.packets
 		p.packets = nil
 		dns := verdict.Action == ActionHijackDNS && p.key.protocol == uint8(header.UDPProtocolNumber)
-		var deferred [][]byte
+		var deferred []heldPacket
 		var size int
-		for _, raw := range packets {
+		for i := range packets {
+			held := &packets[i]
+			raw := held.packet
 			size += len(raw)
-			if dns {
-				deferred = append(deferred, raw)
+			current := held.parse()
+			if dns && !current.fragment {
+				deferred = append(deferred, *held)
 				continue
 			}
-			current, _ := parseForwardPacket(raw)
 			var handled bool
 			if entry := d.table[p.key]; installed && entry != nil {
 				handled = d.handleHit(p.key, entry, &current, raw, d.now())
@@ -152,7 +163,10 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 				installed = true
 			}
 			if !handled {
-				deferred = append(deferred, raw)
+				deferred = append(deferred, *held)
+			}
+			if current.fragment {
+				deferred = append(deferred, d.resolveFragments(&current, p.key, handled, d.now())...)
 			}
 		}
 		replies := d.flushPackets()
@@ -164,16 +178,19 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 		// DNS may answer inline, and ordinary UDP/TCP handling may connect.
 		// Keep both outside access, retaining the packet budget and pending
 		// entry until delivery so new packets cannot overtake this batch.
-		for _, raw := range deferred {
+		for i := range deferred {
+			held := &deferred[i]
 			if p.ctx.Err() != nil || d.returnPath.closed.Load() {
 				return
 			}
 			if dns {
-				current, _ := parseForwardPacket(raw)
-				d.hijackDNSPacket(&current)
-			} else {
-				d.async.accept(raw)
+				current := held.parse()
+				if !current.fragment {
+					d.hijackDNSPacket(&current)
+					continue
+				}
 			}
+			d.async.accept(held.packet, held.meta)
 		}
 		d.access.Lock()
 		p.count -= len(packets)
@@ -190,8 +207,8 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 	}
 }
 
-func (d *ForwardDispatcher) judgePendingPacket(ctx context.Context, raw []byte) FlowVerdict {
-	packet, _ := parseForwardPacket(raw)
+func (d *ForwardDispatcher) judgePendingPacket(ctx context.Context, first heldPacket) FlowVerdict {
+	packet := first.parse()
 	var payload []byte
 	if packet.protocol == uint8(header.UDPProtocolNumber) {
 		payload = header.UDP(packet.transport).Payload()

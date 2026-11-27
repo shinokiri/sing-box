@@ -4,14 +4,15 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/sagernet/sing/common/atomic"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -40,8 +41,10 @@ func newH2MuxServer(conn net.Conn) *h2MuxServerSession {
 		inbound: make(chan net.Conn),
 		done:    make(chan struct{}),
 		server: http2.Server{
-			IdleTimeout:      idleTimeout,
-			MaxReadFrameSize: buf.BufferSize,
+			IdleTimeout:                  idleTimeout,
+			MaxReadFrameSize:             buf.BufferSize,
+			MaxConcurrentStreams:         math.MaxInt32,
+			MaxUploadBufferPerConnection: 1 << 30,
 		},
 	}
 	go func() {

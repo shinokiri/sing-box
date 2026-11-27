@@ -43,12 +43,9 @@ var defaultPacketSniffers = []sniff.PacketSniffer{
 // Deprecated: use RouteConnectionEx instead.
 func (r *Router) RouteConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext) error {
 	done := make(chan any)
-	err := r.routeConnection(ctx, conn, metadata, N.OnceClose(func(it error) {
+	r.RouteConnectionEx(ctx, conn, metadata, N.OnceClose(func(it error) {
 		close(done)
 	}))
-	if err != nil {
-		return err
-	}
 	select {
 	case <-done:
 	case <-r.ctx.Done():
@@ -108,6 +105,7 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 	}
 	selectedRule, _, buffers, _, err := r.matchRule(ctx, &metadata, conn, nil)
 	if err != nil {
+		buf.ReleaseMulti(buffers)
 		return err
 	}
 	var selectedOutbound adapter.Outbound
@@ -137,7 +135,7 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 			}
 			return action.Error(ctx)
 		case *R.RuleActionHijackDNS:
-			for _, buffer := range buffers {
+			for _, buffer := range slices.Backward(buffers) {
 				conn = bufio.NewCachedConn(conn, buffer)
 			}
 			N.CloseOnHandshakeFailure(conn, onClose, r.hijackDNSStream(ctx, conn, metadata))
@@ -152,7 +150,7 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 		buf.ReleaseMulti(buffers)
 		return err
 	}
-	for _, buffer := range buffers {
+	for _, buffer := range slices.Backward(buffers) {
 		conn = bufio.NewCachedConn(conn, buffer)
 	}
 	if selectedRule != nil {
@@ -214,17 +212,9 @@ func registerInterrupt(chain []adapter.Outbound, closer io.Closer, onClose N.Clo
 
 func (r *Router) RoutePacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext) error {
 	done := make(chan any)
-	err := r.routePacketConnection(ctx, conn, metadata, N.OnceClose(func(it error) {
+	r.RoutePacketConnectionEx(ctx, conn, metadata, N.OnceClose(func(it error) {
 		close(done)
 	}))
-	if err != nil {
-		conn.Close()
-		if E.IsClosedOrCanceled(err) || R.IsRejected(err) {
-			r.logger.DebugContext(ctx, "connection closed: ", err)
-		} else {
-			r.logger.ErrorContext(ctx, err)
-		}
-	}
 	select {
 	case <-done:
 	case <-r.ctx.Done():
@@ -267,15 +257,15 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 	// TODO: move to UoT
 	metadata.Network = N.NetworkUDP
 
-	// Currently we don't have deadline usages for UDP connections
-	/*if deadline.NeedAdditionalReadDeadline(conn) {
-		conn = deadline.NewPacketConn(bufio.NewNetPacketConn(conn))
-	}*/
 	if metadata.InboundType == C.TypeTun && metadata.Protocol == C.ProtocolDNS {
 		return r.hijackDNSPacket(ctx, conn, nil, metadata, onClose)
 	}
+	if deadline.NeedAdditionalReadDeadline(conn) {
+		conn = deadline.NewPacketConn(bufio.NewNetPacketConn(conn))
+	}
 	selectedRule, _, _, packetBuffers, err := r.matchRule(ctx, &metadata, nil, conn)
 	if err != nil {
+		N.ReleaseMultiPacketBuffer(packetBuffers)
 		return err
 	}
 	var selectedOutbound adapter.Outbound
@@ -396,13 +386,6 @@ func (r *Router) PreMatchContext(ctx context.Context, metadata adapter.InboundCo
 					return continueResult
 				}
 				continue
-			}
-			//goland:noinspection GoDeprecation
-			if action.OverrideDestination && M.IsDomainName(metadata.Domain) {
-				metadata.Destination = M.Socksaddr{
-					Fqdn: metadata.Domain,
-					Port: metadata.Destination.Port,
-				}
 			}
 			if metadata.Domain != "" && metadata.Client != "" {
 				r.logger.DebugContext(ctx, "sniffed packet protocol: ", metadata.Protocol, ", domain: ", metadata.Domain, ", client: ", metadata.Client)
@@ -577,7 +560,7 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 	result.NewTracker = func() tun.FlowTracker {
 		r.logger.InfoContext(ctx, "pre-match: forward ", metadataCopy.Network, " connection from ", metadataCopy.Source, " to ", metadataCopy.Destination, " via outbound/", outbound.Type(), "[", outbound.Tag(), "]")
 		flowTrackers := make([]tun.FlowTracker, 0, len(r.trackers)+2)
-		flowTrackers = append(flowTrackers, newFlowLogger(ctx, r.logger, metadataCopy, outbound))
+		flowTrackers = append(flowTrackers, adapter.NewFlowLogger(ctx, r.logger))
 		flowInterrupter := newFlowInterrupter(chain)
 		if flowInterrupter != nil {
 			flowTrackers = append(flowTrackers, flowInterrupter)
@@ -627,13 +610,15 @@ func (r *Router) prepareMatchMetadata(ctx context.Context, metadata *adapter.Inb
 				Port: metadata.Destination.Port,
 			}
 			metadata.FakeIP = true
+			metadata.ECHPublicName = r.dns.LookupECHPublicName(domain)
 			r.logger.DebugContext(ctx, "found fakeip domain: ", domain)
 		}
 	} else if metadata.Domain == "" {
 		domain, loaded := r.dns.LookupReverseMapping(metadata.Destination.Addr)
 		if loaded {
 			metadata.Domain = domain
-			r.logger.DebugContext(ctx, "found reserve mapped domain: ", metadata.Domain)
+			metadata.ECHPublicName = r.dns.LookupECHPublicName(domain)
+			r.logger.DebugContext(ctx, "found reverse mapped domain: ", metadata.Domain)
 		}
 	}
 	if metadata.Destination.IsIPv4() {
@@ -690,12 +675,6 @@ match:
 			applyRouteOptionsOverride(metadata, routeOptions)
 			if routeOptions.NetworkStrategy != nil {
 				metadata.NetworkStrategy = routeOptions.NetworkStrategy
-			}
-			if len(routeOptions.NetworkType) > 0 {
-				metadata.NetworkType = routeOptions.NetworkType
-			}
-			if len(routeOptions.FallbackNetworkType) > 0 {
-				metadata.FallbackNetworkType = routeOptions.FallbackNetworkType
 			}
 			if routeOptions.FallbackDelay != 0 {
 				metadata.FallbackDelay = routeOptions.FallbackDelay
@@ -804,13 +783,6 @@ func (r *Router) actionSniff(
 		metadata.SnifferNames = action.SnifferNames
 		metadata.SniffError = err
 		if err == nil {
-			//goland:noinspection GoDeprecation
-			if action.OverrideDestination && M.IsDomainName(metadata.Domain) {
-				metadata.Destination = M.Socksaddr{
-					Fqdn: metadata.Domain,
-					Port: metadata.Destination.Port,
-				}
-			}
 			if metadata.Domain != "" && metadata.Client != "" {
 				r.logger.DebugContext(ctx, "sniffed protocol: ", metadata.Protocol, ", domain: ", metadata.Domain, ", client: ", metadata.Client)
 			} else if metadata.Domain != "" {
@@ -927,13 +899,6 @@ func (r *Router) actionSniff(
 		}
 	finally:
 		if err == nil {
-			//goland:noinspection GoDeprecation
-			if action.OverrideDestination && M.IsDomainName(metadata.Domain) {
-				metadata.Destination = M.Socksaddr{
-					Fqdn: metadata.Domain,
-					Port: metadata.Destination.Port,
-				}
-			}
 			if metadata.Domain != "" && metadata.Client != "" {
 				r.logger.DebugContext(ctx, "sniffed packet protocol: ", metadata.Protocol, ", domain: ", metadata.Domain, ", client: ", metadata.Client)
 			} else if metadata.Domain != "" {

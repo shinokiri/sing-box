@@ -3,6 +3,8 @@
 package tun
 
 import (
+	"errors"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -46,20 +48,25 @@ func configureKernelInterface(t *testing.T, device Tun, options Options) {
 		t.Fatal(err)
 	}
 	for _, prefix := range options.Inet6Address {
-		deadline := time.Now().Add(time.Second)
-		for {
-			routes, routeErr := netlink.RouteGet(prefix.Addr().AsSlice())
-			if routeErr != nil {
-				t.Fatal(routeErr)
-			}
-			if len(routes) > 0 && routes[0].Type == unix.RTN_LOCAL {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("IPv6 local route was not installed: %s", prefix.Addr())
-			}
-			t.Log("waiting for IPv6 local route:", prefix.Addr())
-			time.Sleep(time.Millisecond)
+		if err := kernelWaitIPv6LocalRoute(prefix.Addr()); err != nil {
+			t.Fatal(err)
 		}
+	}
+}
+
+func kernelWaitIPv6LocalRoute(address netip.Addr) error {
+	deadline := time.Now().Add(time.Second)
+	for {
+		routes, err := netlink.RouteGet(address.AsSlice())
+		if err != nil && !errors.Is(err, unix.ENETUNREACH) {
+			return err
+		}
+		if len(routes) > 0 && routes[0].Type == unix.RTN_LOCAL {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return E.New("IPv6 local route was not installed: ", address)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

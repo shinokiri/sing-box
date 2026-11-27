@@ -112,16 +112,18 @@ def publish():
     git("push", "--atomic", "origin", f"{state['commit']}:refs/heads/{BRANCH}", f"{state['commit']}:refs/tags/{state['tag']}")
     notes = Path(os.environ["RUNNER_TEMP"]) / "udpflow-testing-notes.md"
     notes.write_text(
-        f"基于上游 [testing `{state['upstream_commit'][:7]}`](https://github.com/{UPSTREAM}/commit/{state['upstream_commit']}) 的开发快照，包含现有 UDP flow 修复。\n\n"
+        f"基于上游 [`v{state['upstream_version']}`（{state['upstream_commit'][:7]}）](https://github.com/{UPSTREAM}/commit/{state['upstream_commit']}) 的开发快照，包含现有 UDP flow 修复。\n\n"
         "Android 16+（API 36）ARM64 签名 APK，沿用本仓库签名；versionCode 递增，可覆盖安装。此 Release 标记为预发布，客户端可选择测试更新通道。\n\n"
+        "## 各版本变更与验证记录\n\n"
+        "alpha.14 更新了核心、Android 客户端和四个本地 Go 依赖。Go TUN 在两个协议栈之间转发时保留源地址，按原接收队列批量写回，并在切换路由时丢弃待写的旧回包。Snell v6 保留会话复用并接入上游的半关闭行为。\n\n"
         "新增可选的 Snell v6 蜂窝 TFO 兼容模式 cellular_tfo_compat，默认关闭。仅供已部署配套内核适配器的直连中转节点使用，同时要求 default 模式、hello_framing=true 和 tcp_fast_open=true。实际 Android NetworkHandle、TFO 策略、Hello 标记与按网络隔离的首包容量使用同一次网络选择；Wi-Fi 保留原生 TFO，未启用兼容模式的蜂窝节点继续使用普通 TCP。\n\n"
         "中转配套程序及测试位于 contrib/snell-tfo-compat：它只调整对应握手的 SYN-ACK 确认号，客户端随后补发一次首段，由服务器 TCP 去重。现有 Hello 接收端和 Snell 会话复用保持；每条新物理连接有一次首段补发成本，普通报文也有内核判断成本。该模式针对已测蜂窝路径，不代表通用运营商修复或零开销；没有新增自动退避、业务请求重放或周期探测。\n\n"
-        "候选版已通过 Wi-Fi → 蜂窝 → Wi-Fi 实机检查：37 个热 Cookie 蜂窝兼容握手、3 个冷 Cookie 普通握手，三阶段 48 次验证 TLS 的 HTTPS 请求，以及 8 次 1 MiB 上传/下载均通过；切回 Wi-Fi 后恢复原生 TFO。配套中转另通过 92 项真实内核报文检查、23 项加载器生命周期检查和 13 项 systemd/切换检查。此次将相同实现纳入日常测试更新通道，不将这些样本外推为所有网络或所有应用的保证。\n\n"
+        "alpha.13-udpflow.4 候选版曾通过 Wi-Fi → 蜂窝 → Wi-Fi 实机检查：37 个热 Cookie 蜂窝兼容握手、3 个冷 Cookie 普通握手，三阶段 48 次验证 TLS 的 HTTPS 请求，以及 8 次 1 MiB 上传/下载均通过；切回 Wi-Fi 后恢复原生 TFO。配套中转另通过 92 项真实内核报文检查、23 项加载器生命周期检查和 13 项 systemd/切换检查。该版将相同实现纳入日常测试更新通道，不将这些样本外推为所有网络或所有应用的保证。\n\n"
         "修复 Snell v6 复用已经失效的 TCP 连接：区分底层连接意外断开与 Snell 会话的正常结束；Linux/Android 在取用空闲连接时检查内核 TCP 状态，淘汰已关闭连接并按需重新建连，避免把下一次 TLS 握手发到失效连接上。检查覆盖连接跟踪、已建连的延迟 TFO 和流量计数包装，健康连接继续正常复用。\n\n"
         "新增物理 EOF、空闲连接被对端关闭以及多层连接包装的回归测试。Android 定向对照中，修复前连续 3 次在空闲连接收到 FIN 后出现 TLS 握手 EOF；修复后连续 3 次通过正常证书和主机名校验，健康连接的 3 次对照仍正常复用。这验证了该故障机制，不能据此认定所有应用的“证书异常”都由此引起。\n\n"
         "连接池仍最多保留 10 条空闲连接，按需建连，不自动补满，不增加网络探测、保活或周期任务。此前漏检的包装连接现在会执行 TCP_INFO 查询；手机定向基准中，池内 1～10 条连接的一轮取用/归还增加约 6～55 微秒处理时间。该结果不是外网延迟或吞吐提升承诺。\n\n"
         "修复 Android 同时开启 Wi-Fi 与蜂窝时，代理连接实际出口与 TCP Fast Open 策略所用网络不一致的问题：建连前显式绑定选定的 Android Network，首次发送时共同确定网络与 TFO 策略；未显式启用配套兼容模式的蜂窝节点使用普通 TCP，Wi-Fi 按配置使用 TFO，绑定失败直接返回错误。真机保持双网开启和原有蜂窝目的路由，三轮 Lake Forest 测速的 IPv4/IPv6 连接均经 Wi-Fi；此前 IPv4 首批后续数据的 7–8 秒停顿未再出现。已覆盖延迟写入、网络变化、绑定失败与 IPv4/IPv6 回归测试；长期运行与切网仍需观察。\n\n"
-        "本次跟进上游 alpha.13 核心、Android 客户端、sing 和 sing-tun，统一核心与测试模块的依赖基线。保留有界异步路由、回复归属、FakeIP 隔离和连接回收，并纳入上游的关闭流量重建、TCP 判定缓存清理、NAT 会话回收及 Go TUN 回环批量发送修复。\n\n"
+        "alpha.13 更新了核心、Android 客户端、sing 和 sing-tun，统一核心与测试模块的依赖基线。保留有界异步路由、回复归属、FakeIP 隔离和连接回收，并纳入上游的关闭流量重建、TCP 判定缓存清理、NAT 会话回收及 Go TUN 回环批量发送修复。\n\n"
         "合入手机已使用的可选 Snell hello carrier：保留首包编码、首包容量、复用会话生命周期和 TLS 测速关闭处理。该封装需要配套接收端；未启用时继续使用普通 Snell。已有手机配置与配套接收端可继续使用。\n\n"
         "优化 Go TUN 的持续 TCP 上传：沿用约 512 KB 的批量切换门槛，每次最多取 8 份已经到达的数据，经已有的批量写入通道发送；不等待凑满，也不添加定时器。仅有一份数据时继续走原来的单份写入路径，避免小消息为批量发送额外分配记录列表。覆盖 IPv4/IPv6、超时、关闭、缓冲区寿命以及大段上传后的小消息；独立 ARM64/x86 对照显示积压数据的处理耗时下降，不能直接换算为外网提速。\n\n"
         "优化 Snell v6 默认模式的 TCP 接收：公共缓冲库支持有边界、独立释放的共享视图；接收端按数据占用情况选择共享、整块交接或紧凑复制，减少连续小消息的读取开销，避免少量数据长期占住大块内存。收完整条消息即返回，不等待填满接收块。补齐连接关闭、后台读取、会话复用、延迟释放与 Go TCP 发送缓存的集成测试。真机本机对照显示连续小帧处理的 CPU 开销下降，大帧接近持平；逐次响应仍有取舍，不能直接换算为网络提速。持续小帧接收可能额外保留 64 KiB 工作区；同时保留 32 条最大尺寸消息的底层缓冲占用为 2.25 MiB，与原实现相同。\n\n"
@@ -137,7 +139,7 @@ def publish():
         "修复 UDP DNS 经 Snell 与 TCP Fast Open 转发时，在首包发送前提前取消建连上下文、导致解析超时的问题。连接上下文保留至连接退役，关闭、失效、重置与失败时仍释放资源；覆盖真实 Snell UDP 解析、连接复用及重置、上下文清理和进行中建连的取消。\n\n"
         "修复 Android 自动启动 VPN 时与内核初始化之间的竞态：启动入口共同等待一次后台初始化完成，避免提前使用未设置的控制接口目录；在等待前及时建立前台通知，启动失败原因同步写入系统日志。覆盖初始化等待、并发启动、失败传播及等待者取消的回归测试。\n\n"
         f"Core: `{state['commit']}`\n\nAndroid client: `{state['android_client_commit']}`（含本仓库更新补丁）\n\n"
-        "这是上游 testing 开发版本。Snell 连接池选择与共享接收已完成 Android 真机上的定向对照测试；共享接收候选 APK 安装后，大小响应、并发请求和连接复用的实际 VPN 收发检查通过。长期运行、日常应用性能、切网和耗电仍需继续观察。\n"
+        "这是上游 testing 开发版本。此前的 Snell 连接池选择与共享接收改动在当时的候选版上经过 Android 真机定向对照测试；共享接收候选 APK 安装后，大小响应、并发请求和连接复用的实际 VPN 收发检查通过。长期运行、日常应用性能、切网和耗电仍需继续观察。\n"
     )
     assets = sorted(str(path) for path in Path("dist/android").iterdir() if path.is_file())
     if release:

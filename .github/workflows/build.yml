@@ -100,6 +100,7 @@ jobs:
           gofmt -d adapter/outbound.go common/urltest/urltest.go protocol/snell/urltest.go protocol/snell/urltest_test.go third_party/sing-snell/snellv6/reuse.go third_party/sing-snell/snellv6/urltest.go || urltest_format_status=$?
           go test -race -count=3 -run '^TestURLTest' -v ./protocol/snell
           go test -race github.com/sagernet/sing-snell/...
+          go test -race -count=20 -run '^Test(ResponseSessionReusesPrefetchedReply|ReuseLogicalHalfCloseAcrossReadAndWritePaths|ReuseIdleEOFOnUnobservableTransport|IdleReadSurvivesBufferedCheckout)$' github.com/sagernet/sing-snell/internal/reuse github.com/sagernet/sing-snell/snellv6
           exit "$urltest_format_status"
       - name: Compile Snell receive-hint fallback on non-Linux targets
         run: |
@@ -155,7 +156,10 @@ jobs:
       - name: Race tests for FakeIP reset interleavings
         run: python3 .github/check_fakeip_interleavings.py --race --count=3
       - name: Test the Go TUN stack against the Linux kernel
-        run: go test -exec sudo -tags with_gvisor github.com/sagernet/sing-tun
+        run: |
+          go test -race -count=10 -run '^TestGoMemoryEthernet(LostSolicitation|CanceledDial)$' github.com/sagernet/sing-tun
+          go test -exec sudo -tags with_gvisor -count=20 -run '^TestGoMemoryEthernet$/^dial$' github.com/sagernet/sing-tun
+          go test -exec sudo -tags with_gvisor github.com/sagernet/sing-tun
       - name: Race tests with the Android gRPC implementation
         run: go test -race -exec sudo -skip '^TestGoKernel' -tags with_gvisor,with_quic -count=1 ./route ./common/udpflow ./protocol/group ./protocol/snell ./protocol/vless ./transport/v2ray ./transport/v2raywebsocket ./transport/v2raygrpclite ./transport/v2rayhttp ./transport/v2rayquic github.com/sagernet/sing-mux github.com/sagernet/sing-tun
       - name: Race tests with full gRPC
@@ -164,7 +168,7 @@ jobs:
         run: |
           set -o pipefail
           go test -tags with_gvisor -run '^$' -bench '^Benchmark(Port|Dispatcher)Forward$' -benchmem ./common/udpflow | tee "$RUNNER_TEMP/udpflow-bench.txt"
-          go test -run '^$' -bench '^BenchmarkUDPMappingHistory$' -benchmem github.com/sagernet/sing-tun | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
+          go test -run '^$' -bench '^Benchmark(UDPMappingHistory|RoutedReturnBatch)$' -benchmem github.com/sagernet/sing-tun | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           go test -run '^$' -bench '^BenchmarkFakeIPLoadDomain$' -benchmem ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           go test -run '^$' -bench '^BenchmarkFakeIPMixed$' -benchmem -cpu=4 ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"
           go test -run '^$' -bench '^BenchmarkFakeIPAdmin$' -benchtime=20x -benchmem ./experimental/cachefile | tee -a "$RUNNER_TEMP/udpflow-bench.txt"

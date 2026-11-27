@@ -43,7 +43,10 @@ func TestStoreRestartsWithoutMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := service.ContextWith[adapter.CacheFile](context.Background(), cache)
-	store := fakeip.NewStore(ctx, logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
+	store, err := fakeip.NewStore(ctx, logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +91,10 @@ func (c *resetFailingCache) FakeIPReset() error                      { return c.
 func TestStoreStartRejectsFailedReset(t *testing.T) {
 	resetError := errors.New("storage reset failed")
 	ctx := service.ContextWith[adapter.CacheFile](context.Background(), &resetFailingCache{err: resetError})
-	store := fakeip.NewStore(ctx, logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
+	store, err := fakeip.NewStore(ctx, logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Start(); !errors.Is(err, resetError) {
 		t.Fatalf("start ignored failed storage reset: got %v; want %v", err, resetError)
 	}
@@ -105,7 +111,10 @@ func TestStoreRestartPreservesReservedAddresses(t *testing.T) {
 			scope := startTestCache(t, cache)
 			newStore := func() *fakeip.Store {
 				ctx := service.ContextWith[adapter.CacheFile](context.Background(), cache)
-				store := fakeip.NewStore(ctx, logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("fc00::/18"))
+				store, err := fakeip.NewStore(ctx, logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("fc00::/18"))
+				if err != nil {
+					t.Fatal(err)
+				}
 				if err := store.Start(); err != nil {
 					t.Fatal(err)
 				}

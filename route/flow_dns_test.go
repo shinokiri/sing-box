@@ -40,6 +40,7 @@ func (d *flowDNS) Lookup(ctx context.Context, _ string, _ adapter.DNSQueryOption
 }
 
 func (*flowDNS) LookupReverseMapping(netip.Addr) (string, bool) { return "", false }
+func (*flowDNS) LookupECHPublicName(string) string              { return "" }
 
 type flowFakeStore struct {
 	adapter.FakeIPStore

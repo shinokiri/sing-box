@@ -42,7 +42,7 @@ func HandleConnectionEx(
 			} else {
 				keepAlive := !(request.ProtoMajor == 1 && request.ProtoMinor == 0) && strings.TrimSpace(strings.ToLower(request.Header.Get("Proxy-Connection"))) == "keep-alive" && request.ContentLength == 0
 				// Since no one else is using the library, use a fixed realm until rewritten
-				headers := []string{"Proxy-Authenticate", `Basic realm="sing-box" charset="UTF-8"`}
+				headers := []string{"Proxy-Authenticate", `Basic realm="sing-box", charset="UTF-8"`}
 				if !keepAlive {
 					headers = append(headers, "Connection", "close")
 				}
@@ -140,7 +140,7 @@ func handleHTTPConnection(
 	conn net.Conn,
 	request *http.Request, source M.Socksaddr,
 ) error {
-	keepAlive := !(request.ProtoMajor == 1 && request.ProtoMinor == 0) && strings.TrimSpace(strings.ToLower(request.Header.Get("Proxy-Connection"))) == "keep-alive"
+	keepAlive := request.ProtoAtLeast(1, 1) && strings.TrimSpace(strings.ToLower(request.Header.Get("Proxy-Connection"))) == "keep-alive"
 	request.RequestURI = ""
 
 	removeHopByHopHeaders(request.Header)
@@ -168,10 +168,7 @@ func handleHTTPConnection(
 			DisableCompression: true,
 			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 				input, output := pipe.Pipe()
-				go handler.NewConnectionEx(ctx, output, source, M.ParseSocksaddr(address).Unwrap(), func(it error) {
-					innerErr.Store(it)
-					common.Close(input, output)
-				})
+				go handler.NewConnectionEx(ctx, output, source, M.ParseSocksaddr(address).Unwrap(), innerErr.Store)
 				return input, nil
 			},
 		},
@@ -189,6 +186,13 @@ func handleHTTPConnection(
 	}
 
 	removeHopByHopHeaders(response.Header)
+
+	response.Proto, response.ProtoMajor, response.ProtoMinor = "HTTP/1.1", 1, 1
+	if response.ContentLength < 0 && request.ProtoAtLeast(1, 1) {
+		response.TransferEncoding = []string{"chunked"}
+	} else {
+		response.TransferEncoding = nil
+	}
 
 	if keepAlive {
 		response.Header.Set("Proxy-Connection", "keep-alive")
@@ -292,19 +296,21 @@ func removeExtraHTTPHostPort(req *http.Request) {
 }
 
 func responseWith(request *http.Request, statusCode int, headers ...string) *http.Response {
-	var header http.Header
-	if len(headers) > 0 {
-		header = make(http.Header)
-		for i := 0; i < len(headers); i += 2 {
-			header.Add(headers[i], headers[i+1])
-		}
+	header := make(http.Header)
+	for i := 0; i < len(headers); i += 2 {
+		header.Add(headers[i], headers[i+1])
 	}
+	header.Set("Content-Type", "text/plain; charset=utf-8")
+	body := http.StatusText(statusCode) + "\n"
 	return &http.Response{
-		StatusCode: statusCode,
-		Status:     http.StatusText(statusCode),
-		Proto:      request.Proto,
-		ProtoMajor: request.ProtoMajor,
-		ProtoMinor: request.ProtoMinor,
-		Header:     header,
+		StatusCode:    statusCode,
+		Status:        http.StatusText(statusCode),
+		Proto:         request.Proto,
+		ProtoMajor:    request.ProtoMajor,
+		ProtoMinor:    request.ProtoMinor,
+		Header:        header,
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
+		Request:       request,
 	}
 }

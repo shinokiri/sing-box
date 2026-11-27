@@ -99,7 +99,30 @@ func (m *udpMapping) ReturnPacket(raw []byte) bool {
 			return false
 		}
 	}
-	flow.owner.writeBackPackets([][]byte{raw})
+	owner := flow.owner
+	returnHeadroom := owner.writeback.ReturnHeadroom()
+	if mtu := owner.root.mtu; mtu != 0 && uint32(size) > mtu {
+		// This datagram originated at the proxy socket. Fragment its synthesized
+		// IP header for the client-facing link after applying address translation.
+		var fragments [][]byte
+		if packet.ipVersion == 4 {
+			ip := header.IPv4(packet.network)
+			ip.SetID(uint16(owner.root.identification.Add(1)))
+			fragments, ok = fragmentIPv4Packet(ip, mtu, returnHeadroom)
+		} else {
+			fragments, ok = fragmentIPv6Packet(header.IPv6(packet.network), mtu, owner.root.identification.Add(1), returnHeadroom)
+		}
+		if !ok {
+			return false
+		}
+		owner.writeBackPackets(fragments)
+		return true
+	}
+	if headroom != returnHeadroom {
+		raw = make([]byte, returnHeadroom+size)
+		copy(raw[returnHeadroom:], packet.network)
+	}
+	owner.writeBackPackets([][]byte{raw})
 	return true
 }
 

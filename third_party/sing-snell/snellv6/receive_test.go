@@ -246,7 +246,15 @@ func TestResponseSessionReusesPrefetchedReply(t *testing.T) {
 	}
 	defer client.Close()
 	wire, _ := receiveWire(t, psk, [][]byte{{snell.ReplyTunnel, 1}, nil, {snell.ReplyTunnel, 2}, nil})
-	session := client.newReuseSession(&receiveMemoryConn{Reader: bytes.NewReader(wire)})
+	source, peer := net.Pipe()
+	defer peer.Close()
+	raw := &receiveDiscardWriteConn{&receiveNotifyConn{Conn: source, reads: make(chan struct{}, 8)}}
+	sent := make(chan error, 1)
+	go func() {
+		_, err := peer.Write(wire)
+		sent <- err
+	}()
+	session := client.newReuseSession(raw)
 	session.state.Store(uint32(reuse.StateActive))
 	defer session.Close()
 	var held []*buf.Buffer
@@ -266,10 +274,26 @@ func TestResponseSessionReusesPrefetchedReply(t *testing.T) {
 		if _, err := w.WaitReadBuffer(); !errors.Is(err, io.EOF) {
 			t.Fatal(err)
 		}
+		if expected == 1 {
+			select {
+			case err := <-sent:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("decoder did not prefetch the second reply")
+			}
+			for len(raw.reads) > 0 {
+				<-raw.reads
+			}
+		}
 		if err := conn.Close(); err != nil {
 			t.Fatal(err)
 		}
 		if expected == 1 {
+			// The decoder owns the second reply. The idle read must stay pending
+			// on the open peer while the next request checks out the connection.
+			receiveAwait(t, raw.reads)
 			next, found, closed := client.pool.Take()
 			if next != session || !found || closed {
 				t.Fatal("session was not returned for reuse")

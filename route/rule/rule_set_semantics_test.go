@@ -1352,17 +1352,15 @@ func headlessLogicalRule(mode string, invert bool, rules ...adapter.HeadlessRule
 }
 
 func newLocalRuleSetForTest(tag string, rules ...adapter.HeadlessRule) *LocalRuleSet {
-	return &LocalRuleSet{
-		tag:   tag,
-		rules: rules,
-	}
+	ruleSet := &LocalRuleSet{tag: tag}
+	ruleSet.content.Store(&ruleSetContent{rules: rules})
+	return ruleSet
 }
 
 func newRemoteRuleSetForTest(tag string, rules ...adapter.HeadlessRule) *RemoteRuleSet {
-	return &RemoteRuleSet{
-		tag:   tag,
-		rules: rules,
-	}
+	ruleSet := &RemoteRuleSet{tag: tag}
+	ruleSet.content.Store(&ruleSetContent{rules: rules})
+	return ruleSet
 }
 
 func mustAdGuardRule(t *testing.T, content string) adapter.HeadlessRule {
@@ -1512,6 +1510,6 @@ func addDestinationPortRangeItem(t *testing.T, rule *abstractDefaultRule, ranges
 
 func parsePrefixables(cidrs []string) []*badoption.Prefixable {
 	return common.Map(cidrs, func(it string) *badoption.Prefixable {
-		return common.Ptr(badoption.Prefixable(netip.MustParsePrefix(it)))
+		return new(badoption.Prefixable(netip.MustParsePrefix(it)))
 	})
 }

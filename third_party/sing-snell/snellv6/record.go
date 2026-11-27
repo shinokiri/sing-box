@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	snell "github.com/sagernet/sing-snell"
+	"github.com/sagernet/sing-snell/internal/eof"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
@@ -178,7 +179,7 @@ func (r *unshapedReader) read() (*buf.Buffer, error) {
 	_, err = body.ReadFullFrom(r.upstream, payloadLen+snell.AEADTagLen)
 	if err != nil {
 		body.Release()
-		return nil, err
+		return nil, eof.Unexpected(err)
 	}
 	_, err = r.cipher.Open(body.Index(0), r.nonce, body.Bytes(), nil)
 	if err != nil {
@@ -234,16 +235,6 @@ func (w *unshapedWriter) Write(p []byte) (n int, err error) {
 		n += len(data)
 	}
 	return
-}
-
-func (w *unshapedWriter) makeSliceRecordLocked(payload []byte) *buf.Buffer {
-	record := buf.NewSize(snell.HeaderCipherLen + len(payload) + snell.AEADTagLen)
-	w.sealHeader(record.Extend(snell.HeaderCipherLen), len(payload))
-	common.Must1(record.Write(payload))
-	w.cipher.Seal(record.From(snell.HeaderCipherLen)[:0], w.nonce, record.From(snell.HeaderCipherLen), nil)
-	record.Extend(snell.AEADTagLen)
-	snell.IncreaseNonce(w.nonce)
-	return record
 }
 
 func (w *unshapedWriter) makeBufferRecordLocked(buffer *buf.Buffer) *buf.Buffer {
@@ -311,20 +302,21 @@ func (w *vectorisedUnshapedWriter) WriteVectorised(buffers []*buf.Buffer) error 
 			buffer.Release()
 			continue
 		}
+		if dataLen <= maxPayload {
+			records = append(records, recordWriter.makeBufferRecordLocked(buffer))
+			continue
+		}
+		frontHeadroom := N.CalculateFrontHeadroom(recordWriter)
+		rearHeadroom := N.CalculateRearHeadroom(recordWriter)
 		for data := buffer.Bytes(); len(data) > 0; {
-			if len(data) == dataLen && dataLen <= maxPayload {
-				record := recordWriter.makeBufferRecordLocked(buffer)
-				buffer = nil
-				records = append(records, record)
-				break
-			}
 			recordLen := min(len(data), maxPayload)
-			records = append(records, recordWriter.makeSliceRecordLocked(data[:recordLen]))
+			chunk := buf.NewSize(frontHeadroom + recordLen + rearHeadroom)
+			chunk.Resize(frontHeadroom, 0)
+			common.Must1(chunk.Write(data[:recordLen]))
+			records = append(records, recordWriter.makeBufferRecordLocked(chunk))
 			data = data[recordLen:]
 		}
-		if buffer != nil {
-			buffer.Release()
-		}
+		buffer.Release()
 	}
 	if len(records) == 0 {
 		return nil
@@ -343,21 +335,7 @@ type packetVectorisedUnshapedWriter struct {
 	upstream N.VectorisedWriter
 }
 
-func validatePacketVectorBuffers(buffers []*buf.Buffer) error {
-	for _, buffer := range buffers {
-		if buffer.Len() > maxPayload {
-			buf.ReleaseMulti(buffers)
-			return snell.ErrPayloadTooLarge
-		}
-	}
-	return nil
-}
-
 func (w *packetVectorisedUnshapedWriter) WriteVectorised(buffers []*buf.Buffer) error {
-	err := validatePacketVectorBuffers(buffers)
-	if err != nil {
-		return err
-	}
 	var records []*buf.Buffer
 	defer func() {
 		buf.ReleaseMulti(records)
@@ -365,20 +343,30 @@ func (w *packetVectorisedUnshapedWriter) WriteVectorised(buffers []*buf.Buffer) 
 	recordWriter := w.writer
 	recordWriter.access.Lock()
 	defer recordWriter.access.Unlock()
+	var messageTooLongErr error
 	for _, buffer := range buffers {
 		if buffer.IsEmpty() {
 			buffer.Release()
+			continue
+		}
+		if buffer.Len() > maxPayload {
+			buffer.Release()
+			messageTooLongErr = snell.ErrPayloadTooLarge
 			continue
 		}
 		record := recordWriter.makeBufferRecordLocked(buffer)
 		records = append(records, record)
 	}
 	if len(records) == 0 {
-		return nil
+		return messageTooLongErr
 	}
 	flushRecords := records
 	records = nil
-	return w.upstream.WriteVectorised(flushRecords)
+	err := w.upstream.WriteVectorised(flushRecords)
+	if err != nil {
+		return err
+	}
+	return messageTooLongErr
 }
 
 func (w *unshapedWriter) WriteZeroChunk() error {
@@ -440,7 +428,7 @@ func (r *rawReader) read() (*buf.Buffer, error) {
 	_, err = body.ReadFullFrom(r.upstream, payloadLen)
 	if err != nil {
 		body.Release()
-		return nil, err
+		return nil, eof.Unexpected(err)
 	}
 	r.readWaitOptions.PostReturn(body)
 	return body, nil
@@ -478,13 +466,6 @@ func (w *rawWriter) Write(p []byte) (n int, err error) {
 		n += len(data)
 	}
 	return
-}
-
-func (w *rawWriter) makeSliceRecordLocked(payload []byte) *buf.Buffer {
-	record := buf.NewSize(snell.HeaderPlainLen + len(payload))
-	putHeader(record.Extend(snell.HeaderPlainLen), 0, len(payload))
-	common.Must1(record.Write(payload))
-	return record
 }
 
 func (w *rawWriter) makeBufferRecordLocked(buffer *buf.Buffer) *buf.Buffer {
@@ -547,20 +528,21 @@ func (w *vectorisedRawWriter) WriteVectorised(buffers []*buf.Buffer) error {
 			buffer.Release()
 			continue
 		}
+		if dataLen <= maxPayload {
+			records = append(records, recordWriter.makeBufferRecordLocked(buffer))
+			continue
+		}
+		frontHeadroom := N.CalculateFrontHeadroom(recordWriter)
+		rearHeadroom := N.CalculateRearHeadroom(recordWriter)
 		for data := buffer.Bytes(); len(data) > 0; {
-			if len(data) == dataLen && dataLen <= maxPayload {
-				record := recordWriter.makeBufferRecordLocked(buffer)
-				buffer = nil
-				records = append(records, record)
-				break
-			}
 			recordLen := min(len(data), maxPayload)
-			records = append(records, recordWriter.makeSliceRecordLocked(data[:recordLen]))
+			chunk := buf.NewSize(frontHeadroom + recordLen + rearHeadroom)
+			chunk.Resize(frontHeadroom, 0)
+			common.Must1(chunk.Write(data[:recordLen]))
+			records = append(records, recordWriter.makeBufferRecordLocked(chunk))
 			data = data[recordLen:]
 		}
-		if buffer != nil {
-			buffer.Release()
-		}
+		buffer.Release()
 	}
 	if len(records) == 0 {
 		return nil
@@ -580,10 +562,6 @@ type packetVectorisedRawWriter struct {
 }
 
 func (w *packetVectorisedRawWriter) WriteVectorised(buffers []*buf.Buffer) error {
-	err := validatePacketVectorBuffers(buffers)
-	if err != nil {
-		return err
-	}
 	var records []*buf.Buffer
 	defer func() {
 		buf.ReleaseMulti(records)
@@ -591,20 +569,30 @@ func (w *packetVectorisedRawWriter) WriteVectorised(buffers []*buf.Buffer) error
 	recordWriter := w.writer
 	recordWriter.access.Lock()
 	defer recordWriter.access.Unlock()
+	var messageTooLongErr error
 	for _, buffer := range buffers {
 		if buffer.IsEmpty() {
 			buffer.Release()
+			continue
+		}
+		if buffer.Len() > maxPayload {
+			buffer.Release()
+			messageTooLongErr = snell.ErrPayloadTooLarge
 			continue
 		}
 		record := recordWriter.makeBufferRecordLocked(buffer)
 		records = append(records, record)
 	}
 	if len(records) == 0 {
-		return nil
+		return messageTooLongErr
 	}
 	flushRecords := records
 	records = nil
-	return w.upstream.WriteVectorised(flushRecords)
+	err := w.upstream.WriteVectorised(flushRecords)
+	if err != nil {
+		return err
+	}
+	return messageTooLongErr
 }
 
 func (w *rawWriter) WriteZeroChunk() error {

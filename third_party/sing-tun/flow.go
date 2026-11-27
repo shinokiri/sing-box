@@ -90,6 +90,11 @@ type Port interface {
 	WritePackets(packets [][]byte) error
 }
 
+type RoutedPort interface {
+	Port
+	RoutedPort()
+}
+
 type SelectorRange struct {
 	Start uint16
 	Count uint16

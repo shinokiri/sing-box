@@ -3,6 +3,7 @@ package dialer
 import (
 	"context"
 	"net"
+	"strconv"
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common/control"
@@ -33,6 +34,9 @@ func (d *DefaultDialer) dialTFOInterface(ctx context.Context, network string, ad
 		// A lazy TFO connection cannot be raced before its first write. Racing
 		// writes instead could send application data on more than one socket.
 		return nil, E.New("`tcp_fast_open` requires a default network interface when multiple interfaces are available")
+	}
+	if address.Addr.Zone() == "" && isLinkScoped(address.Addr) {
+		address.Addr = address.Addr.WithZone(strconv.Itoa(interfaces[0].Index))
 	}
 	if d.androidTFO {
 		// Read the latest cached policy on the first write, not when the lazy

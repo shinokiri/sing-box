@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -68,5 +69,125 @@ func TestTransportEOFDoesNotReturnSessionToPool(t *testing.T) {
 				t.Fatal("BUG: physical EOF was published as a reusable session")
 			}
 		})
+	}
+}
+
+func TestReuseLogicalHalfCloseAcrossReadAndWritePaths(t *testing.T) {
+	psk := []byte("public logical EOF fixture")
+	client, err := NewClient(ClientOptions{PSK: psk, Reuse: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	wire, _ := receiveWire(t, psk, [][]byte{{snell.ReplyTunnel, 42}, nil, {snell.ReplyTunnel, 99}})
+	pending, finish := io.Pipe()
+	defer pending.Close()
+	defer finish.Close()
+	session := client.newReuseSession(&receiveMemoryConn{Reader: io.MultiReader(bytes.NewReader(wire), pending)})
+	defer session.Close()
+	session.state.Store(uint32(reuse.StateActive))
+	destination := M.ParseSocksaddr("fixture.invalid:443")
+	logical, err := session.DialConn(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := logical.(*reuseConn)
+	if err = conn.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	afterWrite := func(err error) {
+		t.Helper()
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("write after half-close returned %v", err)
+		}
+		if !conn.access.TryLock() {
+			t.Fatal("rejected write retained the writer lock")
+		}
+		conn.access.Unlock()
+	}
+	_, err = conn.Write([]byte{1})
+	afterWrite(err)
+	afterWrite(conn.WriteBuffer(buf.New()))
+	afterWrite((&reuseVectorisedWriter{conn: conn}).WriteVectorised([]*buf.Buffer{buf.New()}))
+	if err = conn.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	var data [1]byte
+	if n, err := conn.Read(data[:]); n != 1 || err != nil || data[0] != 42 {
+		t.Fatalf("first request returned %d, %v, %v", n, err, data)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err = conn.Read(data[:]); !errors.Is(err, io.EOF) {
+			t.Fatalf("read after last data returned %v", err)
+		}
+	}
+	buffer := buf.New()
+	defer buffer.Release()
+	if err = conn.ReadBuffer(buffer); !errors.Is(err, io.EOF) {
+		t.Fatalf("buffered read after EOF returned %v", err)
+	}
+	if _, err = (&reuseReadWaiter{conn: conn}).WaitReadBuffer(); !errors.Is(err, io.EOF) {
+		t.Fatalf("wait after EOF returned %v", err)
+	}
+	if err = conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reused, found, _ := client.pool.Take()
+	if !found || reused != session {
+		t.Fatal("completed request did not return its transport to the pool")
+	}
+	next, err := reused.DialConn(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := next.Read(data[:]); n != 1 || err != nil || data[0] != 99 {
+		t.Fatalf("second request returned %d, %v, %v", n, err, data)
+	}
+}
+
+func TestReuseIdleEOFOnUnobservableTransport(t *testing.T) {
+	psk := []byte("public idle transport fixture")
+	client, err := NewClient(ClientOptions{PSK: psk, Reuse: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	raw, peer := net.Pipe()
+	defer raw.Close()
+	defer peer.Close()
+	session := client.newReuseSession(raw)
+	defer session.Close()
+	session.state.Store(uint32(reuse.StateActive))
+	logical, err := session.DialConn(M.ParseSocksaddr("fixture.invalid:443"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Prefetched application bytes do not make a physically closed peer reusable.
+	wire, _ := receiveWire(t, psk, [][]byte{{snell.ReplyTunnel, 42}, nil, {snell.ReplyTunnel, 99}, nil})
+	go func() {
+		if _, err := peer.Write(wire); err == nil {
+			io.Copy(io.Discard, peer)
+		}
+	}()
+	data, err := io.ReadAll(logical)
+	if err != nil || !bytes.Equal(data, []byte{42}) {
+		t.Fatalf("response %x: %v", data, err)
+	}
+	if err = logical.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reuse.State(session.state.Load()) != reuse.StateReady {
+		t.Fatal("healthy transport was not reusable")
+	}
+	peer.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for session.receive.state.Load()&receiveClosed == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if reuse.State(session.state.Load()) != reuse.StateClosed || session.receive.state.Load()&receiveClosed == 0 {
+		t.Fatal("idle EOF did not retire the transport and its receive buffers")
+	}
+	if _, found, _ := client.pool.Take(); found {
+		t.Fatal("pool returned closed transport")
 	}
 }

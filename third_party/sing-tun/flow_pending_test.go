@@ -270,3 +270,25 @@ func TestPendingParentCancellation(t *testing.T) {
 	cancel()
 	waitPendingIdle(t, d)
 }
+
+func TestPendingFramePreservesOffloadMetadataAndPayloadLength(t *testing.T) {
+	lookedUp := make(chan string, 1)
+	accepted := make(chan ForwardFrameMeta, 1)
+	handler := &pendingHandler{judge: func(_ context.Context, _ netip.AddrPort, payload []byte) FlowVerdict {
+		lookedUp <- string(payload)
+		return FlowVerdict{Action: ActionAccept}
+	}}
+	d := NewForwardDispatcher(handler, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
+	t.Cleanup(d.Close)
+	stage := d.NewStage(nil)
+	d.enableAsyncFlow(t.Context(), func(_ []byte, meta ForwardFrameMeta) { accepted <- meta })
+	packet := append(pendingPacket(50000, []byte("hello")), 0, 0, 0, 0)
+	parsed, ok := parseForwardPacket(packet)
+	require.True(t, ok)
+	parsed.transport = parsed.transport[:header.UDP(parsed.transport).Length()]
+	meta := ForwardFrameMeta{dataValid: true}
+	require.True(t, stage.DispatchParsed(packet, meta, &parsed))
+	clear(packet)
+	require.Equal(t, "hello", pendingReceive(t, lookedUp))
+	require.Equal(t, meta, pendingReceive(t, accepted))
+}
