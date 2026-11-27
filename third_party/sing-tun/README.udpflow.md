@@ -84,3 +84,8 @@ Return traffic uses the originating worker's writeback, headroom and route
 lifetime. MTU handling and fragment tracking apply in both directions. The
 bounded, cancellable dispatcher still owns first-packet decisions. The core
 and test modules use the release's core sing-tun pin.
+
+On a cold Ethernet memory TUN, learning the peer's MAC wakes active TCP dials
+that are waiting for ARP or IPv6 Neighbor Discovery. Their first on-wire SYN
+starts the normal TCP retransmission timer. The regression drops the first
+neighbor query on both IP versions and checks cancellation during discovery.

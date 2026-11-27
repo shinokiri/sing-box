@@ -141,6 +141,13 @@ func newEthernetGuest(t *testing.T, addresses ...netip.Prefix) *ethernetGuest {
 		if err != nil {
 			return err
 		}
+		for _, prefix := range addresses {
+			if prefix.Addr().Is6() {
+				if err := kernelWaitIPv6LocalRoute(prefix.Addr()); err != nil {
+					return err
+				}
+			}
+		}
 		return netlink.RouteAdd(&netlink.Route{LinkIndex: link.Attrs().Index, Gw: ethernetGateway4.Addr().AsSlice()})
 	})
 	t.Cleanup(func() { guest.tap.Close() })
@@ -149,6 +156,13 @@ func newEthernetGuest(t *testing.T, addresses ...netip.Prefix) *ethernetGuest {
 
 func (g *ethernetGuest) attach(t *testing.T) *kernelStackFixture {
 	t.Helper()
+	bridge, fail := context.WithCancelCause(t.Context())
+	t.Cleanup(func() {
+		if err := context.Cause(bridge); err != nil && !errors.Is(err, context.Canceled) {
+			t.Error(err)
+		}
+		fail(nil)
+	})
 	var queue *OutboundQueue
 	memoryTun := NewMemoryTun(MemoryTunOptions{
 		MTU:         1500,
@@ -159,30 +173,19 @@ func (g *ethernetGuest) attach(t *testing.T) *kernelStackFixture {
 	t.Cleanup(func() { memoryTun.Close() })
 	queue = memoryTun.NewOutboundQueue(func(frames []*buf.Buffer) {
 		for _, frame := range frames {
-			g.tap.Write(frame.Bytes())
+			n, err := g.tap.Write(frame.Bytes())
+			if err != nil {
+				fail(fmt.Errorf("write TAP: %w", err))
+				break
+			}
+			if n != frame.Len() {
+				fail(fmt.Errorf("TAP wrote %d of %d bytes", n, frame.Len()))
+				break
+			}
 		}
 		buf.ReleaseMulti(frames)
 	})
 	t.Cleanup(func() { queue.Close() })
-	go func() {
-		storage := make([]byte, 65536)
-		for {
-			n, err := g.tap.Read(storage)
-			if err != nil {
-				return
-			}
-			frame := storage[:n]
-			if n >= header.EthernetMinimumSize+header.IPv6MinimumSize &&
-				header.Ethernet(frame).Type() == header.IPv6ProtocolNumber &&
-				header.IPv6(frame[header.EthernetMinimumSize:]).NextHeader() == uint8(header.IPv6HopByHopOptionsExtHdrIdentifier) {
-				continue
-			}
-			err = memoryTun.WaitWritePackets([][]byte{frame})
-			if err != nil {
-				return
-			}
-		}
-	}()
 	fixture := &kernelStackFixture{
 		tcp: make(map[uint16]chan kernelAccept),
 		udp: make(map[uint16]chan N.PacketConn),
@@ -203,6 +206,27 @@ func (g *ethernetGuest) attach(t *testing.T) *kernelStackFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { stack.Close() })
+	go func() {
+		storage := make([]byte, 65536)
+		for {
+			n, err := g.tap.Read(storage)
+			if err != nil {
+				fail(fmt.Errorf("read TAP: %w", err))
+				return
+			}
+			frame := storage[:n]
+			if n >= header.EthernetMinimumSize+header.IPv6MinimumSize &&
+				header.Ethernet(frame).Type() == header.IPv6ProtocolNumber &&
+				header.IPv6(frame[header.EthernetMinimumSize:]).NextHeader() == uint8(header.IPv6HopByHopOptionsExtHdrIdentifier) {
+				continue
+			}
+			err = memoryTun.WaitWritePackets([][]byte{frame})
+			if err != nil {
+				fail(fmt.Errorf("deliver TAP frame: %w", err))
+				return
+			}
+		}
+	}()
 	fixture.stack = stack
 	return fixture
 }
@@ -351,6 +375,12 @@ func TestGoMemoryEthernet(t *testing.T) {
 			defer cancel()
 			conn, err := fixture.stack.DialTCP(ctx, source, listener.Addr().(*net.TCPAddr).AddrPort())
 			if err != nil {
+				guest.run(test, func() error {
+					routes, routeErr := netlink.RouteGet(source.AsSlice())
+					neighbors, neighErr := netlink.NeighList(0, netlink.FAMILY_ALL)
+					test.Logf("guest route to %s: %v (%v), neighbors: %v (%v)", source, routes, routeErr, neighbors, neighErr)
+					return nil
+				})
 				test.Fatal(err)
 			}
 			defer conn.Close()

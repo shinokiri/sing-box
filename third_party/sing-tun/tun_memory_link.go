@@ -100,14 +100,17 @@ func (t *MemoryTun) outboundQueueForIPv4(destination [header.IPv4AddressSize]byt
 	return queue
 }
 
-func (t *MemoryTun) learnPeer(source []byte) {
+func (t *MemoryTun) learnPeer(source []byte) bool {
 	if t.peerMACFixed || source[0]&1 != 0 {
-		return
+		return false
 	}
 	packed := goPackMAC(source)
-	if packed != 0 && t.peerMAC.Load() != packed {
+	previous := t.peerMAC.Load()
+	if packed != 0 && previous != packed {
 		t.peerMAC.Store(packed)
+		return previous == 0
 	}
+	return false
 }
 
 func (t *MemoryTun) newOutboundFrame(length int) *buf.Buffer {
@@ -231,7 +234,9 @@ func (o *goMemoryIO) receiveLink(buffer *buf.Buffer) (ForwardFrameMeta, bool) {
 			return meta, false
 		}
 		ethernet := header.Ethernet(buffer.To(header.EthernetMinimumSize))
-		o.tun.learnPeer(ethernet[header.EthernetAddressSize : 2*header.EthernetAddressSize])
+		if o.tun.learnPeer(ethernet[header.EthernetAddressSize : 2*header.EthernetAddressSize]) {
+			o.stack.engines[0].resumePeerDials()
+		}
 		etherType := ethernet.Type()
 		buffer.Advance(header.EthernetMinimumSize)
 		packet := buffer.Bytes()

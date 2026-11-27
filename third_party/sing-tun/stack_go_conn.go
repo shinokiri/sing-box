@@ -111,6 +111,7 @@ type GoConn struct {
 	retransmitAttempts    uint8
 	probeAttempts         uint8
 	handshakeAttempts     uint8
+	synWaitingForPeer     bool
 	persistAttempts       uint8
 	state                 uint8
 

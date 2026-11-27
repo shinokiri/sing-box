@@ -108,10 +108,20 @@ func (e *goEngine) handleDial(conn *GoConn) {
 	now := e.coarseTime.Load()
 	conn.local.Port = port
 	conn.sendISN = e.initialSequence(key, now)
+	e.startDialHandshake(conn, now)
+}
+
+func (e *goEngine) startDialHandshake(conn *GoConn, now int64) {
 	conn.lastActivity = now
 	conn.buildHandshake(e.localMSS(conn.ipVersion), true, true, header.TCPFlagSyn, 0)
-	err := goIgnoreDropped(conn.engine.platformIO.writePacket(conn.handshakeImage[:conn.handshakeLength], ForwardFrameMeta{}))
-	if err != nil {
+	packet := conn.handshakeImage[:conn.handshakeLength]
+	err := e.platformIO.writePacket(packet, ForwardFrameMeta{})
+	if err == errGoFrameDropped {
+		if link, ok := e.platformIO.(*goMemoryIO); ok && link.tun.ethernet {
+			_, resolved := link.tun.linkDestination(packet)
+			conn.synWaitingForPeer = !resolved
+		}
+	} else if err != nil {
 		e.detachConn(conn, E.Cause(err, "go: send SYN"), goDeathImmediate)
 		return
 	}
@@ -119,6 +129,25 @@ func (e *goEngine) handleDial(conn *GoConn) {
 	conn.handshakeStamp = now
 	conn.handshakeDeadline = now + int64(goSynRetransmit)
 	e.rearmTimer(conn)
+}
+
+// A cold Ethernet link sends an ARP or NDP query in place of the first SYN.
+// The memory TUN's single engine learns the peer while reading its first frame.
+// Start the TCP retransmission clock when the SYN can actually go on the wire.
+func (e *goEngine) resumePeerDials() {
+	now := e.coarseTime.Load()
+	for _, conn := range e.flows {
+		if !conn.synWaitingForPeer || conn.state != goTCPSynSent {
+			continue
+		}
+		conn.synWaitingForPeer = false
+		conn.access.Lock()
+		aborted := conn.abort
+		conn.access.Unlock()
+		if !aborted {
+			e.startDialHandshake(conn, now)
+		}
+	}
 }
 
 func (e *goEngine) retransmitSyn(conn *GoConn, now int64) {
