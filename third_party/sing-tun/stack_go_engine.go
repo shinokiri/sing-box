@@ -235,7 +235,7 @@ func newGoEngine(stack *Go, platformIO goPlatformIO, engineCount int) *goEngine 
 		// First-flow routing can resolve DNS or connect; deliver accepted
 		// packets through the engine queue so socket state stays on its worker.
 		worker := engine.dispatchStage.dispatcher
-		worker.EnableAsyncFlow(stack.ctx, engine.injectFlowPacket)
+		worker.enableAsyncFlow(stack.ctx, engine.injectFlowPacket)
 	}
 	engine.closeMessage.kind = goMessageStackClose
 	engine.resetMessage.kind = goMessageStackReset
@@ -529,11 +529,12 @@ func (e *goEngine) handleMessage(message *goMessage) {
 }
 
 // Shutdown waits for this handoff before the engine drains its queue.
-func (e *goEngine) injectFlowPacket(packet []byte) {
+func (e *goEngine) injectFlowPacket(packet []byte, meta ForwardFrameMeta) {
 	e.flowInjectAccess.Lock()
 	defer e.flowInjectAccess.Unlock()
 	if !e.stack.closed.Load() {
-		e.inject(packet, ForwardFrameMeta{acceptedFragment: true})
+		meta.acceptedFragment = true
+		e.inject(packet, meta)
 	}
 }
 

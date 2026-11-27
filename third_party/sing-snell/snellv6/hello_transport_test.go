@@ -285,8 +285,8 @@ type helloEchoHandler struct{}
 func (helloEchoHandler) NewConnectionEx(_ context.Context, conn net.Conn, _, _ M.Socksaddr, onClose N.CloseHandlerFunc) {
 	go func() {
 		_, err := io.Copy(conn, conn)
-		if writer, ok := conn.(N.WriteCloser); err == nil && ok {
-			err = writer.CloseWrite()
+		if err == nil {
+			err = N.CloseWrite(conn)
 		}
 		conn.Close()
 		if onClose != nil {

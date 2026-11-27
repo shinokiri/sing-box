@@ -278,7 +278,7 @@ func (d *ForwardDispatcher) dispatch(packet []byte, parsed *forwardPacket) bool 
 	key := parsed.flowKey()
 	if d.async != nil {
 		if pending := d.async.pending[key]; pending != nil {
-			if d.enqueuePendingPacket(pending, packet) && parsed.fragment {
+			if d.enqueuePendingPacket(pending, packet, parsed) && parsed.fragment {
 				d.fragments.pend(parsed.fragmentKey(), parsed.fragmentInfo, d.now())
 			}
 			d.access.Unlock()
@@ -305,7 +305,7 @@ func (d *ForwardDispatcher) dispatch(packet []byte, parsed *forwardPacket) bool 
 		return false
 	}
 	if d.async != nil {
-		d.startPendingFlow(key, packet)
+		d.startPendingFlow(key, packet, parsed)
 		if parsed.fragment && d.async.pending[key] != nil {
 			d.fragments.pend(parsed.fragmentKey(), parsed.fragmentInfo, now)
 		}
@@ -1283,8 +1283,18 @@ func (r *portReturn) returnICMPError(parsed *forwardPacket) *forwardFlow {
 }
 
 type heldPacket struct {
-	packet []byte
-	meta   ForwardFrameMeta
+	packet          []byte
+	transportLength int
+	meta            ForwardFrameMeta
+}
+
+func (h *heldPacket) parse() forwardPacket {
+	parsed, _ := parseForwardPacket(h.packet)
+	parsed.transport = parsed.transport[:h.transportLength]
+	if h.meta != (ForwardFrameMeta{}) {
+		parsed.frameMeta = &h.meta
+	}
+	return parsed
 }
 
 func (s *ForwardDispatcher) dispatchFragment(packet []byte, parsed *forwardPacket) bool {

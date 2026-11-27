@@ -15,7 +15,7 @@ import (
 func (d *ForwardDispatcher) hijackDNSPacket(packet *forwardPacket) {
 	writer := &dnsResponseWriter{
 		writeback:      d.writeback,
-		identification: &d.identification,
+		identification: &d.root.identification,
 		source:         packet.source,
 	}
 	d.handler.NewDNSPacket(header.UDP(packet.transport).Payload(), M.SocksaddrFromNetIP(packet.source), M.SocksaddrFromNetIP(packet.destination), writer)

@@ -108,7 +108,7 @@ func TestGoEngineDefersRoutingAndHandsAcceptedVerdictBack(t *testing.T) {
 	require.False(t, engine.dispatchStage.DispatchParsed(frame.buffer.Bytes(), frame.meta, &parsed))
 	require.Equal(t, 37*time.Second, parsed.verdict.UDPTimeout)
 	stack.closed.Store(true)
-	engine.injectFlowPacket(pendingPacket(50001, []byte("closed")))
+	engine.injectFlowPacket(pendingPacket(50001, []byte("closed")), ForwardFrameMeta{})
 	require.Nil(t, engine.injectStack.popAll(), "shutdown must stop late asynchronous handoffs")
 }
 
