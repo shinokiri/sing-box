@@ -328,7 +328,12 @@ func (d *DefaultDialer) DialContext(ctx context.Context, network string, address
 				}
 			}
 		}
-		conn, err := listener.ListenNetworkNamespace[net.Conn](ctx, d.netns, func() (net.Conn, error) {
+		namespace := d.netns
+		if d.tcpFastOpen && N.NetworkName(network) == N.NetworkTCP {
+			// The lazy TCP connection enters d.netns when its first write opens the socket.
+			namespace = ""
+		}
+		conn, err := listener.ListenNetworkNamespace[net.Conn](ctx, namespace, func() (net.Conn, error) {
 			switch N.NetworkName(network) {
 			case N.NetworkUDP:
 				if !address.IsIPv6() {

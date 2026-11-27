@@ -7,6 +7,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -111,9 +112,9 @@ func (s *URLTest) SelectedForFlow(network string) (adapter.Outbound, context.Con
 	if s.interruptExternalConnections {
 		lifetime = s.group.interruptGroup.FlowContext()
 	}
-	outbound := s.group.selectedOutboundUDP
+	outbound := s.group.selectedOutboundUDP.Load()
 	if network != N.NetworkUDP {
-		outbound = s.group.selectedOutboundTCP
+		outbound = s.group.selectedOutboundTCP.Load()
 	}
 	if outbound == nil {
 		outbound, _ = s.group.Select(network)
