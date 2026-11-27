@@ -105,17 +105,39 @@ type reuseSession struct {
 	net.Conn
 	client *Client
 
-	state    atomic.Uint32
-	keepOnce atomic.Bool
-	receive  receiveLifecycle
-	reader   reuse.RecordReader
-	writer   reuse.RecordWriter
+	state      atomic.Uint32
+	idleReader atomic.Pointer[reuse.Conn]
+	keepOnce   atomic.Bool
+	receive    receiveLifecycle
+	reader     reuse.RecordReader
+	writer     reuse.RecordWriter
 
 	urlTest *URLTestDialer
 }
 
 func (c *Client) newReuseSession(conn net.Conn) *reuseSession {
 	return &reuseSession{Conn: conn, client: c}
+}
+
+func (s *reuseSession) Read(p []byte) (int, error) {
+	if watcher := s.idleReader.Load(); watcher != nil {
+		return watcher.Read(p)
+	}
+	return s.Conn.Read(p)
+}
+
+// Check after the first actual response so a deferred TFO dial has opened its socket.
+func (s *reuseSession) configureIdleReader() {
+	if _, measured, alive := reuse.TCPReceiveState(s.Conn); !measured && alive {
+		s.idleReader.Store(&reuse.Conn{Conn: s.Conn, OnIdleClose: s.releaseClosedTransport})
+	}
+}
+
+func (s *reuseSession) setReady(from reuse.State) bool {
+	if watcher := s.idleReader.Load(); watcher != nil {
+		return watcher.Ready(&s.state, from)
+	}
+	return s.state.CompareAndSwap(uint32(from), uint32(reuse.StateReady))
 }
 
 func (s *reuseSession) ReuseState() *atomic.Uint32 {
@@ -154,7 +176,7 @@ func (s *reuseSession) Release(reusable bool) {
 		s.Close()
 		return
 	}
-	if !s.state.CompareAndSwap(uint32(reuse.StateActive), uint32(reuse.StateReady)) {
+	if !s.setReady(reuse.StateActive) {
 		if reuse.State(s.state.Load()) != reuse.StateClosed {
 			s.Close()
 		}
@@ -171,17 +193,21 @@ func (s *reuseSession) Close() error {
 	if reuse.State(s.state.Swap(uint32(reuse.StateClosed))) == reuse.StateClosed {
 		return nil
 	}
+	s.releaseClosedTransport()
+	return s.Conn.Close()
+}
+
+func (s *reuseSession) releaseClosedTransport() {
 	if s.urlTest != nil {
 		s.urlTest.signalReady()
 	}
 	s.receive.close(s.releaseReader)
-	return s.Conn.Close()
 }
 
 // markReady also wakes the exclusive URLTest handoff. Ordinary sessions keep
 // their existing pool behavior.
 func (s *reuseSession) markReady() {
-	if s.state.CompareAndSwap(uint32(reuse.StateWaiting), uint32(reuse.StateReady)) && s.urlTest != nil {
+	if s.setReady(reuse.StateWaiting) && s.urlTest != nil {
 		s.urlTest.signalReady()
 	}
 }
@@ -260,7 +286,10 @@ func (c *reuseConn) readResponse() error {
 	var record *buf.Buffer
 	var err error
 	if c.session.reader == nil {
-		c.session.reader, record, err = readFirstResponse(c.session.Conn, c.session.client.mode, c.session.client.psk, c.session.client.profile, c.readWaitOptions)
+		c.session.reader, record, err = readFirstResponse(c.session, c.session.client.mode, c.session.client.psk, c.session.client.profile, c.readWaitOptions)
+		if err == nil {
+			c.session.configureIdleReader()
+		}
 	} else {
 		record, err = c.session.reader.ReadRecord()
 	}

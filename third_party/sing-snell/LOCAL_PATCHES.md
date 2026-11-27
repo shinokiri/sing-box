@@ -8,7 +8,7 @@ Reserved URLTest sessions are isolated from the shared idle pool. TCP Fast Open 
 
 Tests in the parent repository's protocol/snell package exercise the complete URLTest entry point with a Snell server and controlled EOF/connect delays. The existing common/dialer tests verify real Android-path TFO socket controls.
 
-HTTPS close also needs a separate bounded deadline for the Snell EOF: Go 1.26.8 crypto/tls.closeNotify expires the underlying write deadline before calling the logical connection's Close. Reserved probe sessions replace that deadline before sending their EOF; they still honor cancellation and the earlier of the test deadline or a five-second close limit. Ordinary business-session close behavior is unchanged.
+HTTPS close also needs a separate bounded deadline for the Snell EOF: Go 1.26.8 crypto/tls.closeNotify expires the underlying write deadline before calling the logical connection's Close. Reserved probe sessions replace that deadline before sending their EOF; they still honor cancellation and the earlier of the test deadline or a five-second close limit. Ordinary sessions clear expired deadlines before sending their own EOF, following the upstream close sequence.
 
 # Receive-window-informed idle session retention
 
@@ -27,7 +27,7 @@ mutex; evicted waiting sessions retain their drain-completion accounting.
 
 This is a hint, not a measurement of the currently advertised window or a
 throughput guarantee. Queued data and other kernel clamps can reduce that
-window. Queries happen at pool transitions only. Capacity, idle expiration,
+window. The pool samples the hint when selecting or admitting a session. Capacity, idle expiration,
 active-session ownership and automatic TCP receive tuning are unchanged;
 no prewarming traffic, keepalives, periodic queries or buffer locks are added.
 
@@ -42,15 +42,19 @@ queries are reused where the socket was already accessible. The metadata
 lookup also follows replaceable tracked/deferred-TFO wrappers when an outer
 SyscallConn method cannot reach their socket, including traffic-counter wrappers
 without modifying their accounting; those paths previously skipped
-the receive-window query entirely. Non-replaceable and unopened transports
-retain their fallback behavior. No network probe is added, and application
-bytes and deadlines are preserved. Normal logical EOF still permits reuse;
-other platforms retain their existing idle
-transport selection. No application request is replayed after a failed write.
+the receive-window query entirely.
+
+At the first response, after a deferred dial has opened its socket, v6 selects
+how to observe idle connections. A socket with a usable TCP_INFO hint keeps
+the kernel-state checkout path. Other live transports use the upstream
+one-byte idle read. If the next request has claimed the connection, its
+decoder receives the byte. A close while idle retires the session and releases
+its buffered reader. A decoder that already prefetched another reply can
+return the session to idle with the same transport read still pending.
 
 Regression tests exercise scalar, buffer, read-waiter and drain paths after a
 physical EOF, plus a real loopback TCP peer that sends FIN after a valid logical
-EOF. Existing hello-framing and sequential-reuse tests remain the controls.
+EOF. A pipe-backed test also covers the idle EOF path on opaque transports. Existing hello-framing and sequential-reuse tests remain the controls.
 Wrapped-socket regressions cover the trackedConn/slowOpenConn syscall behavior,
 and benchmarks separately measure ordinary and wrapped pool checkout.
 A close racing after checkout can still fail the current request; the change

@@ -57,6 +57,9 @@ func TestIdlePeerFINDoesNotReturnSessionToPool(t *testing.T) {
 	if err != nil || !bytes.Equal(data, []byte{42}) {
 		t.Fatal(data, err)
 	}
+	if session.idleReader.Load() != nil {
+		t.Fatal("loopback TCP started a portable idle reader despite observable kernel state")
+	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
