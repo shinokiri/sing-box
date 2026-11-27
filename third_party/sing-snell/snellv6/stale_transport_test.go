@@ -162,7 +162,8 @@ func TestReuseIdleEOFOnUnobservableTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, _ := receiveWire(t, psk, [][]byte{{snell.ReplyTunnel, 42}, nil})
+	// Prefetched application bytes do not make a physically closed peer reusable.
+	wire, _ := receiveWire(t, psk, [][]byte{{snell.ReplyTunnel, 42}, nil, {snell.ReplyTunnel, 99}, nil})
 	go func() {
 		if _, err := peer.Write(wire); err == nil {
 			io.Copy(io.Discard, peer)

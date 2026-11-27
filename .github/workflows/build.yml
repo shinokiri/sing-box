@@ -100,6 +100,7 @@ jobs:
           gofmt -d adapter/outbound.go common/urltest/urltest.go protocol/snell/urltest.go protocol/snell/urltest_test.go third_party/sing-snell/snellv6/reuse.go third_party/sing-snell/snellv6/urltest.go || urltest_format_status=$?
           go test -race -count=3 -run '^TestURLTest' -v ./protocol/snell
           go test -race github.com/sagernet/sing-snell/...
+          go test -race -count=20 -run '^Test(ResponseSessionReusesPrefetchedReply|ReuseLogicalHalfCloseAcrossReadAndWritePaths|ReuseIdleEOFOnUnobservableTransport|IdleReadSurvivesBufferedCheckout)$' github.com/sagernet/sing-snell/internal/reuse github.com/sagernet/sing-snell/snellv6
           exit "$urltest_format_status"
       - name: Compile Snell receive-hint fallback on non-Linux targets
         run: |
