@@ -457,7 +457,7 @@ index 0000000..ae5e9b6
 +    }
 +}
 diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
-index 38a7bac..efc0661 100644
+index 38a7bac..ebb3087 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
 @@ -68,6 +68,8 @@ import androidx.compose.ui.unit.dp
@@ -500,7 +500,7 @@ index 38a7bac..efc0661 100644
                      val y = (index / columns) * (dotSizePx + dotSpacingPx)
                      drawRoundRect(
 -                        color = palette.forDelay(item.urlTestDelay),
-+                        color = if (item.urlTestState == UrlTestState.FAILED) palette.bad else palette.forDelay(item.urlTestDelay),
++                        color = if (item.urlTestState == UrlTestState.FAILED) palette.status.bad else palette.forDelay(item.urlTestDelay),
                          topLeft = Offset(x, y),
                          size = Size(dotSizePx, dotSizePx),
                          cornerRadius = cornerRadius,
