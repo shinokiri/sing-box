@@ -172,8 +172,7 @@ func (r *portReturn) classifyFragment(parsed *forwardPacket, now int64) (returnD
 			rule *rewriteRule
 		)
 		if parsed.hasFlow {
-			var scratch rewriteRule
-			flow, rule = r.matchReverse(parsed, &scratch)
+			flow, rule = r.matchReverse(parsed)
 		}
 		r.fragmentAccess.Lock()
 		r.fragments.resolve(key, parsed.fragmentInfo, flow, rule, now)

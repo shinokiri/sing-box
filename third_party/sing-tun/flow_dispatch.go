@@ -79,6 +79,7 @@ type forwardFlow struct {
 	mapping       *natMapping
 	selectorKey   natSelectorKey
 	owner         *ForwardDispatcher
+	generation    uint64
 	reverseKey    flowKey
 	forwardRule   rewriteRule
 	reverseRule   rewriteRule
@@ -179,9 +180,8 @@ type ForwardDispatcher struct {
 	returnPath     *forwardReturn
 	exhaustedLogAt int64
 
-	segmentBuffers [][]byte
-	segmentSizes   []int
-	segmentUsed    int
+	segmentPool
+	routedReturns *returnOutput
 
 	async *asyncFlowState
 }
@@ -565,6 +565,7 @@ func (d *ForwardDispatcher) createFlow(packet *forwardPacket, verdict FlowVerdic
 	flow := &forwardFlow{
 		nat:                      nat,
 		owner:                    d,
+		generation:               d.returnPath.generation.Load(),
 		effectiveMTU:             effectiveMTU,
 		protocol:                 packet.protocol,
 		udpTimeout:               udpTimeout,
@@ -640,7 +641,7 @@ type relayOutput interface {
 	relayReserve(count int, size int) ([][]byte, []int)
 	relayPacket(packet []byte)
 	relaySegment(segment []byte)
-	relayTooBig(packet *forwardPacket, mtu uint32)
+	relayTooBig(packet []byte, mtu uint32)
 }
 
 type stagePortOutput struct {
@@ -670,12 +671,12 @@ func (o *stagePortOutput) relaySegment(segment []byte) {
 	o.stage.stagePort(o.flow, segment)
 }
 
-func (o *stagePortOutput) relayTooBig(packet *forwardPacket, mtu uint32) {
+func (o *stagePortOutput) relayTooBig(packet []byte, mtu uint32) {
 	o.stage.stageTooBig(packet, mtu)
 }
 
-func (s *ForwardDispatcher) stageTooBig(packet *forwardPacket, mtu uint32) {
-	reply, ok := BuildICMPError(packet.network, ICMPErrorPacketTooBig, netip.Addr{}, mtu, s.writeback.ReturnHeadroom())
+func (s *ForwardDispatcher) stageTooBig(packet []byte, mtu uint32) {
+	reply, ok := BuildICMPError(packet, ICMPErrorPacketTooBig, netip.Addr{}, mtu, s.writeback.ReturnHeadroom())
 	if ok {
 		s.writebackBatch = append(s.writebackBatch, reply)
 	}
@@ -687,10 +688,20 @@ func (d *ForwardDispatcher) forwardToPort(flow *forwardFlow, packet *forwardPack
 	}
 	d.portOutput.flow = flow
 	d.portOutput.borrowed = packet.frameMeta != nil
-	relayFlow(&d.portOutput, d.logger, flow, &flow.forwardRule, packet, raw, packet.frameMeta, false)
+	if flow.udpMapping != nil {
+		// The proxy socket sends a complete datagram after the ingress stack
+		// has reassembled it. Only L3 ports accept IP fragments.
+		countRelay(flow, len(raw), false)
+		applyRewrite(packet, &flow.forwardRule)
+		d.portOutput.relayPacket(raw)
+		return
+	}
+	if relayFlow(&d.portOutput, d.logger, flow, &flow.forwardRule, packet, raw, packet.frameMeta) {
+		countRelay(flow, len(raw), false)
+	}
 }
 
-func relayFlow(output relayOutput, log logger.Logger, flow *forwardFlow, rule *rewriteRule, packet *forwardPacket, raw []byte, meta *ForwardFrameMeta, reverse bool) {
+func relayFlow(output relayOutput, log logger.Logger, flow *forwardFlow, rule *rewriteRule, packet *forwardPacket, raw []byte, meta *ForwardFrameMeta) bool {
 	effectiveMTU := flow.effectiveMTU
 	if meta != nil {
 		meta.completeChecksum(raw)
@@ -706,16 +717,14 @@ func relayFlow(output relayOutput, log logger.Logger, flow *forwardFlow, rule *r
 		if packet.protocol == uint8(header.TCPProtocolNumber) {
 			headerLength, segmentSize, segmentable := tcpSegmentSize(packet, raw, effectiveMTU)
 			if segmentable {
-				countRelay(flow, len(raw), reverse)
 				rewritePacket(packet, rule, flow.effectiveMTU)
 				err := segmentTCP(output, packet, raw, headerLength, segmentSize)
 				if err != nil {
 					log.Trace(E.Cause(err, "segment packet"))
 				}
-				return
+				return true
 			}
 		} else if packet.ipVersion == 4 && header.IPv4(packet.network).Flags()&header.IPv4FlagDontFragment == 0 {
-			countRelay(flow, len(raw), reverse)
 			rewritePacket(packet, rule, flow.effectiveMTU)
 			fragments, ok := fragmentIPv4Packet(header.IPv4(packet.network), flow.effectiveMTU, output.relayHeadroom())
 			if ok {
@@ -723,14 +732,14 @@ func relayFlow(output relayOutput, log logger.Logger, flow *forwardFlow, rule *r
 					output.relaySegment(fragment)
 				}
 			}
-			return
+			return true
 		}
-		output.relayTooBig(packet, flow.effectiveMTU)
-		return
+		output.relayTooBig(packet.network, flow.effectiveMTU)
+		return false
 	}
-	countRelay(flow, len(raw), reverse)
 	rewritePacket(packet, rule, flow.effectiveMTU)
 	output.relayPacket(raw)
+	return true
 }
 
 func countRelay(flow *forwardFlow, n int, reverse bool) {
@@ -816,6 +825,7 @@ func (d *ForwardDispatcher) ResetNetwork() {
 }
 
 func (d *ForwardDispatcher) resetStages() {
+	d.returnPath.generation.Add(1)
 	d.stagesAccess.Lock()
 	stages := append([]*ForwardStage(nil), d.stages...)
 	d.stagesAccess.Unlock()
@@ -832,6 +842,10 @@ func (d *ForwardDispatcher) resetLocal() {
 	defer d.access.Unlock()
 	d.cancelPendingFlows()
 	d.fragments.reset()
+	if d.routedReturns != nil {
+		d.routedReturns.recycle()
+		d.routedReturns = nil
+	}
 	for key, entry := range d.table {
 		d.removeEntry(key, entry, FlowCloseReset)
 	}
@@ -848,8 +862,14 @@ func (d *ForwardDispatcher) Flush() {
 		return
 	}
 	packets := d.flushPackets()
+	returns := d.routedReturns
+	d.routedReturns = nil
 	d.access.Unlock()
 	d.writeBackPackets(packets)
+	if returns != nil {
+		returns.flush(d.logger)
+		returns.recycle()
+	}
 }
 
 // Caller holds access. Port batches borrow the caller's TUN storage, so they
@@ -859,12 +879,7 @@ func (d *ForwardDispatcher) flushPackets() [][]byte {
 	for index := range d.stagedPorts {
 		d.flushPort(&d.stagedPorts[index])
 	}
-	if retain := max(d.segmentUsed, segmentRetainCount); len(d.segmentBuffers) > retain {
-		clear(d.segmentBuffers[retain:])
-		d.segmentBuffers = d.segmentBuffers[:retain]
-		d.segmentSizes = d.segmentSizes[:retain]
-	}
-	d.segmentUsed = 0
+	d.resetSegments()
 	packets := d.writebackBatch
 	d.writebackBatch = nil
 	d.maybeSweep(d.now())
@@ -947,6 +962,7 @@ func (d *ForwardDispatcher) removeEntry(key flowKey, entry *flowEntry, reason Fl
 		if reason == FlowCloseTimeout && entry.flow.finForward.Load() && entry.flow.finReverse.Load() {
 			reason = FlowCloseFinished
 		}
+		entry.flow.aborted.Store(true)
 		entry.flow.close(reason)
 		entry.flow.nat.release(entry.flow)
 	}
@@ -1008,6 +1024,7 @@ func isICMPProtocol(protocol uint8) bool {
 }
 
 type forwardReturn struct {
+	generation atomic.Uint64
 	dispatcher *ForwardDispatcher
 	closed     atomic.Bool
 }
@@ -1032,17 +1049,32 @@ const (
 )
 
 type returnBatch struct {
-	writeback ForwardWriteback
-	packets   [][]byte
+	destination *ForwardDispatcher
+	packets     [][]byte
+	owners      []*forwardFlow
 }
 
+func (f *forwardFlow) canDeliverReturn() bool {
+	// A received TCP RST closes the flow during classification. Deliver it and
+	// preceding data in order while this flow still owns the route and tuple.
+	path := f.owner.returnPath
+	return !f.aborted.Load() && !path.closed.Load() && path.generation.Load() == f.generation && !routeExpired(f.routeContexts)
+}
+
+// The worker borrows RX frames only during dispatch. A detached output owns
+// its copies and GSO segments until the destination finishes writing the batch.
+var returnOutputPool = sync.Pool{New: func() any { return new(returnOutput) }}
+
 type returnOutput struct {
-	returnPath *portReturn
-	ingress    ForwardWriteback
-	headroom   int
-	raw        []byte
-	writeback  ForwardWriteback
-	batches    []returnBatch
+	segmentPool
+	owner             *forwardFlow
+	ingressGeneration uint64
+	returnPath        *portReturn
+	ingress           *ForwardDispatcher
+	headroom          int
+	raw               []byte
+	destination       *ForwardDispatcher
+	batches           []returnBatch
 }
 
 func (o *returnOutput) relayHeadroom() int {
@@ -1050,58 +1082,86 @@ func (o *returnOutput) relayHeadroom() int {
 }
 
 func (o *returnOutput) relayReserve(count int, size int) ([][]byte, []int) {
-	buffers := make([][]byte, count)
-	for index := range buffers {
-		buffers[index] = make([]byte, size)
-	}
-	return buffers, make([]int, count)
+	return o.reserveSegments(count, size)
 }
 
 func (o *returnOutput) relayPacket(packet []byte) {
 	raw := o.raw
 	if raw == nil {
-		raw = make([]byte, o.headroom+len(packet))
+		buffers, _ := o.reserveSegments(1, o.headroom+len(packet))
+		raw = buffers[0]
 		copy(raw[o.headroom:], packet)
 	}
 	o.relaySegment(raw)
 }
 
 func (o *returnOutput) relaySegment(segment []byte) {
-	index := slices.IndexFunc(o.batches, func(batch returnBatch) bool { return batch.writeback == o.writeback })
-	if index < 0 {
-		o.batches = append(o.batches, returnBatch{writeback: o.writeback})
-		index = len(o.batches) - 1
-	}
-	o.batches[index].packets = append(o.batches[index].packets, segment)
+	o.stage(o.destination, segment)
 }
 
-func (o *returnOutput) relayTooBig(packet *forwardPacket, mtu uint32) {
+func (o *returnOutput) stage(destination *ForwardDispatcher, packet []byte) {
+	index := slices.IndexFunc(o.batches, func(batch returnBatch) bool { return batch.destination == destination })
+	if index < 0 {
+		index = len(o.batches)
+		o.batches = slices.Grow(o.batches, 1)[:index+1]
+		o.batches[index].destination = destination
+	}
+	batch := &o.batches[index]
+	batch.packets = append(batch.packets, packet)
+	batch.owners = append(batch.owners, o.owner)
+}
+
+func (o *returnOutput) relayTooBig(packet []byte, mtu uint32) {
 	headroom := 0
 	if o.ingress != nil {
-		headroom = o.ingress.ReturnHeadroom()
+		headroom = o.ingress.writeback.ReturnHeadroom()
 	}
-	reply, ok := BuildICMPError(packet.network, ICMPErrorPacketTooBig, netip.Addr{}, mtu, headroom)
+	reply, ok := BuildICMPError(packet, ICMPErrorPacketTooBig, netip.Addr{}, mtu, headroom)
 	if !ok {
 		return
 	}
-	var err error
-	if o.ingress == nil {
-		err = o.returnPath.nat.port.WritePackets([][]byte{reply})
-	} else {
-		err = o.ingress.WriteReturnPackets([][]byte{reply})
+	if o.ingress != nil {
+		o.stage(o.ingress, reply)
+		return
 	}
+	err := o.returnPath.nat.port.WritePackets([][]byte{reply})
 	if err != nil {
 		o.returnPath.dispatcher.logger.Trace(E.Cause(err, "write packet too big"))
 	}
 }
 
-func (o *returnOutput) flush() {
+func (o *returnOutput) flush(log logger.Logger) {
 	for _, batch := range o.batches {
-		err := batch.writeback.WriteReturnPackets(batch.packets)
-		if err != nil {
-			o.returnPath.dispatcher.logger.Trace(E.Cause(err, "write return packets"))
+		if o.ingress != nil && (o.ingress.returnPath.closed.Load() || o.ingress.returnPath.generation.Load() != o.ingressGeneration) {
+			return
+		}
+		packets := batch.packets[:0]
+		for index, flow := range batch.owners {
+			if flow.canDeliverReturn() {
+				packets = append(packets, batch.packets[index])
+			}
+		}
+		if len(packets) != 0 {
+			if err := batch.destination.writeback.WriteReturnPackets(packets); err != nil {
+				log.Trace(E.Cause(err, "write return packets"))
+			}
 		}
 	}
+}
+
+func (o *returnOutput) recycle() {
+	for index := range o.batches {
+		batch := &o.batches[index]
+		clear(batch.packets)
+		clear(batch.owners)
+		batch.packets = batch.packets[:0]
+		batch.owners = batch.owners[:0]
+		batch.destination = nil
+	}
+	o.batches = o.batches[:0]
+	o.resetSegments()
+	o.returnPath, o.ingress, o.destination, o.raw, o.owner = nil, nil, nil, nil, nil
+	returnOutputPool.Put(o)
 }
 
 func (r *portReturn) ReturnPackets(packets [][]byte) [][]byte {
@@ -1109,7 +1169,8 @@ func (r *portReturn) ReturnPackets(packets [][]byte) [][]byte {
 		return packets
 	}
 	headroom := r.ReturnHeadroom()
-	output := returnOutput{returnPath: r}
+	output := returnOutputPool.Get().(*returnOutput)
+	output.returnPath = r
 	now := r.dispatcher.now()
 	unconsumed := packets[:0]
 	for _, raw := range packets {
@@ -1125,19 +1186,23 @@ func (r *portReturn) ReturnPackets(packets [][]byte) [][]byte {
 		decision, flow, rule := r.classify(&parsed, now)
 		switch decision {
 		case returnWrite:
-			output.writeback = flow.owner.writeback
-			output.headroom = output.writeback.ReturnHeadroom()
+			output.owner = flow
+			output.destination = flow.owner
+			output.headroom = flow.owner.writeback.ReturnHeadroom()
 			output.raw = nil
 			if output.headroom == headroom {
 				output.raw = raw
 			}
-			relayFlow(&output, r.dispatcher.logger, flow, rule, &parsed, raw[headroom:], nil, true)
+			if relayFlow(output, r.dispatcher.logger, flow, rule, &parsed, raw[headroom:], nil) {
+				countRelay(flow, len(raw)-headroom, true)
+			}
 		case returnDrop:
 		default:
 			unconsumed = append(unconsumed, raw)
 		}
 	}
-	output.flush()
+	output.flush(r.dispatcher.logger)
+	output.recycle()
 	return unconsumed
 }
 
@@ -1154,8 +1219,7 @@ func (r *portReturn) classify(parsed *forwardPacket, now int64) (returnDecision,
 		}
 		return returnPass, nil, nil
 	}
-	var scratch rewriteRule
-	flow, rule := r.matchReverse(parsed, &scratch)
+	flow, rule := r.matchReverse(parsed)
 	if flow == nil {
 		return returnPass, nil, nil
 	}
@@ -1210,17 +1274,36 @@ func (s *ForwardStage) ReturnParsed(packet []byte, meta ForwardFrameMeta, parsed
 	if s == nil || s.dispatcher.returnPath.closed.Load() {
 		return false
 	}
-	for _, returnPath := range *s.dispatcher.root.returns.Load() {
+	d := s.dispatcher
+	paths := *d.root.returns.Load()
+	if len(paths) == 0 {
+		return false
+	}
+	ingressGeneration := d.returnPath.generation.Load()
+	for _, returnPath := range paths {
 		decision, flow, rule := returnPath.classify(parsed, returnPath.dispatcher.now())
 		switch decision {
 		case returnWrite:
-			writeback := flow.owner.writeback
-			output := returnOutput{returnPath: returnPath, ingress: s.dispatcher.writeback, writeback: writeback, headroom: writeback.ReturnHeadroom()}
-			if output.headroom == 0 {
-				output.raw = packet
+			d.access.Lock()
+			if d.returnPath.closed.Load() || d.returnPath.generation.Load() != ingressGeneration {
+				d.access.Unlock()
+				return true
 			}
-			relayFlow(&output, s.dispatcher.logger, flow, rule, parsed, packet, &meta, true)
-			output.flush()
+			output := d.routedReturns
+			if output == nil {
+				output = returnOutputPool.Get().(*returnOutput)
+				output.ingress = d
+				output.ingressGeneration = ingressGeneration
+				d.routedReturns = output
+			}
+			output.owner = flow
+			output.destination = flow.owner
+			output.headroom = flow.owner.writeback.ReturnHeadroom()
+			relayed := relayFlow(output, d.logger, flow, rule, parsed, packet, &meta)
+			d.access.Unlock()
+			if relayed {
+				countRelay(flow, len(packet), true)
+			}
 			return true
 		case returnDrop:
 			return true
@@ -1229,7 +1312,7 @@ func (s *ForwardStage) ReturnParsed(packet []byte, meta ForwardFrameMeta, parsed
 	return false
 }
 
-func (r *portReturn) matchReverse(parsed *forwardPacket, scratch *rewriteRule) (*forwardFlow, *rewriteRule) {
+func (r *portReturn) matchReverse(parsed *forwardPacket) (*forwardFlow, *rewriteRule) {
 	key := parsed.flowKey()
 	flow := r.nat.lookup(key)
 	if flow != nil {
@@ -1246,8 +1329,7 @@ func (r *portReturn) matchReverse(parsed *forwardPacket, scratch *rewriteRule) (
 		if flow == nil || flow.owner.root != r.dispatcher {
 			return nil, nil
 		}
-		*scratch = rule
-		return flow, scratch
+		return flow, &rule
 	}
 	mapping, anchor := r.nat.lookupMapping(key.destination.Addr(), key.destination.Port(), key.source.Addr())
 	if mapping == nil || mapping.key.dispatcher != r.dispatcher {

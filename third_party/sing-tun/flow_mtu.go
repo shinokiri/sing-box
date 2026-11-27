@@ -53,7 +53,22 @@ func segmentTCP(output relayOutput, packet *forwardPacket, raw []byte, headerLen
 	return nil
 }
 
-func (s *ForwardDispatcher) reserveSegments(count, size int) ([][]byte, []int) {
+type segmentPool struct {
+	segmentBuffers [][]byte
+	segmentSizes   []int
+	segmentUsed    int
+}
+
+func (s *segmentPool) resetSegments() {
+	if len(s.segmentBuffers) > segmentRetainCount {
+		clear(s.segmentBuffers[segmentRetainCount:])
+		s.segmentBuffers = s.segmentBuffers[:segmentRetainCount]
+		s.segmentSizes = s.segmentSizes[:segmentRetainCount]
+	}
+	s.segmentUsed = 0
+}
+
+func (s *segmentPool) reserveSegments(count, size int) ([][]byte, []int) {
 	start := s.segmentUsed
 	end := start + count
 	for len(s.segmentBuffers) < end {

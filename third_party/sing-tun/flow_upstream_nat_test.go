@@ -3,6 +3,7 @@ package tun
 import (
 	"context"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,45 +182,194 @@ type paddedReturnWriter struct {
 
 func (*paddedReturnWriter) ReturnHeadroom() int { return 12 }
 
-func TestRoutedPortReturnsToOriginatingStage(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	host := NewForwardDispatcher(nil, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
-	t.Cleanup(host.Close)
-	hostStage := host.NewStage(nil)
-	port := &routedTestPort{
-		Go:   &Go{dispatcher: host, inet4Address: netip.MustParseAddr("192.0.2.10"), mtu: 1500},
+type recordingReturnWriter struct {
+	paddedReturnWriter
+	batches []int
+}
+
+func (w *recordingReturnWriter) WriteReturnPackets(packets [][]byte) error {
+	w.batches = append(w.batches, len(packets))
+	return w.pendingWriteback.WriteReturnPackets(packets)
+}
+
+func newRoutedTestPath(t testing.TB, writer ForwardWriteback, lifetime context.Context) (source, host *ForwardStage, port *routedTestPort) {
+	t.Helper()
+	router := NewForwardDispatcher(nil, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
+	t.Cleanup(router.Close)
+	host = router.NewStage(nil)
+	port = &routedTestPort{
+		Go:   &Go{dispatcher: router, inet4Address: netip.MustParseAddr("192.0.2.10"), mtu: 1500},
 		sent: make(chan []byte, 4),
 	}
-	source := NewForwardDispatcher(udpHistoryHandler{port: port, lifetime: ctx}, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
-	t.Cleanup(source.Close)
-	source.NewStage(nil)
-	origin := &paddedReturnWriter{pendingWriteback{packets: make(chan []byte, 4)}}
-	stage := source.NewStage(origin)
-	client := netip.MustParseAddrPort("10.0.0.2:50000")
-	peer := netip.MustParseAddrPort("203.0.113.1:443")
-	require.True(t, stage.Dispatch(udpHistoryPacket(client, peer)))
-	stage.Flush()
-	forwarded, ok := parseForwardPacket(pendingReceive(t, port.sent))
-	require.True(t, ok)
-	require.Equal(t, client, forwarded.source)
-	reply := udpHistoryPacket(peer, forwarded.source)
+	incoming := NewForwardDispatcher(udpHistoryHandler{port: port, lifetime: lifetime}, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
+	t.Cleanup(incoming.Close)
+	incoming.NewStage(nil)
+	return incoming.NewStage(writer), host, port
+}
+
+func stageRoutedReply(t *testing.T, host *ForwardStage, reply []byte) {
+	t.Helper()
 	parsed, ok := parseForwardPacket(reply)
 	require.True(t, ok)
-	require.True(t, hostStage.ReturnParsed(reply, ForwardFrameMeta{}, &parsed))
-	hostStage.Flush()
-	delivered := pendingReceive(t, origin.packets)
-	back, ok := parseForwardPacket(delivered[origin.ReturnHeadroom():])
-	require.True(t, ok)
-	require.Equal(t, client, back.destination)
-	require.Equal(t, peer, back.source)
-	cancel()
-	reply = udpHistoryPacket(peer, forwarded.source)
-	parsed, ok = parseForwardPacket(reply)
-	require.True(t, ok)
-	require.True(t, hostStage.ReturnParsed(reply, ForwardFrameMeta{}, &parsed))
-	hostStage.Flush()
+	require.True(t, host.ReturnParsed(reply, ForwardFrameMeta{}, &parsed))
+	clear(reply) // The next RX frame can reuse this storage before Flush.
+}
+
+func TestRoutedPortReturnsToOriginatingStage(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	origin := &recordingReturnWriter{paddedReturnWriter: paddedReturnWriter{pendingWriteback{packets: make(chan []byte, 4)}}}
+	source, host, port := newRoutedTestPath(t, origin, ctx)
+	clients := []netip.AddrPort{netip.MustParseAddrPort("10.0.0.2:50000"), netip.MustParseAddrPort("10.0.0.3:50001")}
+	peer := netip.MustParseAddrPort("203.0.113.1:443")
+	for _, client := range clients {
+		require.True(t, source.Dispatch(udpHistoryPacket(client, peer)))
+	}
+	source.Flush()
+	for _, client := range clients {
+		forwarded, ok := parseForwardPacket(pendingReceive(t, port.sent))
+		require.True(t, ok)
+		require.Equal(t, client, forwarded.source)
+		stageRoutedReply(t, host, udpHistoryPacket(peer, client))
+	}
+	require.Empty(t, origin.batches)
+	host.Flush()
+	require.Equal(t, []int{2}, origin.batches)
+	for _, client := range clients {
+		delivered := pendingReceive(t, origin.packets)
+		back, ok := parseForwardPacket(delivered[origin.ReturnHeadroom():])
+		require.True(t, ok)
+		require.Equal(t, client, back.destination)
+		require.Equal(t, peer, back.source)
+		require.Equal(t, []byte{42}, header.UDP(back.transport).Payload())
+	}
+	stageRoutedReply(t, host, udpHistoryPacket(peer, clients[0]))
+	host.dispatcher.ResetNetwork()
+	host.Flush()
 	require.Empty(t, origin.packets)
-	source.Close()
-	require.False(t, hostStage.ReturnParsed(reply, ForwardFrameMeta{}, &parsed))
+
+	otherClient := netip.MustParseAddrPort("10.0.0.4:50002")
+	otherPeer := netip.MustParseAddrPort("203.0.113.2:443")
+	require.True(t, source.Dispatch(udpHistoryPacket(otherClient, otherPeer)))
+	source.Flush()
+	forwarded, ok := parseForwardPacket(pendingReceive(t, port.sent))
+	require.True(t, ok)
+	require.Equal(t, otherClient, forwarded.source)
+	stageRoutedReply(t, host, udpHistoryPacket(peer, clients[0]))
+	stageRoutedReply(t, host, udpHistoryPacket(otherPeer, otherClient))
+	cancel()
+	host.Flush()
+	require.Equal(t, []int{2, 1}, origin.batches)
+	remaining, ok := parseForwardPacket(pendingReceive(t, origin.packets)[origin.ReturnHeadroom():])
+	require.True(t, ok)
+	require.Equal(t, otherPeer, remaining.source)
+	require.Equal(t, otherClient, remaining.destination)
+	stageRoutedReply(t, host, udpHistoryPacket(peer, clients[1]))
+	host.Flush()
+	require.Empty(t, origin.packets)
+
+	// Reusing a tuple on the new network cannot revive an old queued reply.
+	stageRoutedReply(t, host, udpHistoryPacket(otherPeer, otherClient))
+	source.dispatcher.ResetNetwork()
+	require.True(t, source.Dispatch(udpHistoryPacket(otherClient, otherPeer)))
+	source.Flush()
+	forwarded, ok = parseForwardPacket(pendingReceive(t, port.sent))
+	require.True(t, ok)
+	require.Equal(t, otherClient, forwarded.source)
+	stageRoutedReply(t, host, udpHistoryPacket(otherPeer, otherClient))
+	host.Flush()
+	require.Equal(t, []int{2, 1, 1}, origin.batches)
+	pendingReceive(t, origin.packets)
+	require.Empty(t, origin.packets)
+
+	source.dispatcher.Close()
+	reply := udpHistoryPacket(peer, clients[0])
+	parsed, ok := parseForwardPacket(reply)
+	require.True(t, ok)
+	require.False(t, host.ReturnParsed(reply, ForwardFrameMeta{}, &parsed))
+}
+
+func TestRoutedReturnWriteDoesNotLockDispatcher(t *testing.T) {
+	origin := &gatedWriteback{pendingWriteback: pendingWriteback{packets: make(chan []byte, 4)}, entered: make(chan struct{}), resume: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(origin.resume) })
+	source, host, port := newRoutedTestPath(t, origin, nil)
+	defer release()
+	client, peer := netip.MustParseAddrPort("10.0.0.2:50000"), netip.MustParseAddrPort("203.0.113.1:443")
+	require.True(t, source.Dispatch(udpHistoryPacket(client, peer)))
+	source.Flush()
+	pendingReceive(t, port.sent)
+	stageRoutedReply(t, host, udpHistoryPacket(peer, client))
+	flushed := make(chan struct{})
+	go func() { host.Flush(); close(flushed) }()
+	pendingReceive(t, origin.entered)
+	reset := make(chan struct{})
+	go func() { host.dispatcher.ResetNetwork(); source.dispatcher.ResetNetwork(); close(reset) }()
+	pendingReceive(t, reset)
+	release()
+	pendingReceive(t, flushed)
+}
+
+func TestRoutedReturnPreservesDataBeforeTCPReset(t *testing.T) {
+	origin := &recordingReturnWriter{paddedReturnWriter: paddedReturnWriter{pendingWriteback{packets: make(chan []byte, 4)}}}
+	source, host, port := newRoutedTestPath(t, origin, nil)
+	client, peer := netip.MustParseAddrPort("10.0.0.2:50000"), netip.MustParseAddrPort("203.0.113.1:443")
+	packet := func(from, to netip.AddrPort, flags header.TCPFlags, payload string) []byte {
+		ip := header.IPv4(make([]byte, header.IPv4MinimumSize+header.TCPMinimumSize+len(payload)))
+		ip.Encode(&header.IPv4Fields{TotalLength: uint16(len(ip)), TTL: 64, Protocol: uint8(header.TCPProtocolNumber), SrcAddr: from.Addr(), DstAddr: to.Addr()})
+		tcp := header.TCP(ip.Payload())
+		tcp.Encode(&header.TCPFields{SrcPort: from.Port(), DstPort: to.Port(), DataOffset: header.TCPMinimumSize, Flags: flags, WindowSize: 65535})
+		copy(tcp.Payload(), payload)
+		parsed, ok := parseForwardPacket(ip)
+		require.True(t, ok)
+		recomputeChecksums(&parsed)
+		return ip
+	}
+	require.True(t, source.Dispatch(packet(client, peer, header.TCPFlagSyn, "")))
+	source.Flush()
+	pendingReceive(t, port.sent)
+	stageRoutedReply(t, host, packet(peer, client, header.TCPFlagAck, "last data"))
+	stageRoutedReply(t, host, packet(peer, client, header.TCPFlagRst, ""))
+	host.Flush()
+	require.Equal(t, []int{2}, origin.batches)
+	next := func() header.TCP {
+		return header.TCP(header.IPv4(pendingReceive(t, origin.packets)[origin.ReturnHeadroom():]).Payload())
+	}
+	require.Equal(t, "last data", string(next().Payload()))
+	require.Equal(t, header.TCPFlagRst, next().Flags())
+	stageRoutedReply(t, host, packet(peer, client, header.TCPFlagAck, "late"))
+	host.Flush()
+	require.Empty(t, origin.packets)
+}
+
+type countReturnWrites struct {
+	udpHistoryWriteback
+	calls int
+}
+
+func (w *countReturnWrites) WriteReturnPackets([][]byte) error {
+	w.calls++
+	return nil
+}
+
+func BenchmarkRoutedReturnBatch(b *testing.B) {
+	origin := new(countReturnWrites)
+	source, host, port := newRoutedTestPath(b, origin, nil)
+	client, peer := netip.MustParseAddrPort("10.0.0.2:50000"), netip.MustParseAddrPort("203.0.113.1:443")
+	require.True(b, source.Dispatch(udpHistoryPacket(client, peer)))
+	source.Flush()
+	<-port.sent
+	reply := udpHistoryPacket(peer, client)
+	const batchSize = 32
+	b.ReportAllocs()
+	b.SetBytes(batchSize * int64(len(reply)))
+	for b.Loop() {
+		for range batchSize {
+			parsed, ok := parseForwardPacket(reply)
+			if !ok || !host.ReturnParsed(reply, ForwardFrameMeta{}, &parsed) {
+				b.Fatal("routed reply was lost")
+			}
+		}
+		host.Flush()
+	}
+	b.ReportMetric(float64(origin.calls)/float64(b.N), "writes/batch")
 }

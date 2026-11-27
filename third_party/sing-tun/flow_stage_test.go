@@ -182,3 +182,64 @@ func TestForwardStagePendingVerdictKeepsIdleSweepScheduled(t *testing.T) {
 	_, pending = stage.sweepDue()
 	require.False(t, pending, "the delayed drop verdict must expire without another packet")
 }
+
+func TestSocketFlowReturnsDatagramsAtIngressMTU(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version uint8
+		client  string
+		peer    string
+	}{
+		{"IPv4", 4, "10.0.0.2:50000", "203.0.113.1:443"},
+		{"IPv6", 6, "[fd00::2]:50000", "[2001:db8::1]:443"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			port := new(stagedUDPPort)
+			d := NewForwardDispatcher(udpHistoryHandler{port: port}, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
+			t.Cleanup(d.Close)
+			d.mtu = 1280
+			d.NewStage(nil)
+			origin := &paddedReturnWriter{pendingWriteback{packets: make(chan []byte, 4)}}
+			stage := d.NewStage(origin)
+			client, peer := netip.MustParseAddrPort(tc.client), netip.MustParseAddrPort(tc.peer)
+			datagram := func(from, to netip.AddrPort, payload []byte) []byte {
+				wire := make([]byte, goNetworkHeaderLength(tc.version)+header.UDPMinimumSize+len(payload))
+				goEncodeUDPPacket(wire, tc.version, from, to, payload, 7)
+				return wire
+			}
+			payload := bytes.Repeat([]byte("large-datagram"), 160)
+			require.True(t, stage.Dispatch(datagram(client, peer, payload)))
+			stage.Flush()
+			require.Len(t, port.packets, 1)
+			sent, ok := parseForwardPacket(port.packets[0].Packet)
+			require.True(t, ok)
+			require.False(t, sent.fragment)
+			require.Equal(t, payload, header.UDP(sent.transport).Payload())
+			mapping := port.packets[0].Flow.UDPMapping()
+			for _, reply := range [][]byte{[]byte("small"), payload} {
+				require.True(t, mapping.ReturnPacket(datagram(peer, sent.source, reply)))
+				var transport []byte
+				for {
+					wire := pendingReceive(t, origin.packets)[origin.ReturnHeadroom():]
+					require.LessOrEqual(t, len(wire), int(d.mtu))
+					frame, ok := parseForwardPacket(wire)
+					require.True(t, ok)
+					require.Equal(t, client.Addr(), frame.destination.Addr())
+					require.Equal(t, peer.Addr(), frame.source.Addr())
+					if !frame.fragment {
+						transport = frame.transport
+						break
+					}
+					require.Equal(t, len(transport), frame.fragmentInfo.offset)
+					transport = append(transport, wire[len(wire)-frame.fragmentInfo.length:]...)
+					if !frame.fragmentInfo.more {
+						break
+					}
+				}
+				udp := header.UDP(transport)
+				require.Equal(t, client.Port(), udp.DestinationPort())
+				require.Equal(t, reply, udp.Payload())
+			}
+		})
+	}
+}
