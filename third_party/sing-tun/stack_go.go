@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/netip"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +20,8 @@ type Go struct {
 	mtu                    int
 	handler                Handler
 	logger                 logger.Logger
+	inet4Address           netip.Addr
+	inet6Address           netip.Addr
 	broadcastAddr          netip.Addr
 	inet4LoopbackAddress   []netip.Addr
 	inet6LoopbackAddress   []netip.Addr
@@ -37,6 +38,7 @@ type Go struct {
 	engines                []*goEngine
 	closed                 atomic.Bool
 	validateChecksum       bool
+	profile                goProfile
 }
 
 func NewGo(options StackOptions) (*Go, error) {
@@ -72,11 +74,26 @@ func NewGo(options StackOptions) (*Go, error) {
 			reserved:   make(map[goPortKey]struct{}),
 		},
 	}
+	bufferProfile := options.BufferProfile
+	if bufferProfile == BufferProfileDefault {
+		bufferProfile = goDefaultBufferProfile
+	}
+	if bufferProfile == BufferProfileCompact {
+		stack.profile = goCompactProfile
+	} else {
+		stack.profile = goFullProfile
+	}
+	if len(options.TunOptions.Inet4Address) > 0 {
+		stack.inet4Address = options.TunOptions.Inet4Address[0].Addr()
+	}
+	if len(options.TunOptions.Inet6Address) > 0 {
+		stack.inet6Address = options.TunOptions.Inet6Address[0].Addr()
+	}
 	memoryTun, isMemoryTun := options.Tun.(*MemoryTun)
 	if isMemoryTun {
 		stack.validateChecksum = true
 		stack.queueFactory = func(current *Go) ([]goPlatformIO, error) {
-			return []goPlatformIO{&goMemoryIO{stack: current, tun: memoryTun, handed: make([]*buf.Buffer, 0, goReadBatch), blocked: make(map[*OutboundQueue]*goBlockedWriters)}}, nil
+			return []goPlatformIO{&goMemoryIO{stack: current, tun: memoryTun, handed: make([]*buf.Buffer, 0, current.profile.readBatch), blocked: make(map[*OutboundQueue]*goBlockedWriters)}}, nil
 		}
 	}
 	return stack, nil
@@ -108,11 +125,7 @@ func (s *Go) Start() error {
 		udpNATOptions.Prepare = s.prepareUDPConnection
 		maxSize := udpNATOptions.MaxSize
 		if maxSize == 0 {
-			if runtime.GOOS == "ios" {
-				maxSize = 4096
-			} else {
-				maxSize = 16384
-			}
+			maxSize = s.profile.udpNATMax
 		}
 		if udpNATOptions.Mapping == NATMappingAddressAndPortDependent {
 			natCount = min(uint32(len(queues)), maxSize)
@@ -136,6 +149,7 @@ func (s *Go) Start() error {
 			udpNats[index] = udpNat
 		}
 		s.dispatcher = NewForwardDispatcherWithOptions(s.handler, &goWriteback{platformIO: queues[0]}, s.logger, s.udpNATOptions, s.icmpTimeout)
+		s.dispatcher.mtu = uint32(s.mtu)
 	}
 	s.udpNats = udpNats
 	if natCount > 1 {
@@ -160,6 +174,35 @@ func goCloseQueues(queues []goPlatformIO) error {
 		err = E.Errors(err, queue.close())
 	}
 	return err
+}
+
+func (s *Go) RoutedPort() {
+}
+
+func (s *Go) PortAddresses() (netip.Addr, netip.Addr) {
+	return s.inet4Address, s.inet6Address
+}
+
+func (s *Go) PortMTU() uint32 {
+	return uint32(s.mtu)
+}
+
+func (s *Go) AttachReturn(returnPath Return) error {
+	return s.dispatcher.attachReturn(returnPath)
+}
+
+func (s *Go) DetachReturn(returnPath Return) error {
+	s.dispatcher.detachReturn(returnPath)
+	return nil
+}
+
+func (s *Go) WritePackets(packets [][]byte) error {
+	platformIO := s.engines[0].platformIO
+	var writeErr error
+	for _, packet := range packets {
+		writeErr = E.Errors(writeErr, goIgnoreDropped(platformIO.writeDatagram(packet, ForwardFrameMeta{})))
+	}
+	return writeErr
 }
 
 func (s *Go) HasEndpoint(protocol uint8, local, remote netip.AddrPort) bool {

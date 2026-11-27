@@ -120,10 +120,16 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
 			nil,
 		)
 		switch verdict.Action {
-		case ActionReject, ActionDrop:
+		case ActionReject:
+			f.reject(id, pkt)
+			return true
+		case ActionDrop:
 			return true
 		case ActionFlow, ActionBypass:
-			if f.installFlow(key, verdict, pkt) {
+			if verdict.Port != nil {
+				if !f.installFlow(key, verdict, pkt) {
+					f.reject(id, pkt)
+				}
 				return true
 			}
 		}
@@ -182,10 +188,16 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
 			nil,
 		)
 		switch verdict.Action {
-		case ActionReject, ActionDrop:
+		case ActionReject:
+			f.reject(id, pkt)
+			return true
+		case ActionDrop:
 			return true
 		case ActionFlow, ActionBypass:
-			if f.installFlow(key, verdict, pkt) {
+			if verdict.Port != nil {
+				if !f.installFlow(key, verdict, pkt) {
+					f.reject(id, pkt)
+				}
 				return true
 			}
 		}
@@ -222,6 +234,15 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
 	}
 }
 
+func (f *ICMPForwarder) reject(id stack.TransportEndpointID, pkt *stack.PacketBuffer) {
+	view := stack.PayloadSince(pkt.NetworkHeader())
+	defer view.Release()
+	reply, loaded := BuildICMPError(view.AsSlice(), ICMPErrorNoRoute, netip.Addr{}, 0, 0)
+	if loaded {
+		f.writeBack(reply, pkt.NetworkProtocolNumber, id.LocalAddress, id.RemoteAddress)
+	}
+}
+
 func (f *ICMPForwarder) forwardCached(key icmpFlowKey, pkt *stack.PacketBuffer) bool {
 	now := time.Now()
 	f.flowAccess.Lock()
@@ -248,9 +269,6 @@ func (f *ICMPForwarder) forwardCached(key icmpFlowKey, pkt *stack.PacketBuffer) 
 
 func (f *ICMPForwarder) installFlow(key icmpFlowKey, verdict FlowVerdict, pkt *stack.PacketBuffer) bool {
 	port := verdict.Port
-	if port == nil {
-		return false
-	}
 	inet4Address, inet6Address := port.PortAddresses()
 	portAddress := inet4Address
 	if key.v6 {
@@ -284,12 +302,12 @@ func (f *ICMPForwarder) installFlow(key icmpFlowKey, verdict FlowVerdict, pkt *s
 	flow := &icmpFlow{port: port, deadline: now.Add(defaultICMPTimeout)}
 	if verdict.NewTracker != nil {
 		flow.tracker = verdict.NewTracker()
+		if flow.tracker != nil {
+			flow.tracker.AttachFlow(flow)
+		}
 	}
 	f.flows[key] = flow
 	f.flowAccess.Unlock()
-	if flow.tracker != nil {
-		flow.tracker.AttachFlow(flow)
-	}
 	f.writeToPort(flow, pkt)
 	return true
 }

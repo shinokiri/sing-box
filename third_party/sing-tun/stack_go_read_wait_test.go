@@ -22,12 +22,12 @@ import (
 // starting an engine or a TCP peer. Kernel tests cover ACK/window interaction.
 func newGoReadWaitFixture(t testing.TB, payload []byte) *GoConn {
 	t.Helper()
-	engine := &goEngine{slabPool: newGoSlabPool(nil, 8)}
+	engine := &goEngine{stack: &Go{profile: goFullProfile}, slabPool: newGoSlabPool(nil, 8)}
 	conn := new(GoConn)
 	conn.initialize(engine, flowKey{}, M.Socksaddr{}, M.Socksaddr{})
 	conn.phase = goPhaseEstablished
 	conn.state = goTCPEstablished
-	conn.receiveCapacity = goReceiveCapacityMax
+	conn.receiveCapacity = conn.receiveCapacityMax
 	conn.receiveNext = 1
 	conn.consumedTail.Store(1)
 	conn.receiveAvailable.Store(1)

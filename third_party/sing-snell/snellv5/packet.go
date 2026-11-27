@@ -11,6 +11,7 @@ import (
 
 	snell "github.com/sagernet/sing-snell"
 	"github.com/sagernet/sing-snell/internal/reuse"
+	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -18,10 +19,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-const (
-	maxUDPResponseHeaderLen = 1 + 16 + 2
-	minUDPPayloadLimit      = framePayloadStep
-)
+const maxUDPResponseHeaderLen = 1 + 16 + 2
 
 type serverPacketConn struct {
 	net.Conn
@@ -131,6 +129,10 @@ func (c *serverPacketConn) readRequestPacketDestination(record *buf.Buffer) (M.S
 }
 
 func (c *serverPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	if !destination.IsIP() {
+		buffer.Release()
+		return nil
+	}
 	c.writeAccess.Lock()
 	if c.writer == nil {
 		err := c.writeTunnelReply()
@@ -143,15 +145,7 @@ func (c *serverPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksad
 	recordWriter := c.writer
 	c.writeAccess.Unlock()
 	header := buf.With(buffer.ExtendHeader(c.responseAddrLen(destination)))
-	err := snell.WriteUDPResponseAddress(header, destination)
-	if err != nil {
-		buffer.Release()
-		return err
-	}
-	if buffer.Len() > maxPayload {
-		buffer.Release()
-		return snell.ErrPayloadTooLarge
-	}
+	common.Must(snell.WriteUDPResponseAddress(header, destination))
 	return recordWriter.WritePacketBuffer(buffer)
 }
 
@@ -193,15 +187,22 @@ func (w *serverPacketBatchWriter) WritePacketBatch(buffers []*buf.Buffer, destin
 	}
 	recordWriter := w.writer
 	w.access.Unlock()
+	writeIndex := 0
 	for index, buffer := range buffers {
-		header := buf.With(buffer.ExtendHeader(w.conn.responseAddrLen(destinations[index])))
-		err := snell.WriteUDPResponseAddress(header, destinations[index])
-		if err != nil {
-			buf.ReleaseMulti(buffers)
-			return err
+		destination := destinations[index]
+		if !destination.IsIP() {
+			buffer.Release()
+			continue
 		}
+		header := buf.With(buffer.ExtendHeader(w.conn.responseAddrLen(destination)))
+		common.Must(snell.WriteUDPResponseAddress(header, destination))
+		buffers[writeIndex] = buffer
+		writeIndex++
 	}
-	return recordWriter.WriteVectorised(buffers)
+	if writeIndex == 0 {
+		return nil
+	}
+	return recordWriter.WriteVectorised(buffers[:writeIndex])
 }
 
 func (c *serverPacketConn) writeTunnelReply() error {
@@ -245,7 +246,7 @@ func (c *serverPacketConn) RearHeadroom() int {
 }
 
 func (c *serverPacketConn) WriterMTU() int {
-	return minUDPPayloadLimit - maxUDPResponseHeaderLen
+	return maxPayload - maxUDPResponseHeaderLen
 }
 
 func (c *serverPacketConn) Upstream() any {

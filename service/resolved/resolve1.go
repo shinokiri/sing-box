@@ -125,7 +125,7 @@ func (t *resolve1Manager) createMetadata(sender dbus.Sender) adapter.InboundCont
 
 	processPath, err := os.Readlink(F.ToString("/proc/", senderPid, "/exe"))
 	if err == nil {
-		processInfo.ProcessPaths = []string{processPath}
+		processInfo.ProcessPaths = []string{strings.TrimSuffix(processPath, " (deleted)")}
 	} else {
 		processName, readErr := os.ReadFile(F.ToString("/proc/", senderPid, "/comm"))
 		if readErr == nil {
@@ -615,8 +615,7 @@ func wrapError(err error) *dbus.Error {
 	if err == nil {
 		return nil
 	}
-	var rcode dns.RcodeError
-	if errors.As(err, &rcode) {
+	if rcode, ok := errors.AsType[dns.RcodeError](err); ok {
 		return rcodeError(int(rcode))
 	}
 	return dbus.MakeFailedError(err)

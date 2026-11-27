@@ -49,16 +49,17 @@ func (d *ForwardDispatcher) EnableAsyncFlow(ctx context.Context, accept func([]b
 	}
 }
 
-func (d *ForwardDispatcher) enqueuePendingPacket(p *pendingFlow, raw []byte) {
+func (d *ForwardDispatcher) enqueuePendingPacket(p *pendingFlow, raw []byte) bool {
 	if p.count >= pendingPacketLimit || len(raw) > pendingByteLimit-d.async.bytes {
 		d.logger.Trace("pending flow queue full, dropping packet")
-		return
+		return false
 	}
 	// The TUN/gVisor caller may immediately reuse its packet storage.
 	p.packets = append(p.packets, bytes.Clone(raw))
 	p.count++
 	p.bytes += len(raw)
 	d.async.bytes += len(raw)
+	return true
 }
 
 func (d *ForwardDispatcher) startPendingFlow(key flowKey, raw []byte) {
@@ -139,11 +140,11 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 		var size int
 		for _, raw := range packets {
 			size += len(raw)
-			if dns {
+			current, _ := parseForwardPacket(raw)
+			if dns && !current.fragment {
 				deferred = append(deferred, raw)
 				continue
 			}
-			current, _ := parseForwardPacket(raw)
 			var handled bool
 			if entry := d.table[p.key]; installed && entry != nil {
 				handled = d.handleHit(p.key, entry, &current, raw, d.now())
@@ -153,6 +154,11 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 			}
 			if !handled {
 				deferred = append(deferred, raw)
+			}
+			if current.fragment {
+				for _, fragment := range d.resolveFragments(&current, p.key, handled, d.now()) {
+					deferred = append(deferred, fragment.packet)
+				}
 			}
 		}
 		replies := d.flushPackets()
@@ -170,10 +176,12 @@ func (d *ForwardDispatcher) resolvePendingFlow(p *pendingFlow) {
 			}
 			if dns {
 				current, _ := parseForwardPacket(raw)
-				d.hijackDNSPacket(&current)
-			} else {
-				d.async.accept(raw)
+				if !current.fragment {
+					d.hijackDNSPacket(&current)
+					continue
+				}
 			}
+			d.async.accept(raw)
 		}
 		d.access.Lock()
 		p.count -= len(packets)

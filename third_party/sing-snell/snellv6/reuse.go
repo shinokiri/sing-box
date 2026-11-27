@@ -10,6 +10,7 @@ import (
 	"time"
 
 	snell "github.com/sagernet/sing-snell"
+	"github.com/sagernet/sing-snell/internal/eof"
 	"github.com/sagernet/sing-snell/internal/reuse"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
@@ -242,7 +243,7 @@ type reuseConn struct {
 	access           sync.Mutex
 	deadlineAccess   sync.Mutex
 	writer           reuse.RecordWriter
-	closeWriteOnce   sync.Once
+	writeClosed      bool
 	closeWriteErr    error
 	closeOnce        sync.Once
 	closeErr         error
@@ -430,10 +431,10 @@ func (c *reuseConn) Write(p []byte) (int, error) {
 		return 0, net.ErrClosed
 	}
 	defer c.writeActionCount.Add(-1)
-	if c.writer != nil {
-		return c.writer.Write(p)
-	}
 	c.access.Lock()
+	if c.writeClosed {
+		return 0, net.ErrClosed
+	}
 	if c.writer != nil {
 		c.access.Unlock()
 		return c.writer.Write(p)
@@ -452,10 +453,11 @@ func (c *reuseConn) WriteBuffer(buffer *buf.Buffer) error {
 		return net.ErrClosed
 	}
 	defer c.writeActionCount.Add(-1)
-	if c.writer != nil {
-		return c.writer.WriteBuffer(buffer)
-	}
 	c.access.Lock()
+	if c.writeClosed {
+		buffer.Release()
+		return net.ErrClosed
+	}
 	if c.writer != nil {
 		c.access.Unlock()
 		return c.writer.WriteBuffer(buffer)
@@ -484,11 +486,12 @@ func (w *reuseVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error {
 		return net.ErrClosed
 	}
 	defer conn.writeActionCount.Add(-1)
-	if conn.writer != nil {
-		return conn.writer.CreateVectorisedWriterFor(w.upstream).WriteVectorised(buffers)
-	}
 	conn.access.Lock()
 	defer conn.access.Unlock()
+	if conn.writeClosed {
+		buf.ReleaseMulti(buffers)
+		return net.ErrClosed
+	}
 	if conn.writer != nil {
 		return conn.writer.CreateVectorisedWriterFor(w.upstream).WriteVectorised(buffers)
 	}
@@ -538,17 +541,23 @@ func (c *reuseConn) beginWrite() bool {
 }
 
 func (c *reuseConn) closeWrite() error {
-	c.closeWriteOnce.Do(func() {
-		c.access.Lock()
-		defer c.access.Unlock()
-		if c.writer == nil {
-			c.closeWriteErr = c.writeRequest(nil)
-			if c.closeWriteErr != nil {
-				return
-			}
+	c.access.Lock()
+	defer c.access.Unlock()
+	return c.closeWriteLocked()
+}
+
+func (c *reuseConn) closeWriteLocked() error {
+	if c.writeClosed {
+		return c.closeWriteErr
+	}
+	c.writeClosed = true
+	if c.writer == nil {
+		c.closeWriteErr = c.writeRequest(nil)
+		if c.closeWriteErr != nil {
+			return c.closeWriteErr
 		}
-		c.closeWriteErr = c.writer.WriteZeroChunk()
-	})
+	}
+	c.closeWriteErr = c.writer.WriteZeroChunk()
 	return c.closeWriteErr
 }
 
@@ -778,6 +787,7 @@ type serverReuseSession[U comparable] struct {
 	net.Conn
 	service      *Service
 	multiService *MultiService[U]
+	transport    *eof.TrackingReader
 	reader       reuse.RecordReader
 	writer       reuse.RecordWriter
 }
@@ -853,7 +863,11 @@ func (s *serverReuseSession[U]) Serve(ctx context.Context, source M.Socksaddr, o
 			s.Conn.Close()
 			return requestCtx.Err()
 		}
-		err = serverConn.CloseWrite()
+		if serverConn.completeErr == nil {
+			err = E.Errors(serverConn.CloseWrite(), serverConn.Close())
+		} else {
+			err = serverConn.Close()
+		}
 		if err != nil {
 			s.Conn.Close()
 			return err
@@ -889,10 +903,10 @@ func (s *serverReuseSession[U]) Serve(ctx context.Context, source M.Socksaddr, o
 		}
 		record, err = s.reader.ReadRecord()
 		if err != nil {
+			s.Conn.Close()
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
-			s.Conn.Close()
 			return E.Cause(err, "read request")
 		}
 		request, err = s.service.readRequest(record)
@@ -908,17 +922,17 @@ type serverReuseConn[U comparable] struct {
 	net.Conn
 	session *serverReuseSession[U]
 
-	access         sync.Mutex
-	closeWriteOnce sync.Once
-	closeWriteErr  error
-	closeOnce      sync.Once
-	closeErr       error
-	readClosed     atomic.Bool
-	aborted        atomic.Bool
-	replyWritten   bool
-	writeClosed    bool
-	completeOnce   sync.Once
-	completion     chan struct{}
+	access        sync.Mutex
+	closeWriteErr error
+	closeOnce     sync.Once
+	closeErr      error
+	readClosed    atomic.Bool
+	aborted       atomic.Bool
+	replyWritten  bool
+	writeClosed   bool
+	completeOnce  sync.Once
+	completion    chan struct{}
+	completeErr   error
 }
 
 func (c *serverReuseConn[U]) writeResponse(payload []byte) error {
@@ -968,11 +982,10 @@ func (c *serverReuseConn[U]) writeResponseBuffer(buffer *buf.Buffer) error {
 	return nil
 }
 
-func (c *serverReuseConn[U]) writeErrorResponse() error {
-	message := []byte(remoteEOFMessage)
+func (c *serverReuseConn[U]) writeErrorResponse(code byte, message string) error {
 	reply := make([]byte, 3+len(message))
 	reply[0] = snell.ReplyError
-	reply[1] = remoteEOFCode
+	reply[1] = code
 	reply[2] = byte(len(message))
 	copy(reply[3:], message)
 	var err error
@@ -988,18 +1001,28 @@ func (c *serverReuseConn[U]) writeErrorResponse() error {
 }
 
 func (c *serverReuseConn[U]) Read(p []byte) (int, error) {
-	n, err := c.session.reader.Read(p)
-	if errors.Is(err, io.EOF) {
-		c.readClosed.Store(true)
+	if c.readClosed.Load() {
+		return 0, io.EOF
 	}
-	return n, err
+	n, err := c.session.reader.Read(p)
+	return n, c.readError(err)
 }
 
 func (c *serverReuseConn[U]) ReadBuffer(buffer *buf.Buffer) error {
-	err := c.session.reader.ReadBuffer(buffer)
-	if errors.Is(err, io.EOF) {
-		c.readClosed.Store(true)
+	if c.readClosed.Load() {
+		return io.EOF
 	}
+	return c.readError(c.session.reader.ReadBuffer(buffer))
+}
+
+func (c *serverReuseConn[U]) readError(err error) error {
+	if !errors.Is(err, io.EOF) {
+		return err
+	}
+	if c.session.transport.Reached() {
+		return io.ErrUnexpectedEOF
+	}
+	c.readClosed.Store(true)
 	return err
 }
 
@@ -1075,37 +1098,71 @@ func (w *serverReuseVectorisedWriter[U]) WriteVectorised(buffers []*buf.Buffer) 
 }
 
 func (c *serverReuseConn[U]) CloseWrite() error {
-	c.closeWriteOnce.Do(func() {
-		c.access.Lock()
-		defer c.access.Unlock()
-		c.writeClosed = true
-		// snell-server v6.0.0b4: FUN_001414e0 -> FUN_00140390 reports upstream EOF
-		// before any payload as ReplyError 0x65 "Remote EOF", marks the context
-		// aborted, and FUN_00141390 closes the tunnel after the error data is written.
-		if !c.replyWritten {
-			c.closeWriteErr = c.writeErrorResponse()
-			if c.closeWriteErr == nil {
-				c.aborted.Store(true)
-				c.closeWriteErr = c.session.Conn.Close()
-			}
-			return
-		}
-		c.closeWriteErr = c.session.writer.WriteZeroChunk()
-	})
+	c.access.Lock()
+	defer c.access.Unlock()
+	return c.closeWriteLocked()
+}
+
+func (c *serverReuseConn[U]) closeWriteLocked() error {
+	if c.writeClosed {
+		return c.closeWriteErr
+	}
+	// snell-server v6.0.0b4: FUN_001414e0 -> FUN_00140390 reports upstream EOF
+	// before any payload as ReplyError 0x65 "Remote EOF", marks the context
+	// aborted, and FUN_00141390 closes the tunnel after the error data is written.
+	if !c.replyWritten {
+		return c.abortWithErrorLocked(remoteEOFCode, remoteEOFMessage)
+	}
+	c.writeClosed = true
+	c.closeWriteErr = c.session.writer.WriteZeroChunk()
 	return c.closeWriteErr
+}
+
+func (c *serverReuseConn[U]) abortWithErrorLocked(code byte, message string) error {
+	c.writeClosed = true
+	c.closeWriteErr = c.writeErrorResponse(code, message)
+	if c.closeWriteErr == nil {
+		c.aborted.Store(true)
+		c.closeWriteErr = c.session.Conn.Close()
+	}
+	return c.closeWriteErr
+}
+
+func (c *serverReuseConn[U]) HandshakeFailure(err error) error {
+	c.access.Lock()
+	defer c.access.Unlock()
+	if c.writeClosed || c.replyWritten || c.session.transport.Reached() {
+		return nil
+	}
+	return c.abortWithErrorLocked(reuse.ErrorReply(err))
 }
 
 func (c *serverReuseConn[U]) Close() error {
 	c.closeOnce.Do(func() {
 		// The handler may close this side while its peer copy is still reading.
 		// onClose owns completion and runs only after both copy directions exit.
-		c.closeErr = c.CloseWrite()
+		if !c.access.TryLock() {
+			c.aborted.Store(true)
+			c.closeErr = c.session.Conn.Close()
+			return
+		}
+		// snell-server closes the tunnel without a reply or zero chunk once the reply has been written,
+		// or when the client stream ends without a zero chunk.
+		if !c.writeClosed && (c.replyWritten || c.session.transport.Reached()) {
+			c.writeClosed = true
+			c.aborted.Store(true)
+			c.closeErr = c.session.Conn.Close()
+		} else {
+			c.closeErr = c.closeWriteLocked()
+		}
+		c.access.Unlock()
 	})
 	return c.closeErr
 }
 
-func (c *serverReuseConn[U]) completeLogicalConnection(error) {
+func (c *serverReuseConn[U]) completeLogicalConnection(err error) {
 	c.completeOnce.Do(func() {
+		c.completeErr = err
 		close(c.completion)
 	})
 }
@@ -1115,11 +1172,11 @@ func (c *serverReuseConn[U]) InitializeReadWaiter(options N.ReadWaitOptions) (ne
 }
 
 func (c *serverReuseConn[U]) WaitReadBuffer() (*buf.Buffer, error) {
-	buffer, err := c.session.reader.WaitReadBuffer()
-	if errors.Is(err, io.EOF) {
-		c.readClosed.Store(true)
+	if c.readClosed.Load() {
+		return nil, io.EOF
 	}
-	return buffer, err
+	buffer, err := c.session.reader.WaitReadBuffer()
+	return buffer, c.readError(err)
 }
 
 func (c *serverReuseConn[U]) FrontHeadroom() int {
@@ -1177,6 +1234,7 @@ var (
 	_ N.VectorisedWriteCreator = (*serverReuseConn[struct{}])(nil)
 	_ N.VectorisedWriter       = (*serverReuseVectorisedWriter[struct{}])(nil)
 	_ N.WriteCloser            = (*serverReuseConn[struct{}])(nil)
+	_ N.HandshakeFailure       = (*serverReuseConn[struct{}])(nil)
 )
 
 func (s *reuseSession) releaseReader() {

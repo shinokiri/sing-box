@@ -16,6 +16,7 @@ import (
 	"github.com/sagernet/sing-tun"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
+	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/tailscale/disco"
 	"github.com/sagernet/tailscale/health"
 	tsDNS "github.com/sagernet/tailscale/net/dns"
@@ -67,7 +68,8 @@ type tailcatNodeOptions struct {
 	PrivateKey     key.NodePrivate
 	PresharedKey   device.NoisePresharedKey
 	Region         *tailcfg.DERPRegion
-	Hooks          netmon.Hooks
+	Dialer         N.Dialer
+	Binding        systemBinding
 	LookupHook     dnscache.LookupHookFunc
 	MemoryPressure func() tun.MemoryPressure
 
@@ -110,6 +112,7 @@ type tailcatNode struct {
 	clientsByAddress map[netip.Addr]key.NodePublic
 	networkMap       *netmap.NetworkMap
 	endpoints        []netip.AddrPort
+	unwatch          func()
 	closeOnce        sync.Once
 }
 
@@ -157,13 +160,14 @@ func newTailcatNode(options tailcatNodeOptions) (*tailcatNode, error) {
 	bus := eventbus.New()
 	sys.Set(bus)
 	sys.Set(health.NewTracker(bus))
-	netMon, err := netmon.New(bus, node.logf, options.Hooks)
+	netMon, err := netmon.New(bus, node.logf, options.Binding.hooks(options.Dialer))
 	if err != nil {
 		node.close()
 		return nil, E.Cause(err, "create network monitor")
 	}
 	sys.Set(netMon)
-	dialer := &tsdial.Dialer{Logf: node.logf, Dialer: options.Hooks.Dialer}
+	node.unwatch = options.Binding.watch(netMon)
+	dialer := &tsdial.Dialer{Logf: node.logf, Dialer: options.Dialer}
 	sys.Set(dialer)
 	appName := "tailcat-client"
 	if node.isServer {
@@ -242,7 +246,7 @@ func (n *tailcatNode) start() error {
 	if err != nil {
 		return E.Cause(err, "set private key")
 	}
-	magicConn.SetDERPMap(&tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{n.region.RegionID: n.region}})
+	magicConn.SetDERPMap(&tailcfg.DERPMap{Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{n.region.RegionID: n.region}})
 	networkMap := n.buildNetworkMap(nil)
 	n.access.Lock()
 	n.networkMap = networkMap
@@ -282,6 +286,9 @@ func (n *tailcatNode) close() {
 		}
 		if engine, loaded := n.sys.Engine.GetOK(); loaded {
 			engine.Close()
+		}
+		if n.unwatch != nil {
+			n.unwatch()
 		}
 		if netMon, loaded := n.sys.NetMon.GetOK(); loaded {
 			netMon.Close()
@@ -414,7 +421,7 @@ func (n *tailcatNode) userName(address netip.Addr) string {
 	return n.users[nodeKey]
 }
 
-func (n *tailcatNode) onDERPRecv(regionID int, source key.NodePublic, packet []byte) bool {
+func (n *tailcatNode) onDERPRecv(regionID tailcfg.DERPRegionID, source key.NodePublic, packet []byte) bool {
 	if !isTailcatMeowPacket(packet) {
 		return false
 	}
@@ -498,7 +505,7 @@ func (n *tailcatNode) onMeow(nodeKey key.NodePublic, discoKey key.DiscoPublic) b
 	n.networkMap = networkMap
 	n.sys.MagicSock.Get().SetNetworkMap(networkMap.SelfNode, networkMap.Peers)
 	if loaded {
-		n.sys.Engine.Get().ResetDevicePeer(nodeKey)
+		n.sys.Engine.Get().MarkDevicePeerForHandshake(nodeKey)
 	}
 	n.netstack.UpdateNetstackIPs(networkMap)
 	go n.advertiseEndpoints()
@@ -593,7 +600,7 @@ func (n *tailcatNode) loopMeow() {
 		case sessionID := <-n.meowResponses:
 			restarted := registered && serverSession != sessionID
 			if restarted {
-				n.sys.Engine.Get().ResetDevicePeer(n.serverPublicKey)
+				n.sys.Engine.Get().MarkDevicePeerForHandshake(n.serverPublicKey)
 				n.logger.Info("server reconnected")
 			}
 			serverSession = sessionID

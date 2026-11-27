@@ -162,7 +162,7 @@ func TestPlatformTFONetworkPolicy(t *testing.T) {
 							var conn net.Conn
 							if interfaceEntry {
 								strategy := C.NetworkStrategyDefault
-								conn, err = dialer.DialParallelInterface(ctx, "tcp", destination, &strategy, nil, nil, 0)
+								conn, err = dialer.DialParallelNetwork(ctx, "tcp", destination, nil, &strategy, nil, nil, 0)
 							} else {
 								conn, err = dialer.DialContext(ctx, "tcp", destination)
 							}

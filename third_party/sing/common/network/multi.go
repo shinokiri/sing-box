@@ -14,6 +14,9 @@ import (
 const DefaultFallbackDelay = 300 * time.Millisecond
 
 func DialSerial(ctx context.Context, dialer Dialer, network string, destination M.Socksaddr, destinationAddresses []netip.Addr) (net.Conn, error) {
+	if len(destinationAddresses) == 0 {
+		return nil, E.New("network: no destination addresses")
+	}
 	if parallelDialer, isParallel := dialer.(ParallelDialer); isParallel {
 		return parallelDialer.DialParallel(ctx, network, destination, destinationAddresses)
 	}
@@ -32,6 +35,9 @@ func DialSerial(ctx context.Context, dialer Dialer, network string, destination 
 }
 
 func ListenSerial(ctx context.Context, dialer Dialer, destination M.Socksaddr, destinationAddresses []netip.Addr) (net.PacketConn, netip.Addr, error) {
+	if len(destinationAddresses) == 0 {
+		return nil, netip.Addr{}, E.New("network: no destination addresses")
+	}
 	var conn net.PacketConn
 	var err error
 	var connErrors []error
@@ -47,8 +53,11 @@ func ListenSerial(ctx context.Context, dialer Dialer, destination M.Socksaddr, d
 }
 
 func DialParallel(ctx context.Context, dialer Dialer, network string, destination M.Socksaddr, destinationAddresses []netip.Addr, preferIPv6 bool, fallbackDelay time.Duration) (net.Conn, error) {
-	if len(destinationAddresses) < 2 {
-		return DialSerial(ctx, dialer, network, destination, destinationAddresses)
+	switch len(destinationAddresses) {
+	case 0:
+		return nil, E.New("network: no destination addresses")
+	case 1:
+		return dialer.DialContext(ctx, network, M.SocksaddrFrom(destinationAddresses[0], destination.Port))
 	}
 	if fallbackDelay == 0 {
 		fallbackDelay = DefaultFallbackDelay
@@ -75,31 +84,20 @@ func DialParallel(ctx context.Context, dialer Dialer, network string, destinatio
 	type dialResult struct {
 		net.Conn
 		error
-		attempt int
 	}
 	results := make(chan dialResult)
 	returned := make(chan struct{})
 	defer close(returned)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var (
 		started      int
 		running      int
-		winner       = -1
-		cancels      []context.CancelFunc
 		connErrors   []error
 		attemptDelay <-chan time.Time
 	)
-	defer func() {
-		for attempt, attemptCancel := range cancels {
-			if attempt != winner {
-				attemptCancel()
-			}
-		}
-	}()
 	startAttempt := func() {
-		attempt := started
-		address := addresses[attempt]
-		attemptCtx, attemptCancel := context.WithCancel(ctx)
-		cancels = append(cancels, attemptCancel)
+		address := addresses[started]
 		started++
 		running++
 		if started < len(addresses) {
@@ -108,9 +106,9 @@ func DialParallel(ctx context.Context, dialer Dialer, network string, destinatio
 			attemptDelay = nil
 		}
 		go func() {
-			conn, err := dialer.DialContext(attemptCtx, network, M.SocksaddrFrom(address, destination.Port))
+			conn, err := dialer.DialContext(ctx, network, M.SocksaddrFrom(address, destination.Port))
 			select {
-			case results <- dialResult{Conn: conn, error: err, attempt: attempt}:
+			case results <- dialResult{Conn: conn, error: err}:
 			case <-returned:
 				if conn != nil {
 					conn.Close()
@@ -126,7 +124,6 @@ func DialParallel(ctx context.Context, dialer Dialer, network string, destinatio
 		case result := <-results:
 			running--
 			if result.error == nil {
-				winner = result.attempt
 				return result.Conn, nil
 			}
 			connErrors = append(connErrors, result.error)

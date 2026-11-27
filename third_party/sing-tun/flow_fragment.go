@@ -1,17 +1,17 @@
 package tun
 
 import (
+	"bytes"
 	"net/netip"
-	"sync"
 	"time"
-
-	"github.com/sagernet/sing-tun/gtcpip/header"
 )
 
 const (
 	fragmentTimeout       = 30 * time.Second
 	fragmentSweepInterval = time.Second
 	fragmentTableCapacity = 4096
+	fragmentHoldPerEntry  = 8
+	fragmentHoldCapacity  = 64
 )
 
 type fragmentKey struct {
@@ -21,149 +21,188 @@ type fragmentKey struct {
 	id          uint32
 }
 
+type fragmentInfo struct {
+	id     uint32
+	offset int
+	more   bool
+	length int
+}
+
 type fragmentEntry struct {
 	flow     *forwardFlow
 	rule     *rewriteRule
+	pending  bool
+	held     []heldPacket
 	deadline int64
-	received int
 	total    int
+	ranges   goReassemblyRanges
+}
+
+func (e *fragmentEntry) observe(info fragmentInfo) bool {
+	end := info.offset + info.length
+	if !info.more {
+		e.total = end
+	}
+	e.ranges.merge(info.offset, end)
+	return e.ranges.complete(e.total)
 }
 
 type fragmentTable struct {
-	access    sync.Mutex
 	entries   map[fragmentKey]*fragmentEntry
+	held      int
 	lastSweep int64
 }
 
-func (t *fragmentTable) insert(key fragmentKey, flow *forwardFlow, rule *rewriteRule, received int, now int64) {
-	t.access.Lock()
-	defer t.access.Unlock()
+func (t *fragmentTable) load(key fragmentKey, now int64) *fragmentEntry {
+	entry := t.entries[key]
+	if entry != nil && entry.deadline < now {
+		t.remove(key, entry)
+		return nil
+	}
+	return entry
+}
+
+func (t *fragmentTable) create(key fragmentKey, now int64) *fragmentEntry {
+	if t.entries == nil {
+		t.entries = make(map[fragmentKey]*fragmentEntry)
+	}
 	if len(t.entries) >= fragmentTableCapacity {
 		if now-t.lastSweep < int64(fragmentSweepInterval) {
-			return
+			return nil
 		}
 		t.lastSweep = now
 		for existingKey, entry := range t.entries {
 			if entry.deadline < now {
-				delete(t.entries, existingKey)
+				t.remove(existingKey, entry)
 			}
 		}
 		if len(t.entries) >= fragmentTableCapacity {
+			return nil
+		}
+	}
+	entry := &fragmentEntry{deadline: now + int64(fragmentTimeout), total: -1}
+	t.entries[key] = entry
+	return entry
+}
+
+func (t *fragmentTable) remove(key fragmentKey, entry *fragmentEntry) {
+	delete(t.entries, key)
+	t.held -= len(entry.held)
+}
+
+func (t *fragmentTable) reset() {
+	clear(t.entries)
+	t.held = 0
+}
+
+func (t *fragmentTable) pend(key fragmentKey, info fragmentInfo, now int64) {
+	if !info.more {
+		return
+	}
+	entry := t.load(key, now)
+	if entry == nil {
+		entry = t.create(key, now)
+		if entry == nil {
 			return
 		}
 	}
-	t.entries[key] = &fragmentEntry{flow: flow, rule: rule, deadline: now + int64(fragmentTimeout), received: received, total: -1}
+	entry.pending = true
+	entry.observe(info)
 }
 
-func (t *fragmentTable) remove(key fragmentKey) {
-	t.access.Lock()
-	delete(t.entries, key)
-	t.access.Unlock()
+func (t *fragmentTable) resolve(key fragmentKey, info fragmentInfo, flow *forwardFlow, rule *rewriteRule, now int64) []heldPacket {
+	entry := t.load(key, now)
+	if flow == nil {
+		if entry == nil {
+			return nil
+		}
+		t.remove(key, entry)
+		return entry.held
+	}
+	if entry == nil {
+		if !info.more {
+			return nil
+		}
+		entry = t.create(key, now)
+		if entry == nil {
+			return nil
+		}
+	}
+	held := entry.held
+	t.held -= len(held)
+	entry.held = nil
+	entry.pending = false
+	entry.flow = flow
+	entry.rule = rule
+	if entry.observe(info) {
+		delete(t.entries, key)
+	}
+	return held
 }
 
 func (t *fragmentTable) lookup(key fragmentKey, info fragmentInfo, now int64) *fragmentEntry {
-	t.access.Lock()
-	defer t.access.Unlock()
-	entry := t.entries[key]
+	entry := t.load(key, now)
 	if entry == nil {
 		return nil
 	}
-	if entry.deadline < now {
-		delete(t.entries, key)
-		return nil
-	}
-	entry.received += len(info.payload)
-	if !info.more {
-		entry.total = info.offset + len(info.payload)
-	}
-	if entry.total >= 0 && entry.received >= entry.total {
+	if entry.observe(info) && !entry.pending {
 		delete(t.entries, key)
 	}
 	return entry
 }
 
-type fragmentInfo struct {
-	protocol uint8
-	id       uint32
-	offset   int
-	more     bool
-	payload  []byte
+func (t *fragmentTable) hold(entry *fragmentEntry, packet []byte, meta *ForwardFrameMeta) bool {
+	if len(entry.held) >= fragmentHoldPerEntry || t.held >= fragmentHoldCapacity {
+		return false
+	}
+	held := heldPacket{packet: bytes.Clone(packet)}
+	if meta != nil {
+		held.meta = *meta
+	}
+	entry.held = append(entry.held, held)
+	t.held++
+	return true
 }
 
-func parseFragment(parsed *forwardPacket) (fragmentInfo, bool) {
-	if parsed.ipVersion == 4 {
-		ipHdr := header.IPv4(parsed.network)
-		return fragmentInfo{
-			protocol: parsed.protocol,
-			id:       uint32(ipHdr.ID()),
-			offset:   int(ipHdr.FragmentOffset()),
-			more:     ipHdr.More(),
-			payload:  ipHdr.Payload(),
-		}, true
-	}
-	fragmentHeader := header.IPv6Fragment(header.IPv6(parsed.network).Payload())
-	if !fragmentHeader.IsValid() {
-		return fragmentInfo{}, false
-	}
-	return fragmentInfo{
-		protocol: fragmentHeader.NextHeader(),
-		id:       fragmentHeader.ID(),
-		offset:   int(fragmentHeader.FragmentOffset()) * 8,
-		more:     fragmentHeader.More(),
-		payload:  fragmentHeader.Payload(),
-	}, true
-}
-
-func (r *portReturn) classifyFragment(parsed *forwardPacket, size int, now int64) (returnDecision, ForwardWriteback) {
-	info, ok := parseFragment(parsed)
-	if !ok {
-		return returnPass, nil
-	}
-	key := fragmentKey{
-		source:      parsed.source.Addr(),
-		destination: parsed.destination.Addr(),
-		protocol:    info.protocol,
-		id:          info.id,
-	}
-	if info.offset == 0 {
-		parsed.protocol = info.protocol
-		parsed.parseTransport(info.payload)
+func (r *portReturn) classifyFragment(parsed *forwardPacket, now int64) (returnDecision, *forwardFlow, *rewriteRule) {
+	key := parsed.fragmentKey()
+	if parsed.fragmentInfo.offset == 0 {
 		var (
-			flow    *forwardFlow
-			rule    *rewriteRule
-			scratch rewriteRule
+			flow *forwardFlow
+			rule *rewriteRule
 		)
 		if parsed.hasFlow {
+			var scratch rewriteRule
 			flow, rule = r.matchReverse(parsed, &scratch)
 		}
+		r.fragmentAccess.Lock()
+		r.fragments.resolve(key, parsed.fragmentInfo, flow, rule, now)
+		r.fragmentAccess.Unlock()
 		if flow == nil {
-			r.fragments.remove(key)
-			return returnPass, nil
-		}
-		if info.more {
-			r.fragments.insert(key, flow, rule, len(info.payload), now)
+			return returnPass, nil, nil
 		}
 		if !flow.IsActive() {
-			return returnDrop, nil
-		}
-		if flow.tracker != nil {
-			flow.tracker.CountReverse(size)
+			return returnDrop, nil, nil
 		}
 		flow.observeReverse(parsed, now)
-		applyRewrite(parsed, rule)
-		return returnWrite, flow.owner.writeback
+		return returnWrite, flow, rule
 	}
-	entry := r.fragments.lookup(key, info, now)
-	if entry == nil {
-		return returnPass, nil
+	var (
+		flow *forwardFlow
+		rule *rewriteRule
+	)
+	r.fragmentAccess.Lock()
+	entry := r.fragments.lookup(key, parsed.fragmentInfo, now)
+	if entry != nil {
+		flow, rule = entry.flow, entry.rule
 	}
-	if !entry.flow.IsActive() {
-		return returnDrop, nil
+	r.fragmentAccess.Unlock()
+	if flow == nil {
+		return returnPass, nil, nil
 	}
-	if entry.flow.tracker != nil {
-		entry.flow.tracker.CountReverse(size)
+	if !flow.IsActive() {
+		return returnDrop, nil, nil
 	}
-	entry.flow.lastReverse.Store(now)
-	applyRewriteAddresses(parsed, entry.rule)
-	return returnWrite, entry.flow.owner.writeback
+	flow.lastReverse.Store(now)
+	return returnWrite, flow, rule
 }

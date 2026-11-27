@@ -31,9 +31,9 @@ type GunConn struct {
 	err           error
 	cancel        context.CancelFunc
 	readRemaining uint64
-	setupAccess   sync.Mutex
-	closed        bool
 	onClose       func()
+	access        sync.Mutex
+	closed        bool
 }
 
 func newGunConn(reader io.Reader, writer io.Writer, flusher http.Flusher) *GunConn {
@@ -54,9 +54,9 @@ func newLateGunConn(writer io.Writer, cancel context.CancelFunc) *GunConn {
 }
 
 func (c *GunConn) setup(reader io.Reader, err error) {
-	c.setupAccess.Lock()
+	c.access.Lock()
 	if c.closed {
-		c.setupAccess.Unlock()
+		c.access.Unlock()
 		common.Close(reader)
 		return
 	}
@@ -66,7 +66,7 @@ func (c *GunConn) setup(reader io.Reader, err error) {
 	}
 	c.err = err
 	close(c.create)
-	c.setupAccess.Unlock()
+	c.access.Unlock()
 }
 
 func (c *GunConn) Read(b []byte) (n int, err error) {
@@ -154,9 +154,9 @@ func (c *GunConn) FrontHeadroom() int {
 }
 
 func (c *GunConn) Close() error {
-	c.setupAccess.Lock()
+	c.access.Lock()
 	if c.closed {
-		c.setupAccess.Unlock()
+		c.access.Unlock()
 		return nil
 	}
 	c.closed = true
@@ -169,7 +169,7 @@ func (c *GunConn) Close() error {
 		}
 	}
 	reader := c.rawReader
-	c.setupAccess.Unlock()
+	c.access.Unlock()
 	err := common.Close(reader, c.writer)
 	if c.cancel != nil {
 		c.cancel()

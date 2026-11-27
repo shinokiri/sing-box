@@ -49,6 +49,9 @@ type Endpoint struct {
 	loopContext        context.Context
 	cancelLoop         context.CancelFunc
 	dnsRouter          adapter.DNSRouter
+	outboundManager    adapter.OutboundManager
+	detour             string
+	clientOptions      openconnect.ClientOptions
 	client             *openconnect.Client
 	deviceOptions      *device.Options
 	device             device.Device
@@ -111,12 +114,16 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 			Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeOpenConnect, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, options.DialerOptions),
 			router:  router,
 			logger:  logger,
+			system:  options.System,
+			network: service.FromContext[adapter.NetworkManager](ctx),
 		},
-		loopContext:   loopContext,
-		cancelLoop:    cancelLoop,
-		dnsRouter:     service.FromContext[adapter.DNSRouter](ctx),
-		statusUpdated: make(chan struct{}),
-		onDemand:      options.OnDemand,
+		loopContext:     loopContext,
+		cancelLoop:      cancelLoop,
+		dnsRouter:       service.FromContext[adapter.DNSRouter](ctx),
+		outboundManager: service.FromContext[adapter.OutboundManager](ctx),
+		detour:          options.Detour,
+		statusUpdated:   make(chan struct{}),
+		onDemand:        options.OnDemand,
 	}
 	openConnectEndpoint.state.Store(new(clientState))
 	success := false
@@ -188,6 +195,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	if err != nil {
 		return nil, err
 	}
+	openConnectEndpoint.clientOptions = clientOptions
 	openConnectEndpoint.client = client
 	success = true
 	return openConnectEndpoint, nil
@@ -337,6 +345,7 @@ func (e *Endpoint) buildClientOptions(options option.OpenConnectEndpointOptions,
 		},
 		FormEntries:           formEntries,
 		Dialer:                outboundDialer,
+		ProxiedDialer:         options.Detour != "",
 		Logger:                e.logger,
 		OnTunnelConfiguration: e.handleTunnelConfiguration,
 	}, nil
@@ -419,6 +428,21 @@ func (e *Endpoint) updateState(update func(state *clientState)) {
 func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	switch stage {
 	case adapter.StartStateInitialize:
+		if e.clientOptions.ProxiedDialer {
+			detour, loaded := e.outboundManager.Outbound(e.detour)
+			if loaded && detour.Type() == C.TypeDirect {
+				e.clientOptions.ProxiedDialer = false
+				client, err := openconnect.NewClient(e.clientOptions)
+				if err != nil {
+					return err
+				}
+				err = e.client.Close()
+				if err != nil {
+					return E.Cause(err, "close client")
+				}
+				e.client = client
+			}
+		}
 		scope.Add(func() error {
 			e.notifyStatusUpdated()
 			return nil
@@ -487,10 +511,10 @@ func (e *Endpoint) readLoop(ctx context.Context) {
 		err = e.device.WriteInboundBuffers(packetBuffers)
 		buf.ReleaseMulti(packetBuffers)
 		if err != nil {
-			err = E.Cause(err, "write packet to device")
-			e.logger.Error(err)
-			e.setTerminalError(err)
-			return
+			if E.IsCanceled(err) || ctx.Err() != nil {
+				return
+			}
+			e.logger.Debug(E.Cause(err, "write packet to device"))
 		}
 	}
 }
@@ -569,7 +593,7 @@ func (e *Endpoint) DetachReturn(returnPath tun.Return) error {
 }
 
 func (e *Endpoint) JudgeFlow(network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
-	return judgeOpenConnectFlow(e.router, e.Tag(), e.Type(), e.state.Load().localAddresses, network, source, destination, firstPacket)
+	return e.judgeFlow(e.loopContext, e, e.state.Load().localAddresses, network, source, destination, firstPacket)
 }
 
 func (e *Endpoint) NewDNSPacket(payload []byte, source M.Socksaddr, destination M.Socksaddr, writer N.PacketWriter) {

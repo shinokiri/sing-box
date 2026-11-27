@@ -269,7 +269,7 @@ func (c *clientPacketConn) LocalAddr() net.Addr {
 }
 
 func (c *clientPacketConn) RemoteAddr() net.Addr {
-	return c.destination.UDPAddr()
+	return c.destination
 }
 
 func (c *clientPacketConn) NeedAdditionalReadDeadline() bool {
@@ -319,7 +319,7 @@ func (c *clientPacketAddrConn) ReadFrom(p []byte) (n int, addr net.Addr, err err
 	if err != nil {
 		return
 	}
-	if destination.IsFqdn() {
+	if destination.IsDomain() {
 		addr = destination
 	} else {
 		addr = destination.UDPAddr()

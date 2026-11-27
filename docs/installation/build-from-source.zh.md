@@ -6,6 +6,10 @@ icon: material/file-code
 
 ## :material-graph: 要求
 
+### sing-box 1.15
+
+* Go 1.26.11 - ~
+
 ### sing-box 1.11
 
 * Go 1.23.1 - ~
@@ -57,8 +61,8 @@ go build -tags "tag_a tag_b" ./cmd/sing-box
 | `with_wireguard`                   | :material-check:  | Build with WireGuard support, see [WireGuard outbound](/zh/configuration/outbound/wireguard/).                                                                                                                                                                                                                                    |
 | `with_utls`                        | :material-check:  | Build with [uTLS](https://github.com/refraction-networking/utls) support for TLS outbound, see [TLS](/zh/configuration/shared/tls#utls).                                                                                                                                                                                          |
 | `with_acme`                        | :material-check:  | Build with ACME TLS certificate issuer support, see [TLS](/zh/configuration/shared/tls/).                                                                                                                                                                                                                                         |
-| `with_clash_api`                   | :material-check:  | Build with Clash API support, see [Experimental](/zh/configuration/experimental#clash-api-fields).                                                                                                                                                                                                                                |
-| `with_v2ray_api`                   | :material-close:️ | Build with V2Ray API support, see [Experimental](/zh/configuration/experimental#v2ray-api-fields).                                                                                                                                                                                                                                |
+| `with_clash_api`                   | :material-check:  | Build with Clash API support, see [Clash API](/zh/configuration/experimental/clash-api/).                                                                                                                                                                                                                                         |
+| `with_v2ray_api`                   | :material-close:️ | Build with V2Ray API support, see [V2Ray API](/zh/configuration/experimental/v2ray-api/).                                                                                                                                                                                                                                         |
 | `with_gvisor`                      | :material-close:  | 构建 gVisor 支持，已弃用的 `gvisor` / `mixed` [Tun 栈](/zh/configuration/inbound/tun#stack) 需要。                                                                                                                                                                   |
 | `with_embedded_tor` (CGO required) | :material-close:️ | Build with embedded Tor support, see [Tor outbound](/zh/configuration/outbound/tor/).                                                                                                                                                                                                                                             |
 | `with_tailscale`                   | :material-check:  | 构建 Tailscale 支持，参阅 [Tailscale 端点](/zh/configuration/endpoint/tailscale)。                                                                                                                                                                                                                                                         |

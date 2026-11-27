@@ -151,7 +151,7 @@ func TestPlatformTCPFastOpen(t *testing.T) {
 					var conn net.Conn
 					if parallelEntry {
 						strategy := C.NetworkStrategyDefault
-						conn, err = dialer.DialParallelInterface(ctx, "tcp", destination, &strategy, nil, nil, 0)
+						conn, err = dialer.DialParallelNetwork(ctx, "tcp", destination, nil, &strategy, nil, nil, 0)
 					} else {
 						conn, err = dialer.DialContext(ctx, "tcp", destination)
 					}
@@ -259,12 +259,12 @@ func TestPlatformTFODynamicNetworkOverride(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var dialer ParallelInterfaceDialer = base
+			var dialer ParallelNetworkDialer = base
 			if resolved {
-				dialer = NewResolveDialer(ctx, base, false, "", adapter.DNSQueryOptions{}, 0).(ParallelInterfaceDialer)
+				dialer = NewResolveDialer(ctx, base, false, "", adapter.DNSQueryOptions{}, 0).(ParallelNetworkDialer)
 			}
 			strategy := C.NetworkStrategyHybrid
-			conn, err := dialer.DialParallelInterface(ctx, "tcp", M.ParseSocksaddr("127.0.0.1:1"), &strategy, nil, nil, 0)
+			conn, err := dialer.DialParallelNetwork(ctx, "tcp", M.ParseSocksaddr("127.0.0.1:1"), nil, &strategy, nil, nil, 0)
 			if conn != nil {
 				conn.Close()
 			}

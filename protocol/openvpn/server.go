@@ -80,6 +80,8 @@ func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.Co
 			Adapter: endpoint.NewAdapter(C.TypeOpenVPNServer, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, nil),
 			router:  router,
 			logger:  logger,
+			system:  options.System,
+			network: service.FromContext[adapter.NetworkManager](ctx),
 		},
 		ctx:            ctx,
 		cancelLoop:     cancelLoop,
@@ -637,8 +639,10 @@ func (s *ServerEndpoint) readLoop(ctx context.Context) {
 		err = s.device.WriteInboundBuffers(packetBuffers)
 		buf.ReleaseMulti(packetBuffers)
 		if err != nil {
-			s.logger.Error(E.Cause(err, "write packet to device"))
-			return
+			if E.IsCanceled(err) || ctx.Err() != nil {
+				return
+			}
+			s.logger.Debug(E.Cause(err, "write packet to device"))
 		}
 	}
 }
@@ -668,7 +672,7 @@ func (s *ServerEndpoint) DetachReturn(returnPath tun.Return) error {
 }
 
 func (s *ServerEndpoint) JudgeFlow(network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
-	return judgeOpenVPNFlow(s.router, s.Tag(), s.Type(), s.localAddresses, network, source, destination, firstPacket)
+	return s.judgeFlow(s.ctx, s, s.localAddresses, network, source, destination, firstPacket)
 }
 
 func (s *ServerEndpoint) NewDNSPacket(payload []byte, source M.Socksaddr, destination M.Socksaddr, writer N.PacketWriter) {

@@ -1,6 +1,6 @@
 # Local sing-mux patch
 
-Source: `github.com/sagernet/sing-mux` **v0.3.10-0.20260929204512-caf09fe32475**, pinned by sing-box v1.15.0-alpha.10.
+Source: `github.com/sagernet/sing-mux` **v0.3.10-0.20261125130604-1dd833b8fc3a**, pinned by sing-box v1.15.0-alpha.14.
 The Go sources, module files, and upstream license are copied unchanged except
 for `h2mux_conn.go` and `h2mux.go`.
 
@@ -34,3 +34,6 @@ requires `caf09fe32475`. Their difference is limited to the protocol input check
 and HTTP/2 server-close fixes described above. After reviewing those changes,
 both fork modules use the core version. Automatic synchronization still rejects
 new, unreviewed disagreements between upstream's core and test module pins.
+
+Alpha.14 also serializes HTTP/2 response setup with close. The fork wakes a
+pending reader immediately on close and disposes of a later response body.

@@ -13,20 +13,20 @@ index d90e2c7..53f3226 100644
 @@ -21,6 +22,7 @@ class ApkDownloader : Closeable {
          cacheDir.mkdirs()
          val apkFile = File(cacheDir, "update.apk")
-
+ 
 +        Settings.cachedApkUrl = ""
          if (apkFile.exists()) apkFile.delete()
-
+ 
          val request = client.newRequest()
 @@ -42,7 +44,7 @@ class ApkDownloader : Closeable {
              throw Exception("Download failed: empty file")
          }
-
+ 
 -        UpdateState.saveApkPath(apkFile)
 +        UpdateState.saveApkPath(apkFile, url)
          apkFile
      }
-
+ 
 @@ -50,3 +52,6 @@ class ApkDownloader : Closeable {
          client.close()
      }
@@ -40,13 +40,13 @@ index a302977..48a4201 100644
 +++ b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
 @@ -1,6 +1,5 @@
  package io.nekohasekai.sfa.vendor
-
+ 
 -import android.os.Build
  import io.nekohasekai.libbox.Libbox
  import io.nekohasekai.sfa.BuildConfig
  import io.nekohasekai.sfa.ktx.unwrap
 @@ -14,7 +13,8 @@ import java.io.Closeable
-
+ 
  class GitHubUpdateChecker : Closeable {
      companion object {
 -        private const val RELEASES_URL = "https://api.github.com/repos/SagerNet/sing-box/releases"
@@ -54,11 +54,11 @@ index a302977..48a4201 100644
 +        internal const val LATEST_RELEASE_URL = "https://api.github.com/repos/shinokiri/sing-box/releases/latest"
          private const val METADATA_FILENAME = "SFA-version-metadata.json"
      }
-
+ 
 @@ -25,49 +25,22 @@ class GitHubUpdateChecker : Closeable {
-
+ 
      private val json = Json { ignoreUnknownKeys = true }
-
+ 
 -    fun checkUpdate(track: UpdateTrack, githubToken: String): UpdateInfo? {
 +    fun checkUpdate(track: UpdateTrack, githubToken: String): UpdateInfo? =
 +        selectUdpflowUpdate(getUdpflowReleases(track) { getReleaseFeed(it, githubToken) }, track, BuildConfig.VERSION_CODE) { release ->
@@ -99,7 +99,7 @@ index a302977..48a4201 100644
 -                !asset.name.contains("play") &&
 -                asset.name.contains("legacy-android-5") == isLegacy
 -        }
-
+ 
 -        return UpdateInfo(
 -            versionCode = metadata.versionCode,
 -            versionName = release.version,
@@ -111,7 +111,7 @@ index a302977..48a4201 100644
 -        )
 +        return request.execute().content.unwrap
      }
-
+ 
      private fun downloadMetadata(release: GitHubRelease): VersionMetadata? {
 @@ -97,9 +70,7 @@ class GitHubUpdateChecker : Closeable {
          val prerelease: Boolean = false,
@@ -121,7 +121,7 @@ index a302977..48a4201 100644
 -        val version: String get() = tagName.removePrefix("v")
 -    }
 +    )
-
+ 
      @Serializable
      data class GitHubAsset(
 @@ -111,5 +82,48 @@ class GitHubUpdateChecker : Closeable {
@@ -186,11 +186,11 @@ index 059458d..0b2ea8f 100644
  import io.nekohasekai.sfa.update.UpdateTrack
 -import io.nekohasekai.sfa.update.checkFDroidUpdate
  import java.util.concurrent.TimeUnit
-
+ 
  class UpdateWorker(private val appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
 @@ -61,13 +59,8 @@ class UpdateWorker(private val appContext: Context, params: WorkerParameters) :
          Log.d(TAG, "Checking for updates...")
-
+ 
          return try {
 -            val updateInfo = when (UpdateSource.fromString(Settings.updateSource)) {
 -                UpdateSource.FDROID -> checkFDroidUpdate(appContext)
@@ -201,7 +201,7 @@ index 059458d..0b2ea8f 100644
 -            }
 +            val track = UpdateTrack.fromString(Settings.updateTrack)
 +            val updateInfo = GitHubUpdateChecker().use { it.checkUpdate(track, Settings.githubToken) }
-
+ 
              if (updateInfo == null) {
                  Log.d(TAG, "No update available")
 diff --git a/app/src/main/java/io/nekohasekai/sfa/Application.kt b/app/src/main/java/io/nekohasekai/sfa/Application.kt
@@ -224,12 +224,12 @@ index a02aac1..4987abc 100644
      private var workingDir: File? = null
      private var setupCompleted = false
 +    private lateinit var libboxInitializer: LibboxInitializer
-
+ 
      override fun attachBaseContext(base: Context?) {
          super.attachBaseContext(base)
          application = this
      }
-
+ 
 +    @OptIn(DelicateCoroutinesApi::class)
      override fun onCreate() {
          super.onCreate()
@@ -237,7 +237,7 @@ index a02aac1..4987abc 100644
 @@ -62,15 +66,18 @@ class Application : Application() {
          cacheDir.mkdirs()
          installWorkingDir()
-
+ 
 -        @Suppress("OPT_IN_USAGE")
 -        GlobalScope.launch(Dispatchers.IO) {
 +        libboxInitializer = LibboxInitializer(GlobalScope) {
@@ -262,7 +262,7 @@ index a02aac1..4987abc 100644
 @@ -89,6 +96,8 @@ class Application : Application() {
          }
      }
-
+ 
 +    internal suspend fun awaitLibboxInitialization() = libboxInitializer.await()
 +
      private fun installWorkingDir(): File? {
@@ -274,7 +274,7 @@ index 11174c0..d1d956d 100644
 +++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 @@ -325,6 +325,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
      }
-
+ 
      private suspend fun stopAndAlert(type: Alert, message: String? = null) {
 +        Log.e(TAG, "service alert: $type: ${message.orEmpty()}")
          Settings.startedByUser = false
@@ -283,7 +283,7 @@ index 11174c0..d1d956d 100644
 @@ -373,16 +374,27 @@ class BoxService(private val service: Service, private val platformInterface: Pl
              receiverRegistered = true
          }
-
+ 
 -        GlobalScope.launch(Dispatchers.IO) {
 -            Settings.startedByUser = true
 +        GlobalScope.launch(Dispatchers.Main.immediate) {
@@ -314,6 +314,45 @@ index 11174c0..d1d956d 100644
          }
          return Service.START_NOT_STICKY
      }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt b/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
+index 7c23a03..d20d108 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
+@@ -8,6 +8,7 @@ import java.net.NetworkInterface
+ 
+ object DefaultNetworkMonitor {
+ 
++    @Volatile
+     var defaultNetwork: Network? = null
+     private var listener: InterfaceUpdateListener? = null
+ 
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt b/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
+index efa48cf..fddf702 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
+@@ -98,7 +98,10 @@ interface PlatformInterfaceWrapper : PlatformInterface {
+     }
+ 
+     override fun getInterfaces(): NetworkInterfaceIterator {
+-        val networks = Application.connectivity.allNetworks
++        val defaultNetwork = DefaultNetworkMonitor.defaultNetwork
++        // The core deduplicates by interface name. Prefer the selected Android
++        // Network when several Network records refer to the same interface.
++        val networks = Application.connectivity.allNetworks.sortedBy { it != defaultNetwork }
+         val networkInterfaces = NetworkInterface.getNetworkInterfaces().toList()
+         val interfaces = mutableListOf<LibboxNetworkInterface>()
+         for (network in networks) {
+@@ -106,6 +109,10 @@ interface PlatformInterfaceWrapper : PlatformInterface {
+             val linkProperties = Application.connectivity.getLinkProperties(network) ?: continue
+             val networkCapabilities =
+                 Application.connectivity.getNetworkCapabilities(network) ?: continue
++            if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
++                boxInterface.networkHandle = network.networkHandle
++            }
+             boxInterface.name = linkProperties.interfaceName
+             val networkInterface =
+                 networkInterfaces.find { it.name == boxInterface.name } ?: continue
 diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/model/Groups.kt b/app/src/main/java/io/nekohasekai/sfa/compose/model/Groups.kt
 index c869065..82f9772 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/compose/model/Groups.kt
@@ -337,7 +376,7 @@ index c869065..82f9772 100644
 +        item.urlTestProgressSupported,
      )
  }
-
+ 
 @@ -34,13 +40,19 @@ data class GroupItem(
      val displayType: String,
      val urlTestTime: Long,
@@ -357,7 +396,7 @@ index c869065..82f9772 100644
 +        item.urlTestState,
      )
  }
-
+ 
 diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/model/UrlTestProgress.kt b/app/src/main/java/io/nekohasekai/sfa/compose/model/UrlTestProgress.kt
 new file mode 100644
 index 0000000..ae5e9b6
@@ -418,7 +457,7 @@ index 0000000..ae5e9b6
 +    }
 +}
 diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
-index 1db738a..3f673b0 100644
+index 38a7bac..efc0661 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/GroupsCard.kt
 @@ -68,6 +68,8 @@ import androidx.compose.ui.unit.dp
@@ -430,19 +469,19 @@ index 1db738a..3f673b0 100644
  import io.nekohasekai.sfa.compat.LazyColumnCompat
  import io.nekohasekai.sfa.compat.rememberOverscrollEffectCompat
  import io.nekohasekai.sfa.compose.component.SnackbarHost
-@@ -219,6 +221,9 @@ private fun GroupsCardContent(
+@@ -222,6 +224,9 @@ private fun GroupsCardContent(
      val scaffoldPadding = if (asSheet) PaddingValues(0.dp) else LocalScaffoldPadding.current
      val overscrollEffect = if (asSheet) null else rememberOverscrollEffectCompat()
      val palette = rememberUrlTestPalette()
 +    val displayGroups = remember(uiState.groups, uiState.pendingTests) {
 +        displayUrlTestProgress(uiState.groups, uiState.pendingTests)
 +    }
-
+ 
      LazyColumnCompat(
          modifier =
-@@ -258,13 +263,13 @@ private fun GroupsCardContent(
+@@ -261,13 +266,13 @@ private fun GroupsCardContent(
              }
-
+ 
              else -> {
 -                uiState.groups.forEach { group ->
 +                displayGroups.forEach { group ->
@@ -456,7 +495,7 @@ index 1db738a..3f673b0 100644
                              onToggleExpanded = { onToggleExpanded(group.tag) },
                              onUrlTest = { onUrlTest(group.tag) },
                              modifier = headerModifier,
-@@ -493,7 +498,7 @@ private fun GroupDotsGrid(
+@@ -478,7 +483,7 @@ private fun GroupDotsGrid(
                      val x = (index % columns) * (dotSizePx + dotSpacingPx)
                      val y = (index / columns) * (dotSizePx + dotSpacingPx)
                      drawRoundRect(
@@ -465,9 +504,9 @@ index 1db738a..3f673b0 100644
                          topLeft = Offset(x, y),
                          size = Size(dotSizePx, dotSizePx),
                          cornerRadius = cornerRadius,
-@@ -621,12 +626,24 @@ private fun ProxyChip(
-                             MaterialTheme.colorScheme.onSurfaceVariant
-                         },
+@@ -609,16 +614,29 @@ private fun ProxyChip(
+                         overflow = TextOverflow.Ellipsis,
+                         modifier = Modifier.weight(1f),
                      )
 -                    if (item.urlTestDelay > 0) {
 +                    val statusText = when (item.urlTestState) {
@@ -479,21 +518,27 @@ index 1db738a..3f673b0 100644
 +                        else -> if (item.urlTestDelay > 0) "${item.urlTestDelay}ms" else null
 +                    }
 +                    if (statusText != null) {
++                        val statusColor = when {
++                            item.isTesting || item.urlTestState == UrlTestState.CANCELED -> MaterialTheme.colorScheme.onSurfaceVariant
++                            item.urlTestState == UrlTestState.FAILED -> MaterialTheme.colorScheme.error
++                            else -> palette.forDelay(item.urlTestDelay)
++                        }
                          Text(
 -                            text = "${item.urlTestDelay}ms",
 +                            text = statusText,
                              style = MaterialTheme.typography.labelSmall,
                              fontWeight = FontWeight.SemiBold,
--                            color = palette.forDelay(item.urlTestDelay),
-+                            color = when {
-+                                item.isTesting || item.urlTestState == UrlTestState.CANCELED -> MaterialTheme.colorScheme.onSurfaceVariant
-+                                item.urlTestState == UrlTestState.FAILED -> MaterialTheme.colorScheme.error
-+                                else -> palette.forDelay(item.urlTestDelay)
-+                            },
+                             color =
+                             if (isSelected) {
+-                                palette.forDelay(item.urlTestDelay).ensureContrast(MaterialTheme.colorScheme.primaryContainer)
++                                statusColor.ensureContrast(MaterialTheme.colorScheme.primaryContainer)
+                             } else {
+-                                palette.forDelay(item.urlTestDelay)
++                                statusColor
+                             },
                          )
                      }
-                 }
-@@ -639,6 +656,7 @@ private fun ProxyChip(
+@@ -632,6 +650,7 @@ private fun ProxyChip(
              ) {
                  DropdownMenuItem(
                      text = { Text(stringResource(R.string.url_test)) },
@@ -521,7 +566,7 @@ index 214bfa5..c0403ef 100644
 +    val pendingTests: Map<String, Long> = emptyMap(),
      val showCloseConnectionsSnackbar: Boolean = false,
  )
-
+ 
 @@ -109,6 +112,8 @@ class GroupsViewModel(private val sharedCommandClient: CommandClient? = null) :
              updateState {
                  copy(
@@ -534,7 +579,7 @@ index 214bfa5..c0403ef 100644
 @@ -223,27 +228,26 @@ class GroupsViewModel(private val sharedCommandClient: CommandClient? = null) :
          }
      }
-
+ 
 -    fun urlTest(outboundTag: String) {
 -        viewModelScope.launch(Dispatchers.IO) {
 -            try {
@@ -545,7 +590,7 @@ index 214bfa5..c0403ef 100644
 -        }
 -    }
 +    fun urlTest(outboundTag: String) = urlTestGroup(outboundTag)
-
+ 
      fun urlTestGroup(groupTag: String) {
 -        updateState { copy(testingGroups = testingGroups + groupTag) }
 -        viewModelScope.launch(Dispatchers.IO) {
@@ -584,7 +629,7 @@ index 214bfa5..c0403ef 100644
              }
 @@ -267,7 +273,7 @@ class GroupsViewModel(private val sharedCommandClient: CommandClient? = null) :
      }
-
+ 
      override fun updateGroups(newGroups: MutableList<OutboundGroup>) {
 -        viewModelScope.launch(Dispatchers.Default) {
 +        viewModelScope.launch {
@@ -600,7 +645,7 @@ index 214bfa5..c0403ef 100644
                          isLoading = false,
                      )
 diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
-index a5424ab..a60d57d 100644
+index a8ec04b..823f42b 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt
 @@ -801,7 +801,7 @@ fun AppSettingsScreen(
@@ -629,7 +674,7 @@ index ea01530..1099ae0 100644
 +++ b/app/src/main/java/io/nekohasekai/sfa/database/Settings.kt
 @@ -42,8 +42,8 @@ object Settings {
      var startedByUser by dataStore.boolean(SettingsKey.STARTED_BY_USER)
-
+ 
      var updateSource by dataStore.string(SettingsKey.UPDATE_SOURCE) { "github" }
 -    var checkUpdateEnabled by dataStore.boolean(SettingsKey.CHECK_UPDATE_ENABLED) { false }
 -    var updateCheckPrompted by dataStore.boolean(SettingsKey.UPDATE_CHECK_PROMPTED) { false }
@@ -639,12 +684,12 @@ index ea01530..1099ae0 100644
          val versionName = BuildConfig.VERSION_NAME.lowercase()
          if (versionName.contains("-alpha") ||
 @@ -133,6 +133,7 @@ object Settings {
-
+ 
      var cachedUpdateInfo by dataStore.string(SettingsKey.CACHED_UPDATE_INFO) { "" }
      var cachedApkPath by dataStore.string(SettingsKey.CACHED_APK_PATH) { "" }
 +    var cachedApkUrl by dataStore.string(SettingsKey.CACHED_APK_URL) { "" }
      var lastShownUpdateVersion by dataStore.int(SettingsKey.LAST_SHOWN_UPDATE_VERSION) { 0 }
-
+ 
      fun serviceClass(): Class<*> = when (serviceMode) {
 diff --git a/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt b/app/src/main/java/io/nekohasekai/sfa/update/UpdateState.kt
 index 19ba94e..907f41d 100644
@@ -653,14 +698,14 @@ index 19ba94e..907f41d 100644
 @@ -80,14 +80,16 @@ object UpdateState {
          Settings.cachedUpdateInfo = info?.toJson() ?: ""
      }
-
+ 
 -    fun saveApkPath(file: File) {
 +    fun saveApkPath(file: File, url: String) {
          Settings.cachedApkPath = file.absolutePath
 +        Settings.cachedApkUrl = url
          cachedApkFile.value = file
      }
-
+ 
      private fun clearCache() {
          Settings.cachedUpdateInfo = ""
          Settings.cachedApkPath = ""
@@ -746,16 +791,16 @@ index fa39ea9..886b17c 100644
  import io.nekohasekai.sfa.update.UpdateState
  import io.nekohasekai.sfa.update.UpdateTrack
 -import io.nekohasekai.sfa.update.checkFDroidUpdate
-
+ 
  object Vendor : VendorInterface {
      private const val TAG = "Vendor"
 @@ -97,15 +95,12 @@ object Vendor : VendorInterface {
-
+ 
      override val hasCustomUpdate = true
-
+ 
 -    override val updateSources = listOf(UpdateSource.GITHUB, UpdateSource.FDROID)
 +    override val updateSources = listOf(UpdateSource.GITHUB)
-
+ 
 -    override fun checkUpdateAsync(): UpdateInfo? = when (UpdateSource.fromString(Settings.updateSource)) {
 -        UpdateSource.FDROID -> checkFDroidUpdate(Application.application)
 -        UpdateSource.GITHUB -> {
@@ -769,10 +814,10 @@ index fa39ea9..886b17c 100644
 +            checker.checkUpdate(track, Settings.githubToken)
          }
      }
-
+ 
 @@ -134,12 +129,8 @@ object Vendor : VendorInterface {
      }
-
+ 
      override suspend fun downloadAndInstall(context: android.content.Context, downloadUrl: String) {
 -        val cachedApk = UpdateState.cachedApkFile.value
 -        val apkFile = if (cachedApk != null && cachedApk.exists() && cachedApk.length() > 0) {
@@ -785,42 +830,3 @@ index fa39ea9..886b17c 100644
          ApkInstaller.install(context, apkFile)
      }
  }
-diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt b/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
-index 7c23a03..d20d108 100644
---- a/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
-+++ b/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
-@@ -8,6 +8,7 @@ import java.net.NetworkInterface
-
- object DefaultNetworkMonitor {
-
-+    @Volatile
-     var defaultNetwork: Network? = null
-     private var listener: InterfaceUpdateListener? = null
-
-diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt b/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
-index 865e600..989b358 100644
---- a/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
-+++ b/app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
-@@ -98,7 +98,10 @@ interface PlatformInterfaceWrapper : PlatformInterface {
-     }
-
-     override fun getInterfaces(): NetworkInterfaceIterator {
--        val networks = Application.connectivity.allNetworks
-+        val defaultNetwork = DefaultNetworkMonitor.defaultNetwork
-+        // The core deduplicates by interface name. Prefer the selected Android
-+        // Network when several Network records refer to the same interface.
-+        val networks = Application.connectivity.allNetworks.sortedBy { it != defaultNetwork }
-         val networkInterfaces = NetworkInterface.getNetworkInterfaces().toList()
-         val interfaces = mutableListOf<LibboxNetworkInterface>()
-         for (network in networks) {
-@@ -106,6 +109,10 @@ interface PlatformInterfaceWrapper : PlatformInterface {
-             val linkProperties = Application.connectivity.getLinkProperties(network) ?: continue
-             val networkCapabilities =
-                 Application.connectivity.getNetworkCapabilities(network) ?: continue
-+            if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
-+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-+                boxInterface.networkHandle = network.networkHandle
-+            }
-             boxInterface.name = linkProperties.interfaceName
-             val networkInterface =
-                 networkInterfaces.find { it.name == boxInterface.name } ?: continue

@@ -1,6 +1,7 @@
 package v2raywebsocket
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
+	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/debug"
 	E "github.com/sagernet/sing/common/exceptions"
+	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/ws"
 	"github.com/sagernet/ws/wsutil"
 )
@@ -90,12 +93,7 @@ func (c *WebsocketConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *WebsocketConn) Write(p []byte) (n int, err error) {
-	err = wrapWsError(wsutil.WriteMessage(c.Conn, c.state, ws.OpBinary, p))
-	if err != nil {
-		return
-	}
-	n = len(p)
-	return
+	return bufio.WriteBuffer(c, buf.As(p))
 }
 
 func (c *WebsocketConn) RemoteAddr() net.Addr {
@@ -150,8 +148,6 @@ func (c *EarlyWebsocketConn) writeRequest(content []byte) error {
 	var (
 		earlyData []byte
 		lateData  []byte
-		conn      *WebsocketConn
-		err       error
 	)
 	if len(content) > int(c.maxEarlyData) {
 		earlyData = content[:c.maxEarlyData]
@@ -159,20 +155,18 @@ func (c *EarlyWebsocketConn) writeRequest(content []byte) error {
 	} else {
 		earlyData = content
 	}
+	requestURL := c.requestURL
+	headers := c.headers
 	if len(earlyData) > 0 {
 		earlyDataString := base64.RawURLEncoding.EncodeToString(earlyData)
 		if c.earlyDataHeaderName == "" {
-			requestURL := c.requestURL
 			requestURL.Path += earlyDataString
-			conn, err = c.upgrade(c.rawConn, &requestURL, c.headers)
 		} else {
-			headers := c.headers.Clone()
+			headers = headers.Clone()
 			headers.Set(c.earlyDataHeaderName, earlyDataString)
-			conn, err = c.upgrade(c.rawConn, &c.requestURL, headers)
 		}
-	} else {
-		conn, err = c.upgrade(c.rawConn, &c.requestURL, c.headers)
 	}
+	conn, err := c.upgrade(context.Background(), c.rawConn, &requestURL, headers)
 	if err != nil {
 		return err
 	}
@@ -218,6 +212,7 @@ func (c *EarlyWebsocketConn) WriteBuffer(buffer *buf.Buffer) error {
 	c.access.Lock()
 	defer c.access.Unlock()
 	if c.err != nil {
+		buffer.Release()
 		return c.err
 	}
 	conn = c.conn.Load()
@@ -225,6 +220,7 @@ func (c *EarlyWebsocketConn) WriteBuffer(buffer *buf.Buffer) error {
 		return wrapWsError(conn.WriteBuffer(buffer))
 	}
 	err := c.writeRequest(buffer.Bytes())
+	buffer.Release()
 	c.err = err
 	close(c.create)
 	return err
@@ -274,16 +270,25 @@ func (c *EarlyWebsocketConn) Upstream() any {
 	return common.PtrOrNil(c.conn.Load())
 }
 
-func (c *EarlyWebsocketConn) LazyHeadroom() bool {
-	return c.conn.Load() == nil
+func (c *EarlyWebsocketConn) FrontHeadroom() int {
+	if c.conn.Load() != nil {
+		return 0
+	}
+	return ws.MaxHeaderSize + N.CalculateFrontHeadroom(c.rawConn)
+}
+
+func (c *EarlyWebsocketConn) RearHeadroom() int {
+	if c.conn.Load() != nil {
+		return 0
+	}
+	return N.CalculateRearHeadroom(c.rawConn)
 }
 
 func wrapWsError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var closedErr wsutil.ClosedError
-	if errors.As(err, &closedErr) {
+	if closedErr, ok := errors.AsType[wsutil.ClosedError](err); ok {
 		if closedErr.Code == ws.StatusNormalClosure || closedErr.Code == ws.StatusNoStatusRcvd {
 			err = io.EOF
 		}
@@ -297,3 +302,11 @@ func wrapWsError0[T any](value T, err error) (T, error) {
 	}
 	return value, wrapWsError(err)
 }
+
+var (
+	_ N.ExtendedWriter = (*WebsocketConn)(nil)
+	_ N.FrontHeadroom  = (*WebsocketConn)(nil)
+	_ N.ExtendedWriter = (*EarlyWebsocketConn)(nil)
+	_ N.FrontHeadroom  = (*EarlyWebsocketConn)(nil)
+	_ N.RearHeadroom   = (*EarlyWebsocketConn)(nil)
+)

@@ -1,12 +1,12 @@
 package mux
 
 import (
+	"cmp"
 	"context"
 	"net"
 	"sync"
 	"sync/atomic"
 
-	"github.com/hashicorp/yamux"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -14,6 +14,8 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/x/list"
+
+	"github.com/hashicorp/yamux"
 )
 
 type Client struct {
@@ -34,6 +36,25 @@ type clientSession struct {
 	abstractSession
 	element *list.Element[*clientSession]
 	streams int
+	ready   chan struct{}
+	err     error
+	cancel  context.CancelFunc
+}
+
+func (s *clientSession) IsClosed() bool {
+	return s.abstractSession != nil && s.abstractSession.IsClosed()
+}
+
+func (s *clientSession) CanTakeNewRequest() bool {
+	return s.abstractSession == nil || s.abstractSession.CanTakeNewRequest()
+}
+
+func (s *clientSession) Close() error {
+	if s.abstractSession == nil {
+		s.cancel()
+		return nil
+	}
+	return s.abstractSession.Close()
 }
 
 type keepSessionKey struct{}
@@ -76,9 +97,6 @@ func NewClient(options Options) (*Client, error) {
 	}
 	if client.dialer == nil {
 		client.dialer = N.SystemDialer
-	}
-	if client.maxStreams == 0 && client.maxConnections == 0 {
-		client.minStreams = 8
 	}
 	switch options.Protocol {
 	case "", "h2mux":
@@ -133,6 +151,10 @@ func (c *Client) openStream(ctx context.Context) (net.Conn, error) {
 		err     error
 	)
 	for attempts := 0; attempts < 2; attempts++ {
+		err = ctx.Err()
+		if err != nil {
+			return nil, err
+		}
 		session, err = c.offer(ctx)
 		if err != nil {
 			continue
@@ -164,8 +186,6 @@ func (c *Client) openStream(ctx context.Context) (net.Conn, error) {
 
 func (c *Client) offer(ctx context.Context) (*clientSession, error) {
 	c.access.Lock()
-	defer c.access.Unlock()
-
 	var sessions []*clientSession
 	for element := c.connections.Front(); element != nil; {
 		if element.Value.IsClosed() {
@@ -181,13 +201,19 @@ func (c *Client) offer(ctx context.Context) (*clientSession, error) {
 	}
 	session := c.selectSession(sessions)
 	if session == nil {
-		var err error
-		session, err = c.offerNew(ctx)
-		if err != nil {
-			return nil, err
-		}
+		session = c.offerNew(ctx)
 	}
 	session.streams++
+	c.access.Unlock()
+	select {
+	case <-session.ready:
+	case <-ctx.Done():
+		c.releaseStream(session, keepSessionFromContext(ctx))
+		return nil, ctx.Err()
+	}
+	if session.err != nil {
+		return nil, session.err
+	}
 	return session, nil
 }
 
@@ -213,10 +239,8 @@ func (c *Client) selectSession(sessions []*clientSession) *clientSession {
 		if len(sessions) >= c.maxConnections || session.streams < c.minStreams {
 			return session
 		}
-	} else {
-		if c.maxStreams > 0 && session.streams < c.maxStreams {
-			return session
-		}
+	} else if session.streams < cmp.Or(c.maxStreams, c.minStreams, 8) {
+		return session
 	}
 	return nil
 }
@@ -236,9 +260,34 @@ func (c *Client) releaseStream(session *clientSession, keepSession bool) {
 	session.Close()
 }
 
-func (c *Client) offerNew(ctx context.Context) (*clientSession, error) {
-	ctx, cancel := context.WithTimeout(ctx, TCPTimeout)
-	defer cancel()
+func (c *Client) offerNew(ctx context.Context) *clientSession {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), TCPTimeout)
+	session := &clientSession{ready: make(chan struct{}), cancel: cancel}
+	session.element = c.connections.PushBack(session)
+	go func() {
+		muxSession, err := c.dialSession(ctx)
+		cancel()
+		c.access.Lock()
+		if session.element == nil {
+			if err == nil {
+				muxSession.Close()
+			}
+			session.err = net.ErrClosed
+		} else if err != nil {
+			c.connections.Remove(session.element)
+			session.element = nil
+			session.err = err
+		} else {
+			session.abstractSession = muxSession
+			session.cancel = nil
+		}
+		close(session.ready)
+		c.access.Unlock()
+	}()
+	return session
+}
+
+func (c *Client) dialSession(ctx context.Context) (abstractSession, error) {
 	conn, err := c.dialer.DialContext(ctx, N.NetworkTCP, Destination)
 	if err != nil {
 		return nil, err
@@ -263,19 +312,23 @@ func (c *Client) offerNew(ctx context.Context) (*clientSession, error) {
 		return nil, err
 	}
 	if c.brutal.Enabled {
-		err = c.brutalExchange(ctx, conn, session)
+		stopClose := context.AfterFunc(ctx, func() {
+			conn.Close()
+		})
+		err = c.brutalExchange(conn, session)
+		if !stopClose() {
+			err = ctx.Err()
+		}
 		if err != nil {
 			conn.Close()
 			session.Close()
 			return nil, E.Cause(err, "brutal exchange")
 		}
 	}
-	wrapped := &clientSession{abstractSession: session}
-	wrapped.element = c.connections.PushBack(wrapped)
-	return wrapped, nil
+	return session, nil
 }
 
-func (c *Client) brutalExchange(ctx context.Context, sessionConn net.Conn, session abstractSession) error {
+func (c *Client) brutalExchange(sessionConn net.Conn, session abstractSession) error {
 	stream, err := session.Open()
 	if err != nil {
 		return err

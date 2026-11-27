@@ -148,7 +148,7 @@ func TestForwardFragmentReplyRespectsRouteRetirement(t *testing.T) {
 	d.Flush()
 	parsed, ok := parseForwardPacket(pendingReceive(t, p.sent))
 	require.True(t, ok)
-	fragments, ok := fragmentIPv4Packet(header.IPv4(udpHistoryPacket(peer, parsed.source)), 28)
+	fragments, ok := fragmentIPv4Packet(header.IPv4(udpHistoryPacket(peer, parsed.source)), 28, 0)
 	require.True(t, ok)
 	require.Len(t, fragments, 2)
 	require.Empty(t, p.returns[0].ReturnPackets(fragments[:1]))
@@ -161,4 +161,65 @@ func TestForwardFragmentReplyRespectsRouteRetirement(t *testing.T) {
 		t.Fatal("a later fragment revived the canceled route")
 	default:
 	}
+}
+
+type routedTestPort struct {
+	*Go
+	sent chan []byte
+}
+
+func (p *routedTestPort) WritePackets(packets [][]byte) error {
+	for _, raw := range packets {
+		p.sent <- append([]byte(nil), raw...)
+	}
+	return nil
+}
+
+type paddedReturnWriter struct {
+	pendingWriteback
+}
+
+func (*paddedReturnWriter) ReturnHeadroom() int { return 12 }
+
+func TestRoutedPortReturnsToOriginatingStage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	host := NewForwardDispatcher(nil, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
+	t.Cleanup(host.Close)
+	hostStage := host.NewStage(nil)
+	port := &routedTestPort{
+		Go:   &Go{dispatcher: host, inet4Address: netip.MustParseAddr("192.0.2.10"), mtu: 1500},
+		sent: make(chan []byte, 4),
+	}
+	source := NewForwardDispatcher(udpHistoryHandler{port: port, lifetime: ctx}, udpHistoryWriteback{}, logger.NOP(), time.Minute, time.Minute)
+	t.Cleanup(source.Close)
+	source.NewStage(nil)
+	origin := &paddedReturnWriter{pendingWriteback{packets: make(chan []byte, 4)}}
+	stage := source.NewStage(origin)
+	client := netip.MustParseAddrPort("10.0.0.2:50000")
+	peer := netip.MustParseAddrPort("203.0.113.1:443")
+	require.True(t, stage.Dispatch(udpHistoryPacket(client, peer)))
+	stage.Flush()
+	forwarded, ok := parseForwardPacket(pendingReceive(t, port.sent))
+	require.True(t, ok)
+	require.Equal(t, client, forwarded.source)
+	reply := udpHistoryPacket(peer, forwarded.source)
+	parsed, ok := parseForwardPacket(reply)
+	require.True(t, ok)
+	require.True(t, hostStage.ReturnParsed(reply, ForwardFrameMeta{}, &parsed))
+	hostStage.Flush()
+	delivered := pendingReceive(t, origin.packets)
+	back, ok := parseForwardPacket(delivered[origin.ReturnHeadroom():])
+	require.True(t, ok)
+	require.Equal(t, client, back.destination)
+	require.Equal(t, peer, back.source)
+	cancel()
+	reply = udpHistoryPacket(peer, forwarded.source)
+	parsed, ok = parseForwardPacket(reply)
+	require.True(t, ok)
+	require.True(t, hostStage.ReturnParsed(reply, ForwardFrameMeta{}, &parsed))
+	hostStage.Flush()
+	require.Empty(t, origin.packets)
+	source.Close()
+	require.False(t, hostStage.ReturnParsed(reply, ForwardFrameMeta{}, &parsed))
 }

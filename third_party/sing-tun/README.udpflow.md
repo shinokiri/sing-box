@@ -1,7 +1,7 @@
 # Local sing-tun patches
 
-Upstream source: v0.9.7-0.20261023115453-611d83b7a57b, as required by
-sing-box v1.15.0-alpha.13 (824dbcfb4dd0a95921840b1737b950cde590241e).
+Upstream source: v0.9.7-0.20261126024559-1a13df1ac21f, as required by
+sing-box v1.15.0-alpha.14 (126ce6c21ddf10769fe793458d34ae3add575872).
 
 The fork retains bounded asynchronous first-flow routing, fixed DNS failure
 retry deadlines, writeback outside the flow-table lock, selector cancellation,
@@ -78,3 +78,9 @@ and tuple reuse. Other upstream package lookup, socket, monitor, and memory
 queue fixes are merged normally. Both main and test modules use the main
 release's sing and sing-tun pins; upstream's test pins name different snapshots.
 The automatic migration disagreement guard remains enabled.
+
+Alpha.14 routes packets between Go stacks while preserving the source address.
+Return traffic uses the originating worker's writeback, headroom and route
+lifetime. MTU handling and fragment tracking apply in both directions. The
+bounded, cancellable dispatcher still owns first-packet decisions. The core
+and test modules use the release's core sing-tun pin.
