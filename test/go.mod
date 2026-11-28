@@ -22,7 +22,7 @@ require (
 	github.com/gofrs/uuid/v5 v5.5.1
 	github.com/opencontainers/image-spec v1.1.0
 	github.com/sagernet/quic-go v0.66.0-sing-box-mod.1
-	github.com/sagernet/sing v0.9.7-0.20261125122036-9b11dbe28a7d
+	github.com/sagernet/sing v0.9.7-0.20261127131308-bbcd8ecc42a3
 	github.com/sagernet/sing-openvpn v0.1.1-0.20261125120933-28a40b4ceb1f
 	github.com/sagernet/sing-quic v0.7.2-0.20261126001928-6dfcdb4a5abf
 	github.com/sagernet/sing-shadowsocks v0.2.9-0.20260929204512-65740e0f0e3e
